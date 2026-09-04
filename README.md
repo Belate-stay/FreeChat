@@ -143,4 +143,4 @@ app/src/main/java/com/freechat/
 
 ## 📜 许可证
 
-<!-- TODO: 补充开源许可证 -->
+本项目采用 [MIT License](LICENSE) 开源，Copyright © 2026 [Belate-stay](https://github.com/Belate-stay)
