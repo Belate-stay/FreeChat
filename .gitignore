@@ -1,0 +1,11 @@
+*.hprof
+app/build/
+.gradle/
+local.properties
+node_modules/
+build/
+*.apk
+*.iml
+.idea/
+*.log
+secrets.properties

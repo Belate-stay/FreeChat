@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- AI 生成 / 用户上传的文档，存在外部私有目录 FreeChat/ 下，供 FileProvider 打开 -->
+    <external-files-path name="docs" path="FreeChat/" />
+    <files-path name="internal" path="." />
+</paths>
