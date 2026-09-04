@@ -11,7 +11,8 @@
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](https://github.com/Belate-stay/FreeChat)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://github.com/Belate-stay/FreeChat)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material3-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white)](https://github.com/Belate-stay/FreeChat)
-[![Version](https://img.shields.io/badge/Version-1.0.01-0A84FF?style=flat-square)](https://github.com/Belate-stay/FreeChat/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.18-0A84FF?style=flat-square)](https://github.com/Belate-stay/FreeChat/releases)
+[![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
 </div>
 
@@ -143,4 +144,4 @@ app/src/main/java/com/freechat/
 
 ## 📜 许可证
 
-本项目采用 [MIT License](LICENSE) 开源，Copyright © 2026 [Belate-stay](https://github.com/Belate-stay)
+本项目采用 [MIT License](LICENSE) 开源，Copyright © 2026 [Belate-stay](https://github.com/Belate-stay)。
