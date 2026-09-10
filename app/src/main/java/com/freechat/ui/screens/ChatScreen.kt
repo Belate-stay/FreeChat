@@ -13,6 +13,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -20,6 +21,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Create
@@ -30,6 +33,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -64,6 +68,7 @@ import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.LocalGlobalFontFamily
 import com.freechat.ui.theme.LocalLatinFontFamily
 import com.freechat.ui.theme.HazeSpec
+import com.freechat.ui.theme.frostedGlass
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.hazeEffect
@@ -96,6 +101,7 @@ fun ChatScreen(
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
     val advancedMaterial = LocalAdvancedMaterial.current
+    var showPlusMenu by remember { mutableStateOf(false) }
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val selectedModel by viewModel.selectedModel.collectAsState()
@@ -114,7 +120,13 @@ fun ChatScreen(
     val currentMode by viewModel.currentMode.collectAsState()
     val currentCharacter by viewModel.currentCharacter.collectAsState()
     val asrModel by viewModel.asrModel.collectAsState()
+    val scrollTick by viewModel.scrollRequestTick.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
     var showNoAsrDialog by remember { mutableStateOf(false) }
+    // 搜索跳转：目标消息高亮微闪 + 关键词标红
+    var highlightMsgId by remember { mutableStateOf<String?>(null) }
+    var highlightKeyword by remember { mutableStateOf<String?>(null) }
+    val flashAlpha = remember { Animatable(0f) }
 
     // 恢复到该对话上次的滚动位置（跨页面切换返回后不回顶部）
     val savedInitial = viewModel.currentConversationId.value?.let { viewModel.chatScrollPositions.value[it] }
@@ -125,6 +137,8 @@ fun ChatScreen(
     val greeting = remember(s.localeCode) { viewModel.generateGreeting(s) }
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    val config = LocalConfiguration.current
+    val screenHeightPx = with(density) { config.screenHeightDp.dp.toPx() }
 
     // 拟人模式：时间居中显示——首条消息与间隔 >5min 的消息前插入时间分割线
     val companionMode = currentMode == ChatMode.COMPANION
@@ -213,6 +227,12 @@ fun ChatScreen(
     }
 
     var prevConvId by remember { mutableStateOf<String?>(null) }
+    // 用户是否停在底部：AI 回复仅当用户本就停在底部才跟随滚到底，上翻阅读时不打断位置
+    val atBottom = remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.canScrollForward }
+            .collect { canScroll -> atBottom.value = !canScroll }
+    }
 
     LaunchedEffect(listState) {
         snapshotFlow {
@@ -228,21 +248,40 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(currentConvId, messages.size) {
+    LaunchedEffect(currentConvId, messages.size, scrollTick) {
         val isConvSwitch = currentConvId != prevConvId
         prevConvId = currentConvId
         inputHidden = false
         if (messages.isEmpty()) return@LaunchedEffect
 
         val lastDisplayIdx = displayItems.lastIndex
-        if (isConvSwitch) {
+        // 从搜索结果跳转：滚到目标消息（屏幕中上位置），随后微闪两下示意
+        val targetId = viewModel.pendingScrollTarget.value
+        if (targetId != null) {
+            val targetIndex = displayItems.indexOfFirst { it is MsgItem && it.msg.id == targetId }
+            if (targetIndex >= 0) {
+                val centerOffset = (screenHeightPx * 0.4f).roundToInt()
+                listState.scrollToItem(targetIndex, -centerOffset)
+                highlightMsgId = targetId
+                highlightKeyword = searchQuery.trim().ifBlank { null }
+                flashAlpha.snapTo(0f)
+                // 亮起 → 停一拍（让用户看清标红关键词）→ 淡出
+                flashAlpha.animateTo(1f, tween(200, easing = FastOutSlowInEasing))
+                delay(700)
+                flashAlpha.animateTo(0f, tween(520, easing = FastOutSlowInEasing))
+                highlightMsgId = null
+                highlightKeyword = null
+            }
+            viewModel.consumeScrollTarget()
+        } else if (isConvSwitch) {
             val saved = currentConvId?.let { viewModel.chatScrollPositions.value[it] }
             if (saved != null && saved.first in 0..lastDisplayIdx) {
                 listState.scrollToItem(saved.first, saved.second)
             } else {
                 listState.scrollToItem(lastDisplayIdx, 1_000_000)  // 首次进入默认到最新位置（底部）
             }
-        } else if (lastDisplayIdx >= 0) {
+        } else if (lastDisplayIdx >= 0 && atBottom.value) {
+            // 仅当用户本就停在底部时才跟随新消息滚到底；上翻阅读时不打断位置
             listState.scrollToItem(lastDisplayIdx, 1_000_000)
         }
     }
@@ -377,9 +416,34 @@ fun ChatScreen(
                             is TimeItem -> TimeDivider(item.timestamp)
                             else -> {
                                 val msgItem = item as MsgItem
+                                val isFlashTarget = msgItem.msg.id == highlightMsgId && flashAlpha.value > 0f
+                                val flashIsAi = msgItem.msg.role == com.freechat.model.Role.ASSISTANT
                                 ChatBubble(
                                     message = msgItem.msg,
                                     isDark = isDark,
+                                    highlightKeyword = if (isFlashTarget) highlightKeyword else null,
+                                    highlightColor = if (isFlashTarget && highlightKeyword != null)
+                                        colors.ErrorRed.copy(alpha = 0.95f * flashAlpha.value)
+                                    else null,
+                                    modifier = if (isFlashTarget) {
+                                        // AI 消息左侧、用户消息右侧：锚定侧深、向对侧渐浅，横向渐变顶满屏幕，适配主题色不突兀
+                                        val overhangPx = with(density) { 16.dp.toPx() }
+                                        val peak = if (advancedMaterial) 0.26f else 0.18f
+                                        val glow = colors.Primary.copy(alpha = peak * flashAlpha.value)
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .drawBehind {
+                                                val brush = if (flashIsAi)
+                                                    Brush.horizontalGradient(0f to glow, 0.8f to Color.Transparent)
+                                                else
+                                                    Brush.horizontalGradient(0.2f to Color.Transparent, 1f to glow)
+                                                drawRect(
+                                                    brush = brush,
+                                                    topLeft = Offset(-overhangPx, 0f),
+                                                    size = Size(size.width + overhangPx * 2f, size.height)
+                                                )
+                                            }
+                                    } else Modifier,
                                     isThinking = false,
                                     showThinking = showThinking,
                                     onDelete = {
@@ -395,6 +459,8 @@ fun ChatScreen(
                                     },
                                     onRegenerate = { viewModel.regenerate(msgItem.index) },
                                     onQuote = { viewModel.quoteMessage(msgItem.msg) },
+                                    onFavorite = { currentConvId?.let { viewModel.toggleFavorite(it, msgItem.msg.id) } },
+                                    isFavorited = msgItem.msg.favorited,
                                     onEdit = if (plotMode && msgItem.index == lastUserMessageIndex && msgItem.msg.role == com.freechat.model.Role.USER && msgItem.msg.content.isNotBlank()) {
                                         {
                                             editDraft = msgItem.msg.content
@@ -452,6 +518,10 @@ fun ChatScreen(
                             backgroundColor = Color.Transparent
                             progressive = HazeProgressive.verticalGradient(easing = LinearEasing, startY = 0f, startIntensity = 1f, endY = topBarHeightPx, endIntensity = 0f)
                         }
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { /* 隔离点击：顶部模糊区下的内容不可点 */ }
                 )
             } else {
                 Box(
@@ -518,6 +588,10 @@ fun ChatScreen(
                             backgroundColor = Color.Transparent
                             progressive = HazeProgressive.verticalGradient(easing = LinearEasing, startY = 0f, startIntensity = 0f, endY = bottomBarHeightPx, endIntensity = 1f)
                         }
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { /* 隔离点击：底部模糊区下的内容不可点 */ }
                 )
             }
 
@@ -530,6 +604,7 @@ fun ChatScreen(
                 onAddFile = if (currentMode == com.freechat.model.ChatMode.STANDARD) {
                     { filePicker.launch("*/*") }
                 } else null,
+                onPlusClick = { showPlusMenu = true },
                 pendingImages = pendingImages.map { it.path },
                 isAddingImages = isAddingImages,
                 onRemovePendingImage = { idx -> viewModel.removePendingImage(idx) },
@@ -564,6 +639,62 @@ fun ChatScreen(
                         if (h > 0f) inputBoxMaxPx = maxOf(h, with(density) { 88.dp.toPx() })
                     }
             )
+
+            // ===== "+" 附件菜单（窗口内悬浮，高级材质下真磨砂玻璃糊住背后聊天内容；缩放+淡入淡出，从输入框左上角弹出） =====
+            // 透明拦截层：点击外部关闭（淡入淡出）
+            AnimatedVisibility(
+                visible = showPlusMenu,
+                enter = fadeIn(tween(120)),
+                exit = fadeOut(tween(120))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { showPlusMenu = false }
+                )
+            }
+            AnimatedVisibility(
+                visible = showPlusMenu,
+                modifier = Modifier.align(Alignment.BottomStart),
+                enter = scaleIn(initialScale = 0.9f, transformOrigin = TransformOrigin(0f, 1f), animationSpec = tween(180, easing = FastOutSlowInEasing)) +
+                    fadeIn(tween(150)),
+                exit = scaleOut(targetScale = 0.92f, transformOrigin = TransformOrigin(0f, 1f), animationSpec = tween(140, easing = FastOutLinearInEasing)) +
+                    fadeOut(tween(120))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .padding(start = 20.dp, bottom = (chatKeyboardDp + 8.dp).coerceAtLeast(36.dp) + 60.dp)
+                        .width(180.dp)
+                        .then(
+                            if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, RoundedCornerShape(20.dp), elevation = 6.dp)
+                            else Modifier.background(colors.Surface, RoundedCornerShape(20.dp))
+                        )
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { showPlusMenu = false; imagePicker.launch("image/*") }.padding(horizontal = 16.dp, vertical = 13.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Filled.Image, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Text(s.uploadImage, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
+                        }
+                        if (currentMode == com.freechat.model.ChatMode.STANDARD) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { showPlusMenu = false; filePicker.launch("*/*") }.padding(horizontal = 16.dp, vertical = 13.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Filled.AttachFile, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Text(s.uploadFile, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
+                            }
+                        }
+                    }
+                }
+            }
 
             if (revealPhase > 0) {
                 Box(

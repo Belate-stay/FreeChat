@@ -72,6 +72,9 @@ import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.components.DrawerContent
 import com.freechat.model.ColorTheme
 import com.freechat.ui.screens.ChangelogScreen
+import com.freechat.ui.screens.FavoritesDetailScreen
+import com.freechat.ui.screens.FavoritesScreen
+import com.freechat.model.FavoriteItem
 import com.freechat.ui.screens.NewRulesScreen
 import com.freechat.ui.screens.NewChatModeScreen
 import com.freechat.ui.screens.CharacterSetupScreen
@@ -99,7 +102,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
-private enum class Screen { CHAT, SETTINGS, VOICE_DEBUG, CHANGELOG, NEW_RULES, NEW_CHAT_MODE, CHARACTER_SETUP, LEARNING, MODEL_EDITOR, AGREEMENT }
+private enum class Screen { CHAT, SETTINGS, VOICE_DEBUG, CHANGELOG, NEW_RULES, NEW_CHAT_MODE, CHARACTER_SETUP, LEARNING, MODEL_EDITOR, AGREEMENT, FAVORITES, FAVORITE_DETAIL }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -158,6 +161,8 @@ class MainActivity : ComponentActivity() {
             val currentConvId by chatViewModel.currentConversationId.collectAsState()
             val searchQuery by chatViewModel.searchQuery.collectAsState()
             val searchResults by chatViewModel.searchResults.collectAsState()
+            val favorites by chatViewModel.favorites.collectAsState()
+            val favoriteConvIds = remember(favorites) { favorites.map { it.conversation.id }.toSet() }
 
             val isDark = when (themeMode) {
                 ThemeMode.SYSTEM -> isSystemInDarkTheme()
@@ -171,6 +176,7 @@ class MainActivity : ComponentActivity() {
             var drawerOpen by remember { mutableStateOf(false) }
             var isDragging by remember { mutableStateOf(false) }
             var settingsRowBounds by remember { mutableStateOf<Rect?>(null) }
+            var favoritesRowBounds by remember { mutableStateOf<Rect?>(null) }
             var drawerNewChatRect by remember { mutableStateOf<Rect?>(null) }
 
             // ===== 页面切换动画状态 =====
@@ -209,6 +215,7 @@ class MainActivity : ComponentActivity() {
             var modelEditorType by remember { mutableStateOf<ModelType?>(null) }
             var modelEditorEditing by remember { mutableStateOf<ModelInfo?>(null) }
             var modelEditorFromChat by remember { mutableStateOf(false) }
+            var favoriteDetailItem by remember { mutableStateOf<FavoriteItem?>(null) }
 
             // 驱动动画 — 打开用 Spring，关闭用快速 Tween 消除后摇
             androidx.compose.runtime.LaunchedEffect(drawerOpen, isDragging) {
@@ -222,7 +229,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 返回键导航栈
-            BackHandler(enabled = currentScreen == Screen.SETTINGS || currentScreen == Screen.VOICE_DEBUG || currentScreen == Screen.CHANGELOG || currentScreen == Screen.NEW_RULES || currentScreen == Screen.NEW_CHAT_MODE || currentScreen == Screen.CHARACTER_SETUP || currentScreen == Screen.MODEL_EDITOR || currentScreen == Screen.AGREEMENT || drawerOpen) {
+            BackHandler(enabled = currentScreen == Screen.SETTINGS || currentScreen == Screen.VOICE_DEBUG || currentScreen == Screen.CHANGELOG || currentScreen == Screen.NEW_RULES || currentScreen == Screen.NEW_CHAT_MODE || currentScreen == Screen.CHARACTER_SETUP || currentScreen == Screen.MODEL_EDITOR || currentScreen == Screen.AGREEMENT || currentScreen == Screen.FAVORITES || currentScreen == Screen.FAVORITE_DETAIL || drawerOpen) {
                 when {
                     currentScreen == Screen.VOICE_DEBUG -> {
                         currentScreen = Screen.SETTINGS
@@ -247,6 +254,13 @@ class MainActivity : ComponentActivity() {
                     }
                     currentScreen == Screen.AGREEMENT -> {
                         currentScreen = Screen.SETTINGS
+                    }
+                    currentScreen == Screen.FAVORITE_DETAIL -> {
+                        currentScreen = Screen.FAVORITES
+                    }
+                    currentScreen == Screen.FAVORITES -> {
+                        currentScreen = Screen.CHAT
+                        drawerOpen = true
                     }
                     drawerOpen -> { drawerOpen = false }
                 }
@@ -389,6 +403,40 @@ class MainActivity : ComponentActivity() {
                                 Screen.AGREEMENT -> AgreementScreen(
                                     onBack = { currentScreen = Screen.SETTINGS }
                                 )
+                                Screen.FAVORITES -> FavoritesScreen(
+                                    viewModel = chatViewModel,
+                                    isDark = isDark,
+                                    onBack = {
+                                        currentScreen = Screen.CHAT
+                                        drawerOpen = true
+                                        pendingRevealScreen = null
+                                    },
+                                    onOpenDetail = { item ->
+                                        favoriteDetailItem = item
+                                        currentScreen = Screen.FAVORITE_DETAIL
+                                    }
+                                )
+                                Screen.FAVORITE_DETAIL -> {
+                                    val detailItem = favoriteDetailItem
+                                    if (detailItem != null) {
+                                        FavoritesDetailScreen(
+                                            viewModel = chatViewModel,
+                                            item = detailItem,
+                                            isDark = isDark,
+                                            onBack = { currentScreen = Screen.FAVORITES },
+                                            onUnfavorite = {
+                                                chatViewModel.toggleFavorite(detailItem.conversation.id, detailItem.message.id)
+                                                currentScreen = Screen.FAVORITES
+                                            },
+                                            onOpenOriginal = {
+                                                chatViewModel.switchToConversation(detailItem.conversation)
+                                                chatViewModel.requestScrollToMessage(detailItem.message.id)
+                                                currentScreen = Screen.CHAT
+                                                drawerOpen = false
+                                            }
+                                        )
+                                    }
+                                }
                                 Screen.NEW_RULES -> NewRulesScreen(
                                     viewModel = chatViewModel,
                                     convId = currentConvId ?: "",
@@ -423,6 +471,10 @@ class MainActivity : ComponentActivity() {
                                                 val enriched = chatViewModel.regeneratePersona(oldProfile, profile)
                                                 val remain = 1500L - (System.currentTimeMillis() - start)
                                                 if (remain > 0) kotlinx.coroutines.delay(remain)
+                                                // 人设学习失败提示（敏感内容被拒时 personaPrompt 为空）
+                                                if (enriched.personaPrompt.isBlank()) {
+                                                    android.widget.Toast.makeText(this@MainActivity, "角色学习未完成：设定可能含敏感内容，被模型拒绝", android.widget.Toast.LENGTH_LONG).show()
+                                                }
                                                 chatViewModel.updateCurrentCharacter(enriched)
                                                 currentScreen = Screen.CHAT
                                             }
@@ -432,7 +484,16 @@ class MainActivity : ComponentActivity() {
                                             currentScreen = Screen.LEARNING
                                             coroutineScope.launch {
                                                 val start = System.currentTimeMillis()
-                                                val enriched = chatViewModel.generatePersonaPrompt(profile)
+                                                val enriched = if (profile.personaPrompt.isNotBlank()) {
+                                                    // 导入的角色已带完整人设提示词：原样使用，不重新学习生成
+                                                    profile
+                                                } else {
+                                                    chatViewModel.generatePersonaPrompt(profile)
+                                                }
+                                                // 人设学习失败提示：设定含敏感内容被模型拒绝时 personaPrompt 为空，明确告知（不再静默降级）
+                                                if (enriched.personaPrompt.isBlank()) {
+                                                    android.widget.Toast.makeText(this@MainActivity, "角色学习未完成：设定可能含敏感内容，被模型拒绝", android.widget.Toast.LENGTH_LONG).show()
+                                                }
                                                 // 学习页至少停留 1.5s，避免一闪而过
                                                 val minLearnMs = 1500L
                                                 val remain = minLearnMs - (System.currentTimeMillis() - start)
@@ -544,6 +605,7 @@ class MainActivity : ComponentActivity() {
                         DrawerContent(
                             conversations = conversations, currentId = currentConvId, isDark = isDark,
                             searchQuery = searchQuery, searchResults = searchResults,
+                            favoriteConvIds = favoriteConvIds,
                             onSearchQueryChange = { chatViewModel.updateSearchQuery(it) },
                             onNewChat = {
                                 drawerOpen = false
@@ -552,6 +614,11 @@ class MainActivity : ComponentActivity() {
                             onSelectConversation = { conv ->
                                 chatViewModel.switchToConversation(conv); drawerOpen = false
                             },
+                            onSelectSearchResult = { conv, msgId ->
+                                chatViewModel.switchToConversation(conv)
+                                chatViewModel.requestScrollToMessage(msgId)
+                                drawerOpen = false
+                            },
                             onDeleteConversation = { conv -> chatViewModel.deleteConversation(conv) },
                             onRenameConversation = { conv, t -> chatViewModel.renameConversation(conv, t) },
                             onPinConversation = { conv -> chatViewModel.togglePinConversation(conv) },
@@ -559,7 +626,12 @@ class MainActivity : ComponentActivity() {
                                 drawerOpen = false
                                 pendingRevealScreen = Screen.SETTINGS
                             },
+                            onOpenFavorites = {
+                                drawerOpen = false
+                                pendingRevealScreen = Screen.FAVORITES
+                            },
                             onSettingsRowPositioned = { rect -> settingsRowBounds = rect },
+                            onFavoritesRowPositioned = { rect -> favoritesRowBounds = rect },
                             onNewChatRect = { rect -> drawerNewChatRect = rect }
                         )
                     }

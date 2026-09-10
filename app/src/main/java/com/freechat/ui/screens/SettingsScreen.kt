@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.freechat.BuildConfig
 import com.freechat.i18n.AppLanguage
 import com.freechat.i18n.AppStrings
 import com.freechat.i18n.LocalStrings
@@ -885,7 +886,7 @@ fun SettingsScreen(
                         ) {
                             Text(s.version, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Version 1.0.01", style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary)
+                                Text("Version ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary)
                                 Spacer(Modifier.width(2.dp))
                                 Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
                             }

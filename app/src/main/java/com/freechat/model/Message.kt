@@ -17,7 +17,15 @@ data class Message(
     val attachmentName: String? = null,   // 附件显示名（如「方案.pptx」）
     val quotedText: String? = null,       // 用户引用消息的文本内容（用于气泡内缩略显示，弱化处理）
     val quotedImagePath: String? = null,  // 用户引用消息的图片路径（引用图片时显示缩略图）
-    val mode: ChatMode = ChatMode.STANDARD  // 消息所处模式（历史消息按当时模式显示）
+    val mode: ChatMode = ChatMode.STANDARD,  // 消息所处模式（历史消息按当时模式显示）
+    val favorited: Boolean = false,  // 是否已收藏（收藏夹用）
+    val imageContext: String? = null  // 用户图片消息的识图结果（追问时注入，修复图片上下文断裂）
+)
+
+/** 收藏夹条目：一条被收藏的消息 + 它所属的对话（收藏夹按对话分类展示用） */
+data class FavoriteItem(
+    val conversation: Conversation,
+    val message: Message
 )
 
 enum class Role {

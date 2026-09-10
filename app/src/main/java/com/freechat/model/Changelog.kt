@@ -18,6 +18,32 @@ data class ChangelogEntry(
 object ChangelogData {
     val entries: List<ChangelogEntry> = listOf(
         ChangelogEntry(
+            version = "Version 1.0.18",
+            date = "2026-09-10",
+            sections = listOf(
+                ChangelogSection("新增功能", listOf(
+                    "新增 收藏系统，消息收藏后可统一查看。",
+                    "新增 角色设定可导入/导出，可一键分享角色或采用已配置的角色。",
+                    "新增 消息分享功能，可以jpg/Markdown的格式保存或分享。"
+                )),
+                ChangelogSection("体验优化", listOf(
+                    "优化 新标题命名逻辑",
+                    "优化 全拼输入的唤出条件",
+                    "优化 AI回复时聊天位置驻停",
+                    "优化 高质量检索回复下的角色理解力、AI推理能力以及记忆力，提升AI回复质量"
+                )),
+                ChangelogSection("渲染优化", listOf(
+                    "优化 表格内部纵向属性对齐，提升可读性。",
+                    "优化 统一高级材质下的视觉效果。"
+                )),
+                ChangelogSection("漏洞修补", listOf(
+                    "修复 高级材质下标题栏无隔挡的bug",
+                    "修复 URL路径自动配全导致路径失效的bug",
+                    "修复 部分场景下识图模型失效的bug"
+                ))
+            )
+        ),
+        ChangelogEntry(
             version = "Version 1.0.01",
             date = "2026-09-01",
             sections = listOf(

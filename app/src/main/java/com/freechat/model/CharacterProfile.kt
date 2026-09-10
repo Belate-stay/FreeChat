@@ -114,3 +114,54 @@ val RELATIONSHIP_PRESETS = listOf(
 )
 
 // 亲密度不再写死映射：初始值由 AI 在生成人设时结合关系描述灵活判断（见 ChatViewModel.assessInitialIntimacy）
+
+/**
+ * 角色导出文件：只含「人物设定」里的文字设定。
+ * 头像/形象参考图等本地文件、亲密度/关系阶段等运行时状态不导出；AI 生成的人设提示词 personaPrompt 随角色设定导出（导入后原样还原、不重新学习）。
+ */
+data class CharacterExport(
+    val version: Int = 1,
+    val name: String = "",
+    val gender: String = "",
+    val age: String = "",
+    val mbtiType: String = "",
+    val mbtiEI: Float = 0.5f,
+    val mbtiNS: Float = 0.5f,
+    val mbtiTF: Float = 0.5f,
+    val mbtiPJ: Float = 0.5f,
+    val personalityPresets: List<String> = emptyList(),
+    val personalityText: String = "",
+    val memoryPerception: String = "",
+    val appearanceText: String = "",
+    val relationshipPreset: String = "",
+    val relationshipText: String = "",
+    val openingLines: List<String> = emptyList(),
+    val personaPrompt: String = ""
+) {
+    fun toProfile(): CharacterProfile = CharacterProfile(
+        name = name, gender = gender, age = age,
+        mbtiType = mbtiType, mbtiEI = mbtiEI, mbtiNS = mbtiNS, mbtiTF = mbtiTF, mbtiPJ = mbtiPJ,
+        personalityPresets = personalityPresets,
+        personalityText = personalityText,
+        memoryPerception = memoryPerception,
+        appearanceText = appearanceText,
+        relationshipPreset = relationshipPreset,
+        relationshipText = relationshipText,
+        openingLines = openingLines,
+        personaPrompt = personaPrompt
+    )
+}
+
+/** 从角色档案导出「人物设定」文字设定 */
+fun CharacterProfile.toExport(): CharacterExport = CharacterExport(
+    name = name, gender = gender, age = age,
+    mbtiType = mbtiType, mbtiEI = mbtiEI, mbtiNS = mbtiNS, mbtiTF = mbtiTF, mbtiPJ = mbtiPJ,
+    personalityPresets = personalityPresets,
+    personalityText = personalityText,
+    memoryPerception = memoryPerception,
+    appearanceText = appearanceText,
+    relationshipPreset = relationshipPreset,
+    relationshipText = relationshipText,
+    openingLines = openingLines,
+    personaPrompt = personaPrompt
+)

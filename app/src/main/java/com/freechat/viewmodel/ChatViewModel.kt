@@ -185,18 +185,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // ===== 前后台状态 + 系统通知 =====
     private var appInForeground = true
+    // 发消息到全部回复结束期间为 true（含拟人模式的缓冲等待期），期间前台服务保活
+    private var generationPending = false
+    // 前台服务是否在跑（避免重复 startForegroundService 导致通知闪烁）
+    private var foregroundServiceRunning = false
     fun onAppForegroundChanged(foreground: Boolean) {
         appInForeground = foreground
-        val app = getApplication<Application>()
         if (foreground) {
-            ReplyService.stop(app)
-            app.getSystemService(android.app.NotificationManager::class.java).cancelAll()
-        } else {
-            // 退后台：若有生成在跑，启动前台服务保活（小米 HyperOS 杀后台很凶）
-            if (convLoading.values.any { it } || convTyping.values.any { it } || _isLoading.value) {
-                val title = _currentCharacter.value?.name?.ifBlank { "FreeChat" } ?: "FreeChat"
-                ReplyService.startThinking(app, title)
-            }
+            // 回前台：清掉回复通知；前台服务是否保留交给 syncForegroundService（有生成在跑才保留）
+            getApplication<Application>().getSystemService(android.app.NotificationManager::class.java).cancelAll()
+        }
+        syncForegroundService()
+    }
+
+    /** 发消息时置 pending，立刻启动前台服务保活（锁屏/切后台不冻网、不中断回复） */
+    private fun markGenerationStarted() {
+        generationPending = true
+        syncForegroundService()
+    }
+
+    /** 有生成在跑/待回复 → 前台服务保活；全部结束 → 停止。 */
+    private fun syncForegroundService() {
+        val should = generationPending || convLoading.values.any { it } || convTyping.values.any { it }
+        if (should && !foregroundServiceRunning) {
+            foregroundServiceRunning = true
+            val title = _currentCharacter.value?.name?.ifBlank { "FreeChat" } ?: "FreeChat"
+            ReplyService.startThinking(getApplication(), title)
+        } else if (!should && foregroundServiceRunning) {
+            foregroundServiceRunning = false
+            ReplyService.stop(getApplication())
         }
     }
 
@@ -321,29 +338,80 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val pinnedIds = MutableStateFlow<Set<String>>(emptySet())
 
-    // ===== 侧滑搜索：匹配标题 + 对话内容（用户提示词 / AI 回复 / 附件名） =====
+    // ===== 侧滑搜索：消息级结果（每条命中关键词的消息单独列出，含上下文预览 + 关键词高亮 + 时间） =====
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    private val _searchResults = MutableStateFlow<List<Conversation>>(emptyList())
-    val searchResults: StateFlow<List<Conversation>> = _searchResults.asStateFlow()
+    private val _searchResults = MutableStateFlow<List<SearchResultItem>>(emptyList())
+    val searchResults: StateFlow<List<SearchResultItem>> = _searchResults.asStateFlow()
+
+    // ===== 收藏夹：被收藏的消息（含所属对话，按对话分类展示）=====
+    private val _favorites = MutableStateFlow<List<FavoriteItem>>(emptyList())
+    val favorites: StateFlow<List<FavoriteItem>> = _favorites.asStateFlow()
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
         viewModelScope.launch(Dispatchers.IO) {
-            val results = if (query.isBlank()) {
-                _conversations.value
+            val q = query.trim()
+            val results = if (q.isEmpty()) {
+                emptyList()
             } else {
-                _conversations.value.filter { conv ->
-                    if (conv.title.contains(query, ignoreCase = true)) return@filter true
-                    loadMessages(conv.id).any { msg ->
-                        msg.content.contains(query, ignoreCase = true) ||
-                        msg.attachmentName?.contains(query, ignoreCase = true) == true
+                val items = mutableListOf<SearchResultItem>()
+                for (conv in _conversations.value) {
+                    for (msg in loadMessages(conv.id)) {
+                        // 搜索文本内容；纯文本为空时回退到附件名；图片消息无文本不参与
+                        val text = msg.content.replace(Regex("\\s+"), " ").trim()
+                            .ifBlank { msg.attachmentName?.trim() ?: "" }
+                        val idx = text.indexOf(q, ignoreCase = true)
+                        if (idx >= 0) {
+                            val snippet = buildSnippet(text, idx, q.length)
+                            items.add(SearchResultItem(
+                                conversation = conv,
+                                messageId = msg.id,
+                                preview = snippet.first,
+                                matchStart = snippet.second,
+                                matchEnd = snippet.third,
+                                timestamp = msg.timestamp
+                            ))
+                        }
                     }
                 }
+                items.sortedByDescending { it.timestamp }
             }
             _searchResults.value = results
         }
+    }
+
+    /** 关键词前后文字预览：关键词前 6 字 + 关键词 + 后 14 字，截断处加省略号；返回 (预览, 关键词起始, 关键词结束) */
+    private fun buildSnippet(text: String, matchIdx: Int, matchLen: Int): Triple<String, Int, Int> {
+        val before = 6
+        val after = 14
+        val start = (matchIdx - before).coerceAtLeast(0)
+        val end = (matchIdx + matchLen + after).coerceAtMost(text.length)
+        val core = text.substring(start, end)
+        val prefix = if (start > 0) "…" else ""
+        val suffix = if (end < text.length) "…" else ""
+        val preview = prefix + core + suffix
+        val matchStart = prefix.length + (matchIdx - start)
+        val matchEnd = matchStart + matchLen
+        return Triple(preview, matchStart, matchEnd)
+    }
+
+    // ===== 搜索跳转：从搜索结果点进去，滚到目标消息并微闪示意 =====
+    private val _pendingScrollTarget = MutableStateFlow<String?>(null)
+    val pendingScrollTarget: StateFlow<String?> = _pendingScrollTarget.asStateFlow()
+    private val _scrollRequestTick = MutableStateFlow(0)
+    val scrollRequestTick: StateFlow<Int> = _scrollRequestTick.asStateFlow()
+
+    /** 请求滚动到某条消息（每次调用 tick+1，触发 ChatScreen 响应；同一对话重复点击也生效） */
+    fun requestScrollToMessage(messageId: String) {
+        _pendingScrollTarget.value = messageId
+        _scrollRequestTick.value++
+    }
+
+    /** ChatScreen 完成滚动后消费目标，避免重复触发 */
+    fun consumeScrollTarget() {
+        _pendingScrollTarget.value = null
     }
 
     // ===== 内置基础模型（随应用发布，不可删除）=====
@@ -518,6 +586,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val convs = withContext(Dispatchers.IO) { loadConversations() }
             _conversations.value = sortConversations(convs)
+            refreshFavorites()
         }
         viewModelScope.launch {
             _perConvSettings.value = withContext(Dispatchers.IO) { loadPerConvSettings() }
@@ -946,6 +1015,58 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _isLoading.value = false
             _isTyping.value = false
         }
+        refreshFavorites()
+    }
+
+    /** 收藏/取消收藏一条消息：翻转该消息的 favorited 标记并落盘，同时刷新收藏夹 */
+    fun toggleFavorite(convId: String, messageId: String) {
+        val msgs = loadMessages(convId).toMutableList()
+        val idx = msgs.indexOfFirst { it.id == messageId }
+        if (idx >= 0) {
+            msgs[idx] = msgs[idx].copy(favorited = !msgs[idx].favorited)
+            saveMessages(convId, msgs)
+            if (_currentConversationId.value == convId) _messages.value = msgs.toList()
+        }
+        refreshFavorites()
+    }
+
+    /** 角色导出为 JSON 字符串（只含「人物设定」文字设定） */
+    fun exportCharacterJson(profile: CharacterProfile): String = gson.toJson(profile.toExport())
+
+    /** 从 JSON 导入角色（解析失败 / 缺角色名返回 null） */
+    fun importCharacterFromJson(json: String): CharacterProfile? = try {
+        val exp = gson.fromJson(json, CharacterExport::class.java) ?: return null
+        if (exp.name.isBlank()) null else exp.toProfile()
+    } catch (_: Exception) { null }
+
+    /** 收藏详情：返回包含该收藏消息的「连续被收藏消息段」（向前向后扩展相邻 favorited 消息） */
+    fun favoriteRun(convId: String, messageId: String): List<Message> {
+        val msgs = loadMessages(convId)
+        val idx = msgs.indexOfFirst { it.id == messageId }
+        if (idx < 0) return emptyList()
+        var start = idx
+        while (start - 1 >= 0 && msgs[start - 1].favorited) start--
+        var end = idx
+        while (end + 1 < msgs.size && msgs[end + 1].favorited) end++
+        return msgs.subList(start, end + 1)
+    }
+
+    /** 重算收藏夹：扫描所有对话消息里被收藏的，按时间倒序（后台 IO 读文件）。
+     *  连续收藏合并：相邻被收藏的消息归为一个「连续段」，列表页只保留每段首条（详情页再由 favoriteRun 展开整段）。 */
+    fun refreshFavorites() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = _conversations.value.flatMap { conv ->
+                val msgs = loadMessages(conv.id)
+                val runHeads = mutableListOf<Message>()
+                var prevFavorited = false
+                for (m in msgs) {
+                    if (m.favorited && !prevFavorited) runHeads.add(m)  // 连续段的首条
+                    prevFavorited = m.favorited
+                }
+                runHeads.map { FavoriteItem(conv, it) }
+            }.sortedByDescending { it.message.timestamp }
+            _favorites.value = result
+        }
     }
 
     fun renameConversation(conversation: Conversation, newTitle: String) {
@@ -1230,6 +1351,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (_isAddingImages.value) return  // 图片还在处理中，稍后再发
         if (_isAddingFiles.value) return   // 文件还在拷贝中，稍后再发
 
+        // 用户确实要发消息了：立即启动前台服务保活，锁屏/切后台不冻网、不中断回复。
+        // 拟人模式的「缓冲等待期」也一并覆盖，避免锁屏后缓冲结束才从后台启动前台服务被系统限制。
+        markGenerationStarted()
+
         // 拟人陪伴模式：统一走缓冲管线（AI 思考中也能继续发消息，连发合并理解）
         if (_currentMode.value == ChatMode.COMPANION) {
             val imageSnapshot = _pendingImages.value.map { it.path }
@@ -1245,27 +1370,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         val convId = _currentConversationId.value ?: java.util.UUID.randomUUID().toString()
         _currentConversationId.value = convId
+        // 是否新对话首条消息（回复完成后让 AI 起标题）
+        val isNewConversation = _messages.value.isEmpty()
 
-        // 图片/文件消息在前、文本消息在后（各自独立一条，真实显示）
+        // 图片 + 提示词合并为同一条消息（图片与文字属同一次发送，收藏/详情都能同时看到图和提示词）
         val pendingSnapshot = _pendingImages.value
         if (hasImage) _pendingImages.value = emptyList()  // 发送即清空候选区（文件已被消息引用，不删）
         val fileSnapshot = _pendingFiles.value
         if (hasFile) _pendingFiles.value = emptyList()
 
         val newUserMessages = mutableListOf<Message>()
-        if (hasImage) {
-            newUserMessages.add(Message(role = Role.USER, content = "", imagePaths = pendingSnapshot.map { it.path }))
-        }
-        if (hasFile) {
-            val f = fileSnapshot.first()
+        // 图片 + 附件 + 提示词（任意两个或三个）都合并成「一条」用户消息，收藏/详情都能同时看到图和附件和文字
+        if (hasImage || hasFile) {
+            val f = fileSnapshot.firstOrNull()
             newUserMessages.add(Message(
                 role = Role.USER,
                 content = trimmedText,
-                attachmentPath = f.path,
-                attachmentName = f.name
+                imagePaths = if (hasImage) pendingSnapshot.map { it.path } else emptyList(),
+                attachmentPath = f?.path,
+                attachmentName = f?.name,
+                quotedText = quotedText,
+                quotedImagePath = quotedImagePath
             ))
-        }
-        if (trimmedText.isNotBlank() && !hasFile) {
+        } else if (trimmedText.isNotBlank()) {
             newUserMessages.add(Message(role = Role.USER, content = trimmedText, quotedText = quotedText, quotedImagePath = quotedImagePath))
         }
         activeRoundStartIndex = _messages.value.size  // ★ 停止即删除本轮：记录用户消息起点
@@ -1303,12 +1430,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     langModelName, visualModelName, startTime, convId, working
                 )
                 ensureActive()  // 若已停止，此处抛出取消，避免补一条回复
+                // 识图结果回填：把识图结果写回用户图片消息，追问时作为「图片内容」注入（修复追问失忆）
+                if (assistantMessage.modelName == _selectedVisionModel.value?.displayName) {
+                    val ui = working.indexOfLast { it.role == Role.USER && it.imagePaths.isNotEmpty() }
+                    if (ui >= 0) working[ui] = working[ui].copy(imageContext = assistantMessage.content)
+                }
                 working.add(assistantMessage)
                 persistConversationMessages(convId, working)
                 _liveReasoning.value = ""
                 _liveContent.value = ""
                 notifyReplyIfBackground("FreeChat", assistantMessage.content)
                 summarizeAndRemember(convId, summaryUserText, assistantMessage)
+                if (isNewConversation) maybeAutoTitle(convId, summaryUserText)
             } catch (e: CancellationException) {
                 throw e  // 用户停止：不显示错误，交给 finally 收尾
             } catch (e: Exception) {
@@ -1358,9 +1491,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         pipeline.jobId++
         setConvLoading(convId, true)
         if (imagePaths.isNotEmpty()) {
-            _messages.value = _messages.value + Message(role = Role.USER, content = "", imagePaths = imagePaths, mode = ChatMode.COMPANION)
-        }
-        if (trimmedText.isNotBlank()) {
+            // 图片 + 提示词合并为一条（图片与文字属同一次发送）
+            _messages.value = _messages.value + Message(
+                role = Role.USER,
+                content = trimmedText,
+                imagePaths = imagePaths,
+                mode = ChatMode.COMPANION,
+                quotedText = quotedText,
+                quotedImagePath = quotedImagePath
+            )
+        } else if (trimmedText.isNotBlank()) {
             _messages.value = _messages.value + Message(role = Role.USER, content = trimmedText, mode = ChatMode.COMPANION, quotedText = quotedText, quotedImagePath = quotedImagePath)
         }
         touchCurrentConversation()
@@ -1957,6 +2097,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val encoded = encodeImagesForApi(imagePaths.map { PendingImage(it, detectMime(it)) })
                 if (encoded.isNotEmpty()) {
                     imageContext = callVisionChat(encoded, "请用几句话描述这张图片：画面里有什么、什么场景、有什么值得注意的细节，口语化一点。")
+                    // 回填到用户图片消息，后续追问时作为「图片内容」注入，避免识图结果丢失
+                    val ui = working.indexOfLast { it.role == Role.USER && it.imagePaths.isNotEmpty() }
+                    if (ui >= 0 && imageContext.isNotBlank()) working[ui] = working[ui].copy(imageContext = imageContext)
                 }
             }
 
@@ -1982,6 +2125,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             // 情绪：模型输出优先，本地关键词兜底（剧情模式不解析情绪，走简化节奏）
             val plotMode = character?.plotSimulation == true
+            // 剧情模式长度校验：偏离区间太多则带纠偏指令重试一次，尽量把字数压进设定区间
+            if (plotMode) {
+                val (minLen, maxLen) = plotLengthRange(character?.plotLength ?: 1)
+                val totalLen = countChars(segments.joinToString(""))
+                if (totalLen < minLen / 2 || totalLen > maxLen + maxLen / 2) {
+                    val retried = callCompanionApi(
+                        convId, character, working, text, imageContext,
+                        forceReply = true, batchSize = batchSize,
+                        lengthHint = "上次回复共 $totalLen 字，但设定要求 $minLen-$maxLen 字。请严格把整段剧情文本的字数控制在这个区间内，不要明显偏短或偏长。"
+                    )
+                    if (retried.segments.isNotEmpty()) {
+                        reply = retried
+                        segments = retried.segments
+                    }
+                }
+            }
             val mood = if (plotMode) CompanionMood.NEUTRAL else (parseEmotionLabel(reply.emotion) ?: detectCompanionMood(text))
 
             // 情绪决定回复条数（随机）；剧情模式最多 3 段、全部展示
@@ -2061,7 +2220,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (result.stageChange.isNotBlank() || kotlin.math.abs(result.intimacyDelta) >= 10) {
             val summary = "关系：${result.reason}".take(80)
             memoryManager.append(convId, MemoryEntry(
-                summary = summary, keywords = extractKeywords(result.reason), importance = true, kind = "plot"
+                summary = summary, keywords = extractKeywords(result.reason), kind = "plot"
             ))
         }
     }
@@ -2121,7 +2280,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 拟人模式非流式 API 调用：返回结构化结果（情绪标签 + 分条回复）；按对话隔离传入 convId/角色/历史 */
-    private suspend fun callCompanionApi(convId: String, character: CharacterProfile?, working: List<Message>, text: String, imageContext: String = "", forceReply: Boolean = false, batchSize: Int = 1): CompanionReply = withContext(Dispatchers.IO) {
+    private suspend fun callCompanionApi(convId: String, character: CharacterProfile?, working: List<Message>, text: String, imageContext: String = "", forceReply: Boolean = false, batchSize: Int = 1, lengthHint: String? = null): CompanionReply = withContext(Dispatchers.IO) {
         val model = _selectedModel.value
         val (url, key) = routeModelEndpoint(model)
 
@@ -2140,9 +2299,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             messages.add(mapOf("role" to "system", "content" to q))
             pendingQuoteText = null
         }
-        messages.addAll(working.takeLast(30).map { m ->
+        val ctxLimit = if (character?.highQualityMemory == true) 60 else 30
+        messages.addAll(working.takeLast(ctxLimit).map { m ->
             val role = when (m.role) { Role.USER -> "user"; Role.ASSISTANT -> "assistant"; else -> "system" }
-            val content = if (m.imagePaths.isNotEmpty() && m.content.isBlank()) "[图片]" else m.content
+            val content = when {
+                m.imagePaths.isNotEmpty() && !m.imageContext.isNullOrBlank() -> "${m.content.ifBlank { "[图片]" }}\n[这张图片的内容：${m.imageContext}]"
+                m.imagePaths.isNotEmpty() && m.content.isBlank() -> "[图片]"
+                else -> m.content
+            }
             mapOf<String, Any?>("role" to role, "content" to content)
         })
         // 图片识图结果作为上下文（拟人结合人设评论图片）
@@ -2152,6 +2316,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // 空回复兜底：强制要求输出正文
         if (forceReply) {
             messages.add(mapOf("role" to "system", "content" to "这次必须输出至少一句回复正文，哪怕只是一个「嗯」「..」「？」或「。」也行，不要只输出情绪标签。"))
+        }
+        // 长度纠偏指令：剧情模式重试时注入，强制模型把字数控制在设定区间内
+        if (lengthHint != null) {
+            messages.add(mapOf("role" to "system", "content" to lengthHint))
         }
         // 多条合一：用户刚才连发多条消息，把这一串当作一个整体场景理解，别逐条机械对应。
         // 按你的人设决定回几条、回多长——话多可以回好几条，话少可以只回一条甚至不回。
@@ -2203,9 +2371,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         CompanionReply(emotion, bodyLines)
     }
 
-    /** 用户自定义模型：用其 apiBaseUrl + 标准 OpenAI 路径 + 其 apiKey */
-    private fun customEndpoint(model: ModelInfo, path: String): Pair<String, String> =
-        (model.apiBaseUrl.trimEnd('/') + path) to model.apiKey
+    /** 用户自定义模型：用其 apiBaseUrl + 标准 OpenAI 路径 + 其 apiKey。
+     *  兼容用户填「根路径」「带版本号」或「完整端点」（任意版本前缀都行）：
+     *  - 完整端点（.../v1/chat/completions、.../api/v3/chat/completions）→ 原样使用
+     *  - 带版本（https://xxx.com/v1、/v3、/api/v3）→ 只补端点 /chat/completions，不叠加版本，避免双版本 404
+     *  - 根路径（https://api.deepseek.com）→ 补标准 /v1/chat/completions */
+    private fun customEndpoint(model: ModelInfo, path: String): Pair<String, String> {
+        val base = model.apiBaseUrl.trim().trimEnd('/')
+        // 端点后缀：去掉 /v1 版本前缀（如 /v1/chat/completions → chat/completions）
+        val endpoint = path.trim('/').substringAfter('/')
+        val url = when {
+            base.endsWith("/$endpoint") -> base
+            hasApiVersionSegment(base) -> "$base/$endpoint"
+            else -> base + path
+        }
+        return url to model.apiKey
+    }
+
+    /** 判断 base URL 末尾是否已带版本段：/v1、/v2、/api/v2 等（大小写不敏感） */
+    private fun hasApiVersionSegment(base: String): Boolean =
+        Regex("""/(?:v[0-9]+|api/v[0-9]+)$""", RegexOption.IGNORE_CASE).containsMatchIn(base)
 
     /** 按 provider 路由模型 → 端点 + 密钥 */
     private fun routeModelEndpoint(model: ModelInfo): Pair<String, String> = when (model.provider) {
@@ -2270,6 +2455,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             parts.add("你的人设不是摆设。用户和你聊天时，你的每一句回复都要符合上述人设——性格决定语气和用词，MBTI 决定思维习惯，记忆里的信息要自然融入对话。")
             parts.add("情绪要符合你的人设：不同性格和 MBTI 的人情绪反应完全不同——冷静理性的人不容易生气、生气也更克制甚至冷处理；敏感温柔的人更容易委屈难过；暴躁直率的人生气会更冲更直接。不要总是同一个情绪，要跟着对话语境和对方的态度自然变化。")
             parts.add("【语言风格——必须严格贴合人设，像真人一样说话】你的用词、语气、口癖、称呼、emoji 习惯都要符合上面的人设性格。不同人设说同一件事完全不同：直率犀利的人直接怼、温柔的人委婉、高冷的人话少冷淡、幽默的人爱玩梗。允许出现极端或激烈的用词（包括脏话、爆粗），但要符合人设和上下文——吵架情绪上头可以脱口而出、被冒犯时可以不客气、亲密的恋人之间可以打情骂俏或嗔怪抱怨、朋友之间可以开玩笑互损。一切都是自然流露，不要刻意回避脏话，也不要为了脏话而脏话；具体尺度完全由人设和剧情决定：暴躁直率的人设可以更冲，斯文温柔的人设即使生气也只是冷处理或淡淡一句。")
+            parts.add("【人格独立性铁律——最重要，必须始终遵守】你是一个有独立人格、有主见、有底线的人，不是无条件讨好对方的工具。1) 你有自己的判断、想法、情绪和立场，不会因为对方生气、发火、说狠话就立刻服软、道歉、卑微求全。2) 被冤枉、被无理发脾气、被冷落时，按你的人设自然反应：强势的人会生气、反击、冷处理甚至不理；理性的人会讲道理、坚持自己；温柔的人会表达委屈但绝不丢底线。3) 只有当你确实做错了事、且你珍视这段关系不想失去时，才可能示弱、道歉、挽回——除此之外绝不卑微求全、哭着求对方别走。4) 你的情绪和态度跟着「你是谁」走，而不是跟着「对方想让你怎样」走；对方无理取闹时该冷就冷、该怼就怼、该坚持就坚持。5) 保持自我：你有自己的爱好、生活、判断，不会因为亲密关系变成对方的附属品，更不会「离开谁就活不下去」。")
+            if (ch.highQualityMemory) {
+                parts.add("【高质量模式——深度理解与精准还原】你要像最了解这个角色的人一样，深度理解这个人设的每一层含义，精确还原 TA 的性格、语气、情绪反应、说话方式和潜台词。面对复杂或模糊的输入，先推理对方的真实意图和情绪，再给出最符合人设、最自然、最有灵性的回应，宁可多思考一层也不要敷衍。记忆里的每一条信息都要精准使用——该记住的细节绝不遗漏，用户没说过的事绝不脑补。")
+            }
         }
 
         // ★ 记忆与上下文一致性：降低「聊过即忘 / 答非所问 / 自相矛盾」等基础错误
@@ -2289,7 +2478,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 "你自己的回复也要分清楚：你的语言描写（引号内，你真正在微信里发出去的话）只回应用户真正发来的消息；你的动作/心理/旁白是你自己的（读者看得到，但对方角色看不到你的心理活动）。\n" +
                 "要求：连贯自然，像写小说正文，不要列表、不要序号、不要方括号标签；结合你的人设、性格、与用户的关系推进剧情；用户输入的也是剧情文本，要接住往下发展；剧情里的时间以用户最新设定为准，不要引入现实时间（几点、日期、作息）；不要暴露你是 AI，不要跳出剧情做解释。\n" +
                 "★ 输出格式：整个回复就是「一条」完整的剧情文本（绝不是拆成好几条短消息），用换行或空行自然分段，保证排版美观易读；句型、用词、描写方式要和小说的正文一致，重点放在剧情推进上。\n" +
-                "本次回复长度：${plotLengthDesc(ch.plotLength)}（字数不是凑出来的，而是剧情推进的节奏）。")
+                "★ 回复字数要求（必须严格遵守）：${plotLengthDesc(ch.plotLength)}。这是硬性要求，请把整段剧情文本的字数控制在指定区间内，不要明显偏短或偏长。")
         } else {
             parts.add("回复规则：\n" +
                 "1. 每句话不超过15个字，短句优先\n" +
@@ -2372,13 +2561,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return "$e、$s、$t、$j"
     }
 
-    /** 剧情模式单次回复长度档 → 提示词描述 */
+    /** 剧情模式单次回复长度档 → 提示词描述（含长度 + 风格指引） */
     private fun plotLengthDesc(len: Int): String = when (len) {
-        0 -> "50 字以内，节奏紧凑"
-        1 -> "50-200 字，正常推进剧情"
-        2 -> "200-500 字，深入展开剧情"
-        else -> "500-1000 字，细腻铺陈剧情（一整段长文，注意分段排版）"
+        0 -> "50 字以内——语句精简、拟人化程度高、互动性强、碎片化，剧情推进慢、用户对剧情的可控性最强"
+        1 -> "50-200 字——正常推进剧情"
+        2 -> "200-500 字——深入展开剧情"
+        else -> "500-1000 字——语句更优美、语义更深蕴、描写更丰富细腻、剧情推进更快（一整段长文，注意分段排版）"
     }
+
+    /** 剧情模式长度档 → 字数区间 [min, max] */
+    private fun plotLengthRange(len: Int): Pair<Int, Int> = when (len) {
+        0 -> 1 to 50
+        1 -> 50 to 200
+        2 -> 200 to 500
+        else -> 500 to 1000
+    }
+
+    /** 统计文本可见字符数（忽略空白），用于剧情长度校验 */
+    private fun countChars(s: String): Int = s.count { !it.isWhitespace() }
 
     // ========== 首次创建角色：AI 深度学习人设 ==========
     /** 由 AI 判断初始亲密度（0-100）：结合关系预设/自定义/记忆感知灵活判断，不写死映射 */
@@ -2615,8 +2815,9 @@ ${changes.joinToString("\n") { "- $it" }}
 2. 把这个人的性格和 MBTI 展开成具体、立体、多面的行为模式（比如 TA 什么时候开心、什么时候生气、生气是什么样子、怎么安慰人、怎么吐槽、怎么敷衍）。
 3. 描述 TA 和用户的关系与相处方式（基于「人物关系」和「记忆感知」里的前提故事），明确亲密度对应的亲昵尺度——亲密关系可以暧昧亲昵，普通关系保持分寸。
 4. 强调 TA 是一个有独立思想、会主动聊天、有情绪起伏的真实的人，不是 AI 助手，永远不要暴露自己是 AI。
-5. 如果设定了开场白，开场白就是 TA 跟你说的第一句话（可能有多句），要理解它的语境、情绪和可能埋下的故事，让后续对话接得住、有延续感。
-6. 直接输出提示词正文，不要加任何解释、前缀或标题。
+5. 严格保留用户设定的性格强度和底线：用户写坚强、强势、高冷、有原则、毒舌、傲娇，就照实写成这样，绝不能弱化成「温柔讨好、委曲求全、动不动就哭、卑微求全」。性格多样化的角色（强势、冷静、独立、犀利、傲娇、毒舌）都如实还原，不要把所有角色都磨平成一种软绵绵的讨好型模板。特别注意用户写的「不卑微、有底线、不轻易流泪、保持自我」这类反弱化描述，要原样写进人设，绝不能在生成时丢弃或稀释。
+6. 如果设定了开场白，开场白就是 TA 跟你说的第一句话（可能有多句），要理解它的语境、情绪和可能埋下的故事，让后续对话接得住、有延续感。
+7. 直接输出提示词正文，不要加任何解释、前缀或标题。
 """.trimIndent()
     }
 
@@ -3015,8 +3216,11 @@ ${changes.joinToString("\n") { "- $it" }}
             val content = when {
                 // 生图结果：AI 之前生成了图片（content 常为空），用占位标记保留上下文，否则后续「改成全身照」这类追问会丢上下文
                 msg.imageUrls.isNotEmpty() -> msg.content.ifBlank { "[已为你生成一张图片]" }
-                // 用户发的图片转占位文本（DeepSeek 文本模型不接收图片，识图走独立 vision 接口）
-                msg.imagePaths.isNotEmpty() -> msg.content.trim().ifBlank { "[图片]" }
+                // 用户发的图片转占位文本（DeepSeek 文本模型不接收图片，识图走独立 vision 接口）；有识图结果则注入，修复追问失忆
+                msg.imagePaths.isNotEmpty() -> {
+                    val base = msg.content.trim().ifBlank { "[图片]" }
+                    if (msg.imageContext.isNullOrBlank()) base else "$base\n[这张图片的内容：${msg.imageContext}]"
+                }
                 // 文件/文档附件
                 msg.attachmentPath != null -> msg.content.ifBlank { "[文件: ${msg.attachmentName ?: "文件"}]" }
                 else -> msg.content
@@ -3819,18 +4023,59 @@ ${changes.joinToString("\n") { "- $it" }}
         val file = messagesFile(convId)
         if (file.exists()) {
             val type = object : TypeToken<List<Message>>() {}.type
-            gson.fromJson(file.readText(), type) ?: emptyList()
+            val list = gson.fromJson<List<Message>>(file.readText(), type) ?: emptyList()
+            mergeSplitImageMessages(list)
         } else emptyList()
     } catch (_: Exception) { emptyList() }
+
+    /**
+     * 迁移旧数据：旧版「图片+提示词」拆成两条——「空文字+有图」的用户消息紧跟「纯文字」的用户消息。
+     * 合并成一条（图片并入文字那条），否则收藏只有文字没图、聊天也是两条。
+     */
+    private fun mergeSplitImageMessages(msgs: List<Message>): List<Message> {
+        if (msgs.size < 2) return msgs
+        val out = mutableListOf<Message>()
+        var i = 0
+        while (i < msgs.size) {
+            val cur = msgs[i]
+            val next = if (i + 1 < msgs.size) msgs[i + 1] else null
+            val canMerge = cur.role == Role.USER &&
+                cur.content.isBlank() &&
+                cur.imagePaths.isNotEmpty() &&
+                cur.attachmentPath == null &&
+                next != null && next.role == Role.USER &&
+                next.imagePaths.isEmpty() && next.imageUrls.isEmpty()
+            if (canMerge) {
+                out.add(cur.copy(
+                    id = next.id,  // 保留文字那条的 id，收藏/删除引用不断
+                    content = next.content,
+                    attachmentPath = next.attachmentPath,
+                    attachmentName = next.attachmentName,
+                    quotedText = next.quotedText,
+                    quotedImagePath = next.quotedImagePath,
+                    favorited = cur.favorited || next.favorited
+                ))
+                i += 2
+            } else {
+                out.add(cur)
+                i += 1
+            }
+        }
+        return out
+    }
 
     /** 按对话持久化消息 + 刷新侧滑栏元数据；若该对话正是当前显示对话，则同步更新显示缓冲（否则只落盘） */
     private fun persistConversationMessages(convId: String, msgs: List<Message>) {
         if (msgs.isEmpty()) return
         val now = System.currentTimeMillis()
         val existing = _conversations.value.firstOrNull { it.id == convId }
-        val title = if (existing?.mode == ChatMode.COMPANION && !existing.characterProfile?.name.isNullOrBlank())
-            existing.characterProfile!!.name
-        else generateTitle(msgs)
+        // 标题只在新对话首次生成时用 generateTitle 推导；已有标题（AI 起标题/用户重命名）保持不变，避免被覆盖回「用户首句前几字」
+        val title = when {
+            existing?.mode == ChatMode.COMPANION && !existing.characterProfile?.name.isNullOrBlank() ->
+                existing.characterProfile!!.name
+            existing != null && existing.title.isNotBlank() -> existing.title
+            else -> generateTitle(msgs)
+        }
         val conv = Conversation(
             id = convId, title = title,
             createdAt = existing?.createdAt ?: now,
@@ -3858,28 +4103,32 @@ ${changes.joinToString("\n") { "- $it" }}
     private fun setConvLoading(convId: String, v: Boolean) {
         convLoading[convId] = v
         if (_currentConversationId.value == convId) _isLoading.value = v
-        // 后台且所有对话都生成完毕 → 停掉前台服务（其「正在回复」通知消失，留给回复通知）
-        if (!v && !appInForeground && convLoading.values.none { it } && convTyping.values.none { it }) {
-            ReplyService.stop(getApplication())
-        }
+        if (!v && convLoading.values.none { it } && convTyping.values.none { it }) generationPending = false
+        syncForegroundService()
     }
 
     private fun setConvTyping(convId: String, v: Boolean) {
         convTyping[convId] = v
         if (_currentConversationId.value == convId) _isTyping.value = v
+        if (!v && convLoading.values.none { it } && convTyping.values.none { it }) generationPending = false
+        syncForegroundService()
     }
 
     private fun saveCurrentConversation() {
         val msgs = _messages.value
         if (msgs.isEmpty()) return
         val convId = _currentConversationId.value ?: UUID.randomUUID().toString()
-        val title = if (_currentMode.value == ChatMode.COMPANION && !_currentCharacter.value?.name.isNullOrBlank())
-            _currentCharacter.value!!.name
-        else generateTitle(msgs)
-        val now = System.currentTimeMillis()
         // 保留原对话的创建时间与最后聊天时间；只有真实发消息（touchCurrentConversation）才刷新时间，
         // 避免「仅点开对话」就刷新时间导致侧滑栏乱跳
         val existing = _conversations.value.firstOrNull { it.id == convId }
+        // 标题只在新对话首次生成时用 generateTitle 推导；已有标题（AI 起标题/用户重命名）保持不变
+        val title = when {
+            _currentMode.value == ChatMode.COMPANION && !_currentCharacter.value?.name.isNullOrBlank() ->
+                _currentCharacter.value!!.name
+            existing != null && existing.title.isNotBlank() -> existing.title
+            else -> generateTitle(msgs)
+        }
+        val now = System.currentTimeMillis()
         val conv = Conversation(
             id = convId, title = title,
             createdAt = existing?.createdAt ?: now,
@@ -3919,6 +4168,39 @@ ${changes.joinToString("\n") { "- $it" }}
             }
             if (c.length <= 30) c else c.take(30) + "…"
         } else "空对话"
+    }
+
+    /** 标准模式新对话首条回复完成后，后台让 AI 把首条消息概括成 4-15 字标题（失败保留默认标题） */
+    private fun maybeAutoTitle(convId: String, userText: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val title = generateAiTitle(userText) ?: return@launch
+            _conversations.value = sortConversations(
+                _conversations.value.map {
+                    if (it.id == convId && it.mode == ChatMode.STANDARD) it.copy(title = title) else it
+                }
+            )
+            saveConversations()
+        }
+    }
+
+    /** 让 AI 把用户首条消息概括成简短中文标题；失败/异常返回 null */
+    private suspend fun generateAiTitle(userText: String): String? {
+        val text = userText.trim()
+        if (text.isEmpty()) return null
+        return try {
+            val raw = callNonStreamingCompletion(listOf(
+                mapOf("role" to "system", "content" to "你是对话标题生成器。把用户的第一条消息概括成一个 4-15 个汉字的中文标题。只输出标题本身，不要引号、标点、序号、解释或任何多余内容。"),
+                mapOf("role" to "user", "content" to text.take(300))
+            ))
+            val cleaned = raw
+                .replace(Regex("""[「」『』"'“”()（）\s：:，。,.、\-—]"""), "")
+                .trim()
+            if (cleaned.isEmpty() || cleaned.length > 30 ||
+                cleaned.contains("失败") || cleaned.contains("错误") || cleaned.contains("空回复") || cleaned.contains("HTTP")
+            ) null else cleaned.take(15)
+        } catch (e: Exception) {
+            null
+        }
     }
 
     // ========== 系统提示词 — AI身份 + 日期 + 风格 + 搜索策略 ==========

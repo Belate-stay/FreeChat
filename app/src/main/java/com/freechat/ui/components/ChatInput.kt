@@ -58,8 +58,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -84,6 +87,7 @@ import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.LocalChatFontFamily
+import com.freechat.ui.theme.frostedCard
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.HazeInputScale
@@ -115,6 +119,7 @@ fun ChatInput(
     isDark: Boolean,
     onAddImage: (() -> Unit)? = null,
     onAddFile: (() -> Unit)? = null,
+    onPlusClick: () -> Unit = {},
     pendingImages: List<String> = emptyList(),
     isAddingImages: Boolean = false,
     onRemovePendingImage: (Int) -> Unit = {},
@@ -172,18 +177,34 @@ fun ChatInput(
         label = "send_scale"
     )
 
-    val showPlusMenuState = remember { mutableStateOf(false) }
     var showEmojiPicker by remember { mutableStateOf(false) }
-    // 全屏输入卡片：文字 ≥4 行自动弹出，或长按输入框弹「全屏输入」选项后手动弹出
+    // 全屏输入卡片：原输入框超过 3 行自动弹出，或长按输入框弹「全屏输入」选项后手动弹出
     var expanded by remember { mutableStateOf(false) }
     var showFullscreenMenu by remember { mutableStateOf(false) }
     val fullscreenFocusRequester = remember { FocusRequester() }
     val mainFocusRequester = remember { FocusRequester() }
+    val textMeasurer = rememberTextMeasurer()
+    // 原输入框的实际文字宽度（px）：按「原输入框的行数」判断是否弹出，而非全屏宽度或 \n 个数
+    var mainFieldWidthPx by remember { mutableIntStateOf(0) }
 
-    // 文字 ≥4 行时自动弹出全屏输入卡片
-    LaunchedEffect(text) {
-        val shouldExpand = text.count { it == '\n' } >= 3
-        if (shouldExpand && !expanded) expanded = true
+    val inputTextStyle = MaterialTheme.typography.bodyMedium.copy(
+        color = colors.TextPrimary, fontSize = 15.sp, lineHeight = 20.sp,
+        fontFamily = LocalChatFontFamily.current
+    )
+    // 用原输入框宽度测量文字软换行后的真实行数
+    val wrappedLineCount = remember(text, mainFieldWidthPx) {
+        if (mainFieldWidthPx <= 0) 1
+        else textMeasurer.measure(
+            text = AnnotatedString(text),
+            style = inputTextStyle,
+            softWrap = true,
+            constraints = Constraints(maxWidth = mainFieldWidthPx)
+        ).lineCount
+    }
+
+    // 原输入框超过 3 行（进入第 4 行）时自动弹出全屏输入卡片
+    LaunchedEffect(wrappedLineCount) {
+        if (wrappedLineCount > 3 && !expanded) expanded = true
     }
 
     // 展开时自动把焦点切到全屏输入框（键盘保持、光标跟上）；缩回由缩回按钮切回主输入框
@@ -308,15 +329,19 @@ fun ChatInput(
         }
     }
 
-    Column(
+    Box(
         modifier = modifier
             // 用 layout 偏移而非 graphicsLayer，保证 onGloballyPositioned/positionInWindow 跟随滚动位置（弧线锚点不错位）
             .offset { IntOffset(0, offsetYState.value.roundToInt()) }
             .fillMaxWidth()
-            .padding(horizontal = 20.dp)
-            .padding(bottom = bottomSpace, top = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = bottomSpace, top = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
         // ──── 图片候选区（悬浮在输入框上方，单行小缩略图，超出右滑）────
         if (pendingImages.isNotEmpty()) {
             ImageCandidateArea(
@@ -453,8 +478,8 @@ fun ChatInput(
                                 .size(40.dp)
                                 .clip(CircleShape)
                                 .clickable {
-                                    // 键盘保持显示，直接弹菜单（菜单 focusable=false 不抢焦点，不会闪退）
-                                    showPlusMenuState.value = true
+                                    // 键盘保持显示，直接弹菜单
+                                    onPlusClick()
                                 },
                             contentAlignment = Alignment.Center
                         ) {
@@ -482,13 +507,11 @@ fun ChatInput(
                                 value = TextFieldValue(if (expanded) "" else text, textSelection, if (expanded) null else textComposition),
                                 onValueChange = { v -> text = v.text; textSelection = v.selection; textComposition = v.composition },
                                 readOnly = expanded,
-                                textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                    color = colors.TextPrimary, fontSize = 15.sp, lineHeight = 20.sp,
-                                    fontFamily = LocalChatFontFamily.current
-                                ),
+                                textStyle = inputTextStyle,
                                 cursorBrush = SolidColor(colors.Primary),
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .onGloballyPositioned { coords -> mainFieldWidthPx = coords.size.width }
                                     .focusRequester(mainFocusRequester)
                                     .onFocusChanged { focusState ->
                                         hasFocus = focusState.isFocused
@@ -523,7 +546,10 @@ fun ChatInput(
                             DropdownMenu(
                                 expanded = showFullscreenMenu,
                                 onDismissRequest = { showFullscreenMenu = false },
-                                modifier = Modifier.background(colors.Surface),
+                                modifier = Modifier.frostedCard(null, colors, advancedMaterial, RoundedCornerShape(20.dp), fallback = colors.Surface),
+                                shape = RoundedCornerShape(20.dp),
+                                containerColor = Color.Transparent,
+                                shadowElevation = 0.dp,
                                 properties = PopupProperties(focusable = false)
                             ) {
                                 DropdownMenuItem(
@@ -693,27 +719,6 @@ fun ChatInput(
             }
         }
 
-        // ──── 下拉菜单（"+"" 弹出的菜单）────
-        DropdownMenu(
-            expanded = showPlusMenuState.value,
-            onDismissRequest = { showPlusMenuState.value = false },
-            modifier = Modifier.background(colors.Surface),
-            properties = PopupProperties(focusable = false)
-        ) {
-            DropdownMenuItem(
-                text = { Text(s.uploadImage, color = colors.TextPrimary) },
-                onClick = { showPlusMenuState.value = false; onAddImage?.invoke() },
-                leadingIcon = { Icon(Icons.Filled.Image, null, tint = colors.Primary, modifier = Modifier.size(20.dp)) }
-            )
-            if (onAddFile != null) {
-                DropdownMenuItem(
-                    text = { Text(s.uploadFile, color = colors.TextPrimary) },
-                    onClick = { showPlusMenuState.value = false; onAddFile?.invoke() },
-                    leadingIcon = { Icon(Icons.Filled.AttachFile, null, tint = colors.Primary, modifier = Modifier.size(20.dp)) }
-                )
-            }
-        }
-
         // ──── 上滑取消弧线（始终跟随手指，红色光影 + 「松手取消」）────
         if (cancelFingerWinPos != null) {
             VoiceCancelArc(
@@ -721,6 +726,7 @@ fun ChatInput(
                 cancelColor = colors.ErrorRed,
                 density = density
             )
+        }
         }
     }
 }

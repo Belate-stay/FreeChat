@@ -28,10 +28,15 @@ class ReplyService : Service() {
 
         /** 开始前台服务（静默保活通知，不打扰用户） */
         fun startThinking(context: Context, title: String) {
-            val intent = Intent(context, ReplyService::class.java)
-                .putExtra(EXTRA_TITLE, title)
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
-            else context.startService(intent)
+            try {
+                val intent = Intent(context, ReplyService::class.java)
+                    .putExtra(EXTRA_TITLE, title)
+                if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+                else context.startService(intent)
+            } catch (_: Exception) {
+                // Android 12+ 从后台启动前台服务可能被系统限制（ForegroundServiceStartNotAllowedException），
+                // 保活尽力而为，绝不能让「保活失败」反过来把回复流程搞崩。
+            }
         }
 
         /** 发一条「新消息」式悬浮通知（悬浮 + 通知中心，对标微信），点击回到对应对话 */

@@ -4,12 +4,14 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -32,6 +34,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -40,6 +45,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,6 +67,12 @@ import com.freechat.ui.theme.LocalLatinFontFamily
 import com.freechat.ui.theme.LocalFontScale
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
+import com.freechat.util.ShareImageGenerator
+import com.freechat.util.ShareSegment
+import com.freechat.util.saveBitmapToGallery
+import com.freechat.util.saveMarkdown
+import com.freechat.util.shareBitmap
+import com.freechat.util.shareMarkdown
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -80,7 +95,11 @@ fun ChatBubble(
     onRegenerate: (() -> Unit)? = null,
     onSpeak: (() -> Unit)? = null,
     onQuote: (() -> Unit)? = null,
-    onEdit: (() -> Unit)? = null
+    onEdit: (() -> Unit)? = null,
+    onFavorite: (() -> Unit)? = null,
+    isFavorited: Boolean = false,
+    highlightKeyword: String? = null,
+    highlightColor: Color? = null
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
@@ -100,6 +119,55 @@ fun ChatBubble(
         val text = if (isUser) message.content else markdownToPlainText(message.content)
         clipboard.setPrimaryClip(ClipData.newPlainText("message", text))
         Toast.makeText(context, s.copied, Toast.LENGTH_SHORT).show()
+    }
+
+    // 分享：图片（Markdown 渲染美化长图，生成后预览）/ Markdown（.md 文件）
+    var showShareMenu by remember { mutableStateOf(false) }
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var showMarkdownAction by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val shareMarkdownText = message.content.ifBlank { "[图片]" }
+    val shareMessage = { showShareMenu = true }
+
+    // 生成图片并进入预览
+    fun prepareImage() {
+        showShareMenu = false
+        scope.launch {
+            val label = if (isUser) s.roleUser else s.roleAi
+            val labelColor = if (isUser) 0xFF3B82F6.toInt() else colors.Primary.toArgb()
+            val bmp = withContext(Dispatchers.IO) {
+                ShareImageGenerator.generate(context, listOf(ShareSegment(label, shareMarkdownText, labelColor)), colors.Primary.toArgb())
+            }
+            previewBitmap = bmp
+        }
+    }
+
+    fun sharePreviewImage() {
+        val bmp = previewBitmap ?: return
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) { context.shareBitmap(bmp) }
+            if (!ok) Toast.makeText(context, "分享失败", Toast.LENGTH_SHORT).show()
+            previewBitmap = null
+        }
+    }
+
+    fun savePreviewImage() {
+        val bmp = previewBitmap ?: return
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) { context.saveBitmapToGallery(bmp) }
+            if (ok) Toast.makeText(context, "已保存", Toast.LENGTH_SHORT).show()
+            else Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
+            previewBitmap = null
+        }
+    }
+
+    fun doMarkdown(save: Boolean) {
+        showMarkdownAction = false
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) { if (save) context.saveMarkdown(shareMarkdownText) else context.shareMarkdown(shareMarkdownText) }
+            if (save && ok) Toast.makeText(context, "已保存", Toast.LENGTH_SHORT).show()
+            else if (!ok) Toast.makeText(context, if (save) "保存失败" else "分享失败", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // 语音朗读状态 — 播放中/合成中
@@ -139,6 +207,74 @@ fun ChatBubble(
             },
             containerColor = colors.Surface
         )
+    }
+
+    // ===== 分享菜单：图片 / Markdown =====
+    if (showShareMenu) {
+        AlertDialog(
+            onDismissRequest = { showShareMenu = false },
+            title = { Text(s.share, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    ShareMenuRow(Icons.Filled.Image, s.shareAsImage, colors) { prepareImage() }
+                    ShareMenuRow(Icons.Filled.Description, s.shareAsMarkdown, colors) {
+                        showShareMenu = false
+                        showMarkdownAction = true
+                    }
+                }
+            },
+            confirmButton = {},
+            containerColor = colors.Surface
+        )
+    }
+
+    // ===== Markdown 动作：分享 / 保存 =====
+    if (showMarkdownAction) {
+        AlertDialog(
+            onDismissRequest = { showMarkdownAction = false },
+            title = { Text(s.shareAsMarkdown, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    ShareMenuRow(Icons.Filled.Share, s.share, colors) { doMarkdown(save = false) }
+                    ShareMenuRow(Icons.Filled.Download, s.saveMarkdown, colors) { doMarkdown(save = true) }
+                }
+            },
+            confirmButton = {},
+            containerColor = colors.Surface
+        )
+    }
+
+    // ===== 图片预览：生成后的分享图全屏预览 + 分享/保存 =====
+    if (previewBitmap != null) {
+        Dialog(
+            onDismissRequest = { previewBitmap = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
+        ) {
+            Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        previewBitmap!!.asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    TextButton(onClick = { sharePreviewImage() }, modifier = Modifier.weight(1f)) {
+                        Text(s.share, color = colors.Primary, fontWeight = FontWeight.SemiBold)
+                    }
+                    TextButton(onClick = { savePreviewImage() }, modifier = Modifier.weight(1f)) {
+                        Text(s.saveImage, color = colors.Primary, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
     }
 
     // ===== 全屏图片预览 =====
@@ -252,7 +388,14 @@ fun ChatBubble(
                                     .padding(horizontal = 14.dp, vertical = 10.dp)
                             ) {
                                 SelectionContainer {
-                                    Text(message.content, style = MaterialTheme.typography.bodyMedium.copy(fontFamily = LocalChatFontFamily.current), color = if (isCompanion) colors.TextPrimary else colors.UserBubbleText)
+                                    Text(
+                                        buildHighlightedText(message.content, highlightKeyword, highlightColor),
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            fontFamily = LocalChatFontFamily.current,
+                                            lineBreak = cjkLineBreak
+                                        ),
+                                        color = if (isCompanion) colors.TextPrimary else colors.UserBubbleText
+                                    )
                                 }
                             }
                         }
@@ -265,6 +408,19 @@ fun ChatBubble(
                             ) {
                                 MessageActionIcon(onClick = { copyMessage() }) {
                                     Icon(Icons.Filled.ContentCopy, s.copyMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                                }
+                                MessageActionIcon(onClick = { shareMessage() }) {
+                                    Icon(Icons.Filled.Share, s.share, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                                }
+                                if (onFavorite != null) {
+                                    MessageActionIcon(onClick = { onFavorite() }) {
+                                        Icon(
+                                            if (isFavorited) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                                            if (isFavorited) s.unfavorite else s.favorite,
+                                            tint = if (isFavorited) colors.ErrorRed else colors.TextTertiary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
                                 }
                                 if (onQuote != null) {
                                     MessageActionIcon(onClick = { onQuote() }) {
@@ -297,8 +453,11 @@ fun ChatBubble(
                 // AI 正文
                 if (isCompanion) {
                     Text(
-                        message.content,
-                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = LocalChatFontFamily.current),
+                        buildHighlightedText(message.content, highlightKeyword, highlightColor),
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontFamily = LocalChatFontFamily.current,
+                            lineBreak = cjkLineBreak
+                        ),
                         color = colors.TextPrimary,
                         modifier = Modifier
                             .clip(RoundedCornerShape(16.dp))
@@ -312,7 +471,9 @@ fun ChatBubble(
                         textColor = colors.AiBubbleText,
                         codeBgColor = colors.SurfaceVariant,
                         quoteBarColor = colors.Primary.copy(alpha = 0.5f),
-                        dividerColor = colors.Divider
+                        dividerColor = colors.Divider,
+                        highlightKeyword = highlightKeyword,
+                        highlightColor = highlightColor ?: Color.Unspecified
                     )
                 }
 
@@ -392,6 +553,9 @@ fun ChatBubble(
                         MessageActionIcon(onClick = { copyMessage() }) {
                             Icon(Icons.Filled.ContentCopy, s.copyMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
                         }
+                        MessageActionIcon(onClick = { shareMessage() }) {
+                            Icon(Icons.Filled.Share, s.share, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                        }
                         if (onDelete != null) {
                             MessageActionIcon(onClick = { showDeleteConfirm = true }) {
                                 Icon(Icons.Filled.DeleteOutline, s.deleteMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
@@ -400,6 +564,16 @@ fun ChatBubble(
                         if (onRegenerate != null) {
                             MessageActionIcon(onClick = { onRegenerate() }) {
                                 Icon(Icons.Filled.Refresh, s.regenerate, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        if (onFavorite != null) {
+                            MessageActionIcon(onClick = { onFavorite() }) {
+                                Icon(
+                                    if (isFavorited) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                                    if (isFavorited) s.unfavorite else s.favorite,
+                                    tint = if (isFavorited) colors.ErrorRed else colors.TextTertiary,
+                                    modifier = Modifier.size(16.dp)
+                                )
                             }
                         }
                         if (onQuote != null) {
@@ -822,6 +996,25 @@ private fun openFile(context: Context, path: String) {
     }
 }
 
+/** 把消息正文里的搜索关键词用高亮色标红（大小写不敏感），其余文字保持原色 */
+private fun buildHighlightedText(text: String, keyword: String?, color: Color?): AnnotatedString {
+    if (keyword.isNullOrBlank() || color == null) return AnnotatedString(text)
+    return buildAnnotatedString {
+        val lower = text.lowercase()
+        val kw = keyword.lowercase()
+        var from = 0
+        while (from < text.length) {
+            val idx = lower.indexOf(kw, from)
+            if (idx < 0) { append(text.substring(from)); break }
+            if (idx > from) append(text.substring(from, idx))
+            withStyle(SpanStyle(color = color, fontWeight = FontWeight.SemiBold)) {
+                append(text.substring(idx, idx + keyword.length))
+            }
+            from = idx + keyword.length
+        }
+    }
+}
+
 /** 文件附件卡片（用户上传 / AI 生成的原生文档） */
 @Composable
 private fun FileAttachmentCard(name: String, isUser: Boolean, onClick: () -> Unit) {
@@ -968,5 +1161,27 @@ private fun SpeechProgressBar(
                 )
             }
         }
+    }
+}
+
+/** 分享菜单的一行：图标 + 文字 */
+@Composable
+private fun ShareMenuRow(
+    icon: ImageVector,
+    label: String,
+    colors: FreeChatColors,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
     }
 }

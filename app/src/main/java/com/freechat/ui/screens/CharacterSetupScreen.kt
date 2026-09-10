@@ -119,6 +119,8 @@ fun CharacterSetupScreen(
     var plotLength by remember { mutableIntStateOf(normInitial?.plotLength ?: 1) }
     var sleepSimulation by remember { mutableStateOf(normInitial?.sleepSimulation ?: false) }
     var highQualityMemory by remember { mutableStateOf(normInitial?.highQualityMemory ?: false) }
+    // 导入角色时带回的 AI 人设提示词（personaPrompt），创建时原样使用、不重新生成
+    var importedPersonaPrompt by remember { mutableStateOf<String?>(null) }
 
     var showMbtiPicker by remember { mutableStateOf(false) }
     var showLangPicker by remember { mutableStateOf(false) }
@@ -217,7 +219,7 @@ fun CharacterSetupScreen(
         relationshipText = relationshipText.trim(),
         intimacy = if (initial == null) 0 else intimacy,  // 创建时由 AI 生成人设时判断，编辑时保持
         relationshipStage = if (initial == null) relationshipPreset else relationshipStage,
-        personaPrompt = initial?.personaPrompt ?: "",
+        personaPrompt = importedPersonaPrompt ?: (initial?.personaPrompt ?: ""),
         plotSimulation = plotSimulation,
         plotLength = plotLength,
         sleepSimulation = sleepSimulation,
@@ -253,6 +255,56 @@ fun CharacterSetupScreen(
     var avatarCropSource by remember { mutableStateOf<Uri?>(null) }
     val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) avatarCropSource = uri
+    }
+
+    // 角色导入：从 JSON 文件读回人物设定（文字设定）并回填表单
+    val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            val json = context.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() }.orEmpty()
+            val profile = viewModel.importCharacterFromJson(json)
+            if (profile != null) {
+                name = profile.name
+                gender = profile.gender
+                age = profile.age
+                mbtiType = profile.mbtiType
+                mbtiEI = profile.mbtiEI
+                mbtiNS = profile.mbtiNS
+                mbtiTF = profile.mbtiTF
+                mbtiPJ = profile.mbtiPJ
+                presets = profile.personalityPresets.toSet()
+                personalityText = profile.personalityText
+                memory = profile.memoryPerception
+                appearanceText = profile.appearanceText
+                relationshipPreset = profile.relationshipPreset
+                relationshipText = profile.relationshipText
+                openingLines = profile.openingLines.ifEmpty { listOf("") }
+                importedPersonaPrompt = profile.personaPrompt.ifBlank { null }
+                android.widget.Toast.makeText(context, s.importSuccess, android.widget.Toast.LENGTH_SHORT).show()
+            } else {
+                android.widget.Toast.makeText(context, s.importFailed, android.widget.Toast.LENGTH_SHORT).show()
+            }
+        } catch (_: Exception) {
+            android.widget.Toast.makeText(context, s.importFailed, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 角色导出：生成 JSON 文件后走系统分享
+    fun exportCharacter() {
+        try {
+            val json = viewModel.exportCharacterJson(buildProfile())
+            val file = File(context.cacheDir, "${name.trim().ifBlank { "character" }}.freechat.json")
+            file.writeText(json)
+            val uri = androidx.core.content.FileProvider.getUriForFile(context, "com.freechat.fileprovider", file)
+            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(android.content.Intent.createChooser(intent, s.exportCharacter))
+        } catch (_: Exception) {
+            android.widget.Toast.makeText(context, s.exportFailed, android.widget.Toast.LENGTH_SHORT).show()
+        }
     }
 
     if (showDiscardDialog) {
@@ -1112,6 +1164,15 @@ fun CharacterSetupScreen(
                 style = MaterialTheme.typography.titleLarge
             )
             Spacer(Modifier.weight(1f))
+            if (isEditing) {
+                IconButton(onClick = { exportCharacter() }) {
+                    Icon(Icons.Filled.Share, s.exportCharacter, tint = colors.TextSecondary, modifier = Modifier.size(22.dp))
+                }
+            } else {
+                IconButton(onClick = { importPicker.launch("*/*") }) {
+                    Icon(Icons.Filled.Upload, s.importCharacter, tint = colors.TextSecondary, modifier = Modifier.size(22.dp))
+                }
+            }
             if (isEditing) {
                 IconButton(onClick = {
                     if (isEditMode) showSaveConfirm = true else showEditConfirm = true

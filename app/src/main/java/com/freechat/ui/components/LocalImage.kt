@@ -3,6 +3,7 @@ package com.freechat.ui.components
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -34,10 +35,15 @@ fun LocalImage(
     }
     val bmp = bitmap
     if (bmp != null) {
+        // 满宽显示时按图片真实宽高比撑开高度：fillMaxWidth + FillWidth 若无 aspectRatio，
+        // 高度会塌成 0（或按像素固有高度渲染导致错乱），图片显示不出来。
+        val sized = if (contentScale == ContentScale.FillWidth) {
+            modifier.aspectRatio(bmp.width.toFloat() / bmp.height.coerceAtLeast(1).toFloat())
+        } else modifier
         Image(
             bitmap = bmp,
             contentDescription = contentDescription,
-            modifier = modifier,
+            modifier = sized,
             contentScale = contentScale
         )
     } else {

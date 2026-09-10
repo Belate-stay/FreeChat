@@ -21,8 +21,8 @@ android {
         applicationId = "com.freechat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 108
-        versionName = "1.0.01"
+        versionCode = 118
+        versionName = "1.0.18"
 
         buildConfigField("String", "XIAOMI_API_KEY", "\"${secretKey("XIAOMI_API_KEY")}\"")
         buildConfigField("String", "XIAOMI_ULTRASPEED_API_KEY", "\"${secretKey("XIAOMI_ULTRASPEED_API_KEY")}\"")
@@ -33,8 +33,11 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // 关闭 R8 混淆：AppStrings 是 300+ 字段 data class，R8 编译其巨型构造会生成
+            // 非法字节码（VerifyError 真机闪退），纯 D8 正常。代价是 APK ~30MB（原 R8 12MB）。
+            // 想恢复瘦身需：升级 AGP/R8 版本，或重构 AppStrings 拆分巨型构造。
+            isMinifyEnabled = false
+            isShrinkResources = false
             signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

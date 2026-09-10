@@ -15,10 +15,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
@@ -29,8 +31,15 @@ import com.freechat.ui.theme.LocalFontScale
 import com.freechat.ui.theme.LocalLatinFontFamily
 import kotlin.math.max
 
+/** CJK 标点禁则：标点（，。！？：；等）不出现在行首，悬挂到上一行行尾。Strict 映射 LINE_BREAK_STYLE_STRICT。 */
+internal val cjkLineBreak = LineBreak(
+    strategy = LineBreak.Strategy.HighQuality,
+    strictness = LineBreak.Strictness.Strict,
+    wordBreak = LineBreak.WordBreak.Default
+)
+
 // ========== 块结构 ==========
-private sealed class MdBlock {
+internal sealed class MdBlock {
     data class Heading(val text: String, val level: Int) : MdBlock()
     data class Paragraph(val text: String) : MdBlock()
     data class ListItem(val text: String, val bullet: String, val indent: Int, val body: MutableList<String> = mutableListOf()) : MdBlock()
@@ -41,7 +50,7 @@ private sealed class MdBlock {
 }
 
 // ========== 解析器 ==========
-private fun parseMarkdown(text: String): List<MdBlock> {
+internal fun parseMarkdown(text: String): List<MdBlock> {
     val lines = text.split("\n")
     val blocks = mutableListOf<MdBlock>()
     var inCode = false
@@ -181,6 +190,16 @@ private fun parseTableRow(line: String): List<String> {
     return line.trim('|').split("|").map { it.trim() }
 }
 
+/** 估算单元格文本显示宽度（dp）：CJK/全角字符按 13、半角按 7，用于表格定列宽，保证横平竖直对齐 */
+private fun tableTextWidthDp(text: String): Float {
+    var w = 0f
+    for (ch in text) {
+        val c = ch.code
+        w += if (c in 0x2E80..0x9FFF || c in 0x3000..0x303F || c in 0xFF00..0xFFEF || c in 0xAC00..0xD7AF) 13f else 7f
+    }
+    return w
+}
+
 private fun mergeParagraphs(blocks: List<MdBlock>): List<MdBlock> {
     // 段落保持独立成块：空行在渲染时体现为段间距，修复「空行被吞」导致排版拥挤
     return blocks
@@ -196,7 +215,9 @@ fun MarkdownText(
     textColor: Color,
     codeBgColor: Color,
     quoteBarColor: Color,
-    dividerColor: Color
+    dividerColor: Color,
+    highlightKeyword: String? = null,
+    highlightColor: Color = Color.Unspecified
 ) {
     val blocks = remember(content) { parseMarkdown(content) }
     val baseSize = 15.sp
@@ -225,7 +246,7 @@ fun MarkdownText(
                     Spacer(modifier = Modifier.height(if (block.level <= 2) (18 * scale).dp else (10 * scale).dp))
                     SelectionContainer {
                         Text(
-                            buildStyledLine(block.text, textColor, FontWeight.Bold, fs, chatFont),
+                            buildStyledLine(block.text, textColor, FontWeight.Bold, fs, chatFont, highlightKeyword, highlightColor),
                             modifier = Modifier.fillMaxWidth(),
                             lineHeight = fs * 1.4f
                         )
@@ -265,7 +286,8 @@ fun MarkdownText(
                         Box(Modifier.width(3.dp).heightIn(min = 20.dp).background(quoteBarColor))
                         Spacer(Modifier.width(8.dp))
                         RichText(block.text, textColor.copy(alpha = 0.85f), codeBgColor,
-                            textAlign = TextAlign.Justify, fontFamily = chatFont)
+                            textAlign = TextAlign.Start, fontFamily = chatFont,
+                            highlightKeyword = highlightKeyword, highlightColor = highlightColor)
                     }
                 }
 
@@ -284,13 +306,15 @@ fun MarkdownText(
                                 modifier = Modifier.width(16.dp)
                             )
                             Spacer(Modifier.width(4.dp))
-                            RichText(block.text, textColor, codeBgColor, textAlign = TextAlign.Justify, fontFamily = chatFont)
+                            RichText(block.text, textColor, codeBgColor, textAlign = TextAlign.Start, fontFamily = chatFont,
+                                highlightKeyword = highlightKeyword, highlightColor = highlightColor)
                         }
                         // 要点下方的解释正文（进一步缩进）
                         block.body.forEach { bodyLine ->
                             Spacer(Modifier.height(2.dp))
                             Box(Modifier.fillMaxWidth().padding(start = 20.dp)) {
-                                RichText(bodyLine, textColor, codeBgColor, textAlign = TextAlign.Justify, fontFamily = chatFont)
+                                RichText(bodyLine, textColor, codeBgColor, textAlign = TextAlign.Start, fontFamily = chatFont,
+                                    highlightKeyword = highlightKeyword, highlightColor = highlightColor)
                             }
                         }
                     }
@@ -298,27 +322,26 @@ fun MarkdownText(
 
                 is MdBlock.Table -> {
                     Spacer(modifier = Modifier.height(6.dp))
-                    // ===== 表格 — 无痕融入背景：去卡片框架/斑马纹，仅表头加粗 + 表头下细分隔线，横向滑动 =====
+                    // ===== 表格 — 每列固定宽度 + 格内换行，保证竖方向横平竖直对齐（去卡片框架/斑马纹，表头加粗 + 细分隔线，横向滑动） =====
                     val colCount = block.headers.size
-                    val colMinWidths = remember(block.headers, block.rows) {
+                    val colWidths = remember(block.headers, block.rows) {
                         (0 until colCount).map { ci ->
-                            val headerLen = block.headers.getOrElse(ci) { "" }.length
-                            val maxCellLen = block.rows.maxOfOrNull { row ->
-                                row.getOrElse(ci) { "" }.length
-                            } ?: 0
-                            max(headerLen, maxCellLen).coerceIn(4, 30) * 13 // dp
+                            val header = block.headers.getOrElse(ci) { "" }
+                            val widest = (block.rows.map { it.getOrElse(ci) { "" } } + header)
+                                .maxByOrNull { tableTextWidthDp(it) } ?: ""
+                            tableTextWidthDp(widest).coerceIn(44f, 340f) // dp
                         }
                     }
                     val scrollState = rememberScrollState()
                     Column(
                         modifier = Modifier.horizontalScroll(scrollState)
                     ) {
-                        // 表头（加粗、无背景，融入聊天底色）
+                        // 表头（加粗、无背景，融入聊天底色；固定列宽，超长折行）
                         Row(modifier = Modifier.padding(vertical = 4.dp)) {
                             block.headers.forEachIndexed { ci, h ->
                                 Box(
                                     modifier = Modifier
-                                        .widthIn(min = colMinWidths[ci].dp)
+                                        .width(colWidths[ci].dp)
                                         .padding(horizontal = 8.dp)
                                 ) {
                                     SelectionContainer {
@@ -326,35 +349,36 @@ fun MarkdownText(
                                             h, color = textColor,
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 13.sp,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis
+                                            softWrap = true
                                         )
                                     }
                                 }
                             }
                         }
                         // 表头下细分隔线（淡色、无框）
-                        Box(Modifier.width(colMinWidths.sum().dp).height(1.dp).background(dividerColor.copy(alpha = 0.6f)))
-                        // 数据行（无交替背景）
+                        Box(Modifier.width(colWidths.sum().dp).height(1.dp).background(dividerColor.copy(alpha = 0.6f)))
+                        // 数据行（无交替背景；固定列宽，长文本格内换行）
                         block.rows.forEachIndexed { _, row ->
                             Row(modifier = Modifier.padding(vertical = 5.dp)) {
                                 row.take(colCount).forEachIndexed { ci, cell ->
                                     Box(
                                         modifier = Modifier
-                                            .widthIn(min = colMinWidths[ci].dp)
+                                            .width(colWidths[ci].dp)
                                             .padding(horizontal = 8.dp)
                                     ) {
                                         RichText(
                                             cell, textColor, codeBgColor,
                                             fs = 12.sp,
                                             lineHeight = 20.sp,
-                                            fontFamily = chatFont
+                                            fontFamily = chatFont,
+                                            highlightKeyword = highlightKeyword,
+                                            highlightColor = highlightColor
                                         )
                                     }
                                 }
                                 // 补齐缺少的列
                                 repeat(colCount - row.size) {
-                                    Spacer(Modifier.widthIn(min = colMinWidths.getOrElse(row.size) { 60 }.dp))
+                                    Spacer(Modifier.width(colWidths.getOrElse(row.size) { 60f }.dp))
                                 }
                             }
                         }
@@ -372,8 +396,9 @@ fun MarkdownText(
                     if (block.text.isNotBlank()) {
                         RichText(
                             block.text.replace("\n", "  \n"), textColor, codeBgColor,
-                            textAlign = TextAlign.Justify,  // 两端对齐，视觉上每行结尾更整齐
-                            fontFamily = chatFont
+                            textAlign = TextAlign.Start,  // 两端对齐，视觉上每行结尾更整齐
+                            fontFamily = chatFont,
+                            highlightKeyword = highlightKeyword, highlightColor = highlightColor
                         )
                     }
                 }
@@ -389,12 +414,17 @@ private fun RichText(
     fs: androidx.compose.ui.unit.TextUnit = 15.sp,
     textAlign: TextAlign? = null,
     lineHeight: androidx.compose.ui.unit.TextUnit? = null,
-    fontFamily: FontFamily = FontFamily.Default
+    fontFamily: FontFamily = FontFamily.Default,
+    highlightKeyword: String? = null,
+    highlightColor: Color = Color.Unspecified
 ) {
     SelectionContainer {
         Text(
-            buildStyledLineCJK(stripInlineMarkers(text), baseColor, FontWeight.Normal, fs, fontFamily),
+            buildStyledLineCJK(stripInlineMarkers(text), baseColor, FontWeight.Normal, fs, fontFamily, highlightKeyword, highlightColor),
             modifier = Modifier.fillMaxWidth(),
+            style = TextStyle(
+                lineBreak = cjkLineBreak
+            ),
             textAlign = textAlign ?: TextAlign.Start,
             lineHeight = lineHeight ?: (fs * 1.75f),
             letterSpacing = 0.15.sp,
@@ -413,13 +443,17 @@ private fun stripInlineMarkers(text: String): String {
 private fun buildStyledLineCJK(
     text: String, baseColor: Color, baseWeight: FontWeight,
     fs: androidx.compose.ui.unit.TextUnit,
-    fontFamily: FontFamily = FontFamily.Default
-) = buildStyledLine(text, baseColor, baseWeight, fs, fontFamily)
+    fontFamily: FontFamily = FontFamily.Default,
+    highlightKeyword: String? = null,
+    highlightColor: Color = Color.Unspecified
+) = buildStyledLine(text, baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor)
 
 private fun buildStyledLine(
     text: String, baseColor: Color, baseWeight: FontWeight,
     fs: androidx.compose.ui.unit.TextUnit,
-    fontFamily: FontFamily = FontFamily.Default
+    fontFamily: FontFamily = FontFamily.Default,
+    highlightKeyword: String? = null,
+    highlightColor: Color = Color.Unspecified
 ) = buildAnnotatedString {
     pushStyle(SpanStyle(color = baseColor, fontWeight = baseWeight, fontSize = fs, fontFamily = fontFamily))
     var rem = text
@@ -506,16 +540,36 @@ private fun buildStyledLine(
         ).minOrNull()
 
         if (next != null && next > 0) {
-            append(rem.substring(0, next))
+            appendHighlighted(rem.substring(0, next), highlightKeyword, highlightColor)
             rem = rem.substring(next)
         } else if (next == null) {
-            append(rem); rem = ""
+            appendHighlighted(rem, highlightKeyword, highlightColor); rem = ""
         } else {
             // next == 0 but no rule matched — skip char to avoid infinite loop
-            append(rem[0]); rem = rem.substring(1)
+            appendHighlighted(rem[0].toString(), highlightKeyword, highlightColor); rem = rem.substring(1)
         }
     }
     pop()
+}
+
+/** 在追加普通文本时，把搜索关键词用高亮色标红（大小写不敏感）；无关键词/颜色未指定则原样追加 */
+private fun androidx.compose.ui.text.AnnotatedString.Builder.appendHighlighted(
+    text: String, keyword: String?, color: Color
+) {
+    if (text.isEmpty()) return
+    if (keyword.isNullOrBlank() || color == Color.Unspecified) { append(text); return }
+    val lower = text.lowercase()
+    val kw = keyword.lowercase()
+    var from = 0
+    while (from < text.length) {
+        val idx = lower.indexOf(kw, from)
+        if (idx < 0) { append(text.substring(from)); return }
+        if (idx > from) append(text.substring(from, idx))
+        withStyle(SpanStyle(color = color, fontWeight = FontWeight.SemiBold)) {
+            append(text.substring(idx, idx + keyword.length))
+        }
+        from = idx + keyword.length
+    }
 }
 
 /** 把普通文本按「URL / 英文 token」与「中文」分段，分别用 latinFont 和 cjkFont 追加，实现混合字体 */

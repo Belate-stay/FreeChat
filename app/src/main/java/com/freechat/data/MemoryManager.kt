@@ -10,7 +10,7 @@ import java.io.File
  * 对话记忆系统 —— 「硬盘 + 内存」分层：
  *
  * - 硬盘（记忆文件）：长期记忆，分两层
- *   - 主线/重大事件（kind="plot" / importance）：剧情走向、关系转变、关键承诺，长期不淘汰、检索时始终注入
+ *   - 主线/重大事件（kind="plot"）：剧情走向、关系转变、关键承诺，长期不淘汰、检索时始终注入
  *   - 细节（kind="detail"）：普通闲聊细节，可滚动淘汰，按关键词命中才注入
  * - 内存（短期上下文）：当前对话的近期原始消息，由 ViewModel 直接喂给 LLM（callCompanionApi 的 takeLast(30)）
  */
@@ -53,13 +53,13 @@ class MemoryManager(private val filesDir: File) {
      * 根据用户输入搜索相关记忆，摘要拼接为一段上下文。
      * 硬盘层（主线/重大事件）始终注入（最新 8 条）；细节层按关键词命中注入。
      */
-    fun searchRelevant(convId: String, userInput: String, maxResults: Int = 5): String {
+    fun searchRelevant(convId: String, userInput: String, maxResults: Int = 5, plotLimit: Int = 8): String {
         val all = load(convId)
         if (all.isEmpty()) return ""
 
         val inputLower = userInput.lowercase()
-        // 硬盘（主线/重大事件）：永远不忘，取最新 8 条
-        val plot = all.filter { it.isPlot() }.takeLast(8)
+        // 硬盘（主线/重大事件）：永远不忘，取最新 plotLimit 条
+        val plot = all.filter { it.isPlot() }.takeLast(plotLimit)
         // 细节：关键词命中才注入
         val scoredDetail = all.filter { !it.isPlot() }.map { entry ->
             val matchCount = entry.keywords.count { kw -> inputLower.contains(kw.lowercase()) }
@@ -76,7 +76,8 @@ class MemoryManager(private val filesDir: File) {
 
     /** 构建用于 API 的记忆系统提示词片段 */
     fun buildMemoryContext(convId: String, userInput: String, highQuality: Boolean = false): String {
-        val memories = searchRelevant(convId, userInput)
+        // 高质量模式：注入更多记忆（主线 20 条 + 细节 12 条），追求极致记忆力，不吝 token
+        val memories = if (highQuality) searchRelevant(convId, userInput, maxResults = 12, plotLimit = 20) else searchRelevant(convId, userInput)
         if (memories.isEmpty()) return ""
         return if (highQuality) {
             "【你对这个用户已知的信息——以下是用户的原话摘录，要精准理解，不要脑补或篡改】\n$memories"
