@@ -31,6 +31,9 @@ import dev.chrisbanes.haze.HazeProgressive
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import com.freechat.ui.theme.pageBackground
+import com.freechat.ui.theme.hazeBackground
+import com.freechat.ui.theme.pageHeaderBackground
 
 /** 更新日志页：纯流式排版，无卡片；版本号 Consolas 放大，分类方向总结 + 主题色 + 竖条 + 有序列表，版本间分页线 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -46,18 +49,18 @@ fun ChangelogScreen(onBack: () -> Unit) {
     val topFadeZoneDp = HazeSpec.TopFadeZoneDp
     val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + topFadeZoneDp).toPx() }
 
-    Box(Modifier.fillMaxSize().background(colors.Background)) {
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).background(colors.Background) else Modifier)
+                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                 .verticalScroll(rememberScrollState())
                 .padding(top = statusBarHeightDp + titleBarAreaDp + 36.dp, bottom = 40.dp)
                 .padding(horizontal = 20.dp)
         ) {
-            ChangelogData.entries.forEachIndexed { idx, entry ->
+            s.changelogEntries.forEachIndexed { idx, entry ->
                 ChangelogEntryView(entry, colors)
-                if (idx != ChangelogData.entries.lastIndex) {
+                if (idx != s.changelogEntries.lastIndex) {
                     HorizontalDivider(
                         color = colors.Divider.copy(alpha = 0.45f),
                         modifier = Modifier.padding(vertical = 28.dp)
@@ -73,6 +76,7 @@ fun ChangelogScreen(onBack: () -> Unit) {
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp + topFadeZoneDp)
+                    .pageHeaderBackground(colors.Background)
                     .hazeEffect(state = hazeState) {
                         blurRadius = HazeSpec.TopBlurRadius
                         inputScale = HazeInputScale.None
@@ -86,7 +90,10 @@ fun ChangelogScreen(onBack: () -> Unit) {
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp)
-                    .background(colors.Background)
+                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
+                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
+                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
+                    .pageHeaderBackground(colors.Background)
             )
         }
 

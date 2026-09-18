@@ -17,7 +17,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -31,12 +30,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -48,16 +47,23 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.platform.TextToolbar
+import androidx.compose.ui.platform.TextToolbarStatus
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -87,7 +93,7 @@ import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.LocalChatFontFamily
-import com.freechat.ui.theme.frostedCard
+import com.freechat.ui.theme.liquidOpaqueBackground
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.HazeInputScale
@@ -109,6 +115,29 @@ private val EMOJI_LIST = listOf(
     "❤️", "💕", "💔", "💯", "🔥", "✨", "⭐", "🌟", "💫", "🎉", "🎊", "🤗",
     "🤭", "🫠", "💀", "😈", "👻", "🐶", "🐱", "🐰", "🌸", "🍀", "☀️", "🌙"
 )
+
+// =============================================
+// 「哑巴」文本工具条：让主输入框永远不弹安卓原生那一条（复制/粘贴/自动填充）。
+//
+// 为什么必须有它：Compose 的 BasicTextField 一被长按，就会通过 LocalTextToolbar 让系统
+// 弹一条悬浮小条。我们自己的「长按 = 叫出全屏输入菜单」同时也在弹卡片，两条叠在一起，
+// 用户截图里那句「粘贴 / 自动填充」就是它 —— 而且它是系统窗口，画在我们卡片上面，点不动。
+//
+// 做法是把这个 CompositionLocal 换成空实现：BasicTextField 照常调用，只是没人接活。
+// 代价是主输入框里没有「复制/剪切/全选」了 —— 用户要的就是这个（粘贴已经做成内置菜单项）。
+// 全屏输入卡片的输入框**不套**这个，那边长按仍然走系统原生那一条，粘贴还能用。
+// =============================================
+private object SuppressedTextToolbar : TextToolbar {
+    override val status: TextToolbarStatus = TextToolbarStatus.Hidden
+    override fun hide() = Unit
+    override fun showMenu(
+        rect: Rect,
+        onCopyRequested: (() -> Unit)?,
+        onPasteRequested: (() -> Unit)?,
+        onCutRequested: (() -> Unit)?,
+        onSelectAllRequested: (() -> Unit)?
+    ) = Unit
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -136,6 +165,52 @@ fun ChatInput(
     onRecordingChanged: (Boolean) -> Unit = {},
     hazeState: HazeState? = null,
     isCompanion: Boolean = false,
+    /**
+     * 叙事单发模式（动作演绎 / 剧情补足）：
+     * 一次只发一条、AI 回一条，发送后右侧按键立刻变成**终止键**。
+     * 点终止键 = 撤回刚发出去的那条消息 + 立刻掐断 AI 的思考与生成 + 把提示词放回输入框。
+     * 微信聊天档不走这条路（那边是连续发送，没有终止键）。
+     */
+    narrativeSingleSend: Boolean = false,
+    onRetract: () -> Unit = {},
+    /**
+     * 「把焦点抢到输入框」的信号：每次自增都让输入框获焦、键盘弹出。
+     * 点气泡改写提示词时用——要求是「点了气泡键盘直接弹出来」，而不是再弹一个编辑对话框。
+     */
+    focusTick: Int = 0,
+    /**
+     * 长按输入框 → 请求「全屏输入」菜单。
+     *
+     * 菜单**不在这里渲染**：它要的那层磨砂哑光玻璃必须和聊天内容在**同一个窗口**里
+     * 才糊得住（Popup 是独立窗口，采不到背景，只能退化成一块实色卡片），
+     * 所以交给 ChatScreen 用「窗口内浮层」去画。这里只负责把「用户长按了」报上去。
+     */
+    onFullscreenMenuRequest: () -> Unit = {},
+    /**
+     * 「展开全屏输入」的信号（长按菜单里点了那一下）：每次自增就展开。
+     * 与 [focusTick] 同一套「自增信号」的写法 —— 用布尔开关的话，用完之后还得有人负责复位。
+     */
+    fullscreenTick: Int = 0,
+    /**
+     * 「内置粘贴」的信号（长按菜单里点了那一下）：每次自增就把剪贴板文字插到光标处。
+     *
+     * 为什么粘在输入框这一层做、而不是让 ChatScreen 直接改草稿：文字住在这一层
+     * （`text`/`textSelection`/`textComposition` 三件套是这里的私有状态），外面只报意图，
+     * 免得两边各存一份光标位置、粘贴完光标跑到别处去。
+     * 与 [focusTick]/[fullscreenTick] 同一套「自增信号」的写法 —— 用布尔开关还得有人负责复位。
+     */
+    pasteTick: Int = 0,
+    /**
+     * 全屏输入卡片的展开/收起上报。
+     *
+     * 列表底部留白要按它加一截冗余 —— 卡片展开时输入框整体变高，不给列表补上这一截，
+     * 最后一条消息就被卡片压住、怎么滑都露不出来。留白的高度由调用方**实测**，
+     * 所以这里只报「开没开」，不报高度。
+     */
+    onExpandedChanged: (Boolean) -> Unit = {},
+    /** 非 null 表示正处于「改写提示词」状态，显示提示条（含取消入口） */
+    editingHint: String? = null,
+    onCancelEdit: () -> Unit = {},
     quotedContent: String? = null,
     quotedImagePath: String? = null,
     onClearQuote: () -> Unit = {},
@@ -180,9 +255,35 @@ fun ChatInput(
     var showEmojiPicker by remember { mutableStateOf(false) }
     // 全屏输入卡片：原输入框超过 3 行自动弹出，或长按输入框弹「全屏输入」选项后手动弹出
     var expanded by remember { mutableStateOf(false) }
-    var showFullscreenMenu by remember { mutableStateOf(false) }
+    // 长按那一下要「吃掉」主输入框自己的选字手势，理由见下面 blockSelection 的注释
+    var blockSelection by remember { mutableStateOf(false) }
     val fullscreenFocusRequester = remember { FocusRequester() }
+    // 长按菜单里点了「全屏输入」。展开本身由上面那条 LaunchedEffect(expanded) 负责抢焦点，
+    // 这里只管把开关拨过去（顺带把主输入框的选区清干净，免得展开后光标位置看着突兀）
+    LaunchedEffect(fullscreenTick) {
+        if (fullscreenTick > 0) {
+            blockSelection = false
+            expanded = true
+        }
+    }
     val mainFocusRequester = remember { FocusRequester() }
+    // 内置粘贴（长按菜单里那一项）。系统原生工具条已被 SuppressedTextToolbar 掐掉，
+    // 「粘贴」只能走这条路：插在光标处（没聚焦过就续在末尾），插完把焦点和光标还给输入框。
+    val clipboardManager = LocalClipboardManager.current
+    LaunchedEffect(pasteTick) {
+        if (pasteTick > 0) {
+            val pasted = clipboardManager.getText()?.text
+            if (!pasted.isNullOrEmpty()) {
+                val at = if (hasFocus) textSelection.min.coerceIn(0, text.length) else text.length
+                val end = if (hasFocus) textSelection.max.coerceIn(at, text.length) else text.length
+                text = text.substring(0, at) + pasted + text.substring(end)
+                textSelection = TextRange(at + pasted.length)
+                textComposition = null
+                blockSelection = false
+                mainFocusRequester.requestFocus()
+            }
+        }
+    }
     val textMeasurer = rememberTextMeasurer()
     // 原输入框的实际文字宽度（px）：按「原输入框的行数」判断是否弹出，而非全屏宽度或 \n 个数
     var mainFieldWidthPx by remember { mutableIntStateOf(0) }
@@ -209,7 +310,16 @@ fun ChatInput(
 
     // 展开时自动把焦点切到全屏输入框（键盘保持、光标跟上）；缩回由缩回按钮切回主输入框
     LaunchedEffect(expanded) {
+        onExpandedChanged(expanded)
         if (expanded) fullscreenFocusRequester.requestFocus()
+    }
+
+    // 外部请求聚焦（点气泡改写提示词）：超过 3 行会走上面的自动全屏，交回给全屏框抢焦点，
+    // 两个 requestFocus 同时打会互相打断，所以这里按行数分派，不要都调。
+    LaunchedEffect(focusTick) {
+        if (focusTick <= 0) return@LaunchedEffect
+        if (wrappedLineCount > 3) expanded = true
+        else mainFocusRequester.requestFocus()
     }
 
     // ──── 语音录音状态 ────
@@ -315,10 +425,19 @@ fun ChatInput(
     // 输入框上移 + 更强阴影，强化「悬浮半空」感
     val bottomSpace = (keyboardHeightDp + 8.dp).coerceAtLeast(36.dp)
 
+    // 生成中：右侧按键是否为「终止键」。
+    //  · 标准模式：一直是终止键（原来的行为）
+    //  · 动作演绎 / 剧情补足：也是终止键 —— 单发模式下正在生成时不可能有「再发一条」的需求，
+    //    那个位置就该让给终止键，而不是继续显示发送箭头让用户误以为能插话
+    //  · 微信聊天：不显示终止键，思考中仍可继续发消息（真人也是这样的）
+    val showStopKey = isLoading && (!isCompanion || narrativeSingleSend)
+
     // 发送动作
     val doSend = {
-        if (isLoading && !isCompanion) onStop()  // 拟人模式思考中仍可发消息
-        else if (!isEmpty) {
+        if (showStopKey) {
+            // 叙事单发：撤回 + 掐断 + 把提示词退回输入框，方便直接改完重发
+            if (narrativeSingleSend) onRetract() else onStop()
+        } else if (!isEmpty) {
             justSent = true
             onDraftChanged("")  // 先清草稿再发送
             onSend(text.trim())
@@ -356,6 +475,45 @@ fun ChatInput(
             Spacer(Modifier.height(8.dp))
         }
 
+        // ──── 改写提示词提示条 ────
+        // 必须有这个「取消」：改写态下输入框装的是那条旧提示词，如果用户改主意了直接清空输入框，
+        // 之后他打的任何新消息都会顶掉那条旧提示词而不是追加 —— 那是个没有出口的死状态。
+        if (editingHint != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(colors.Primary.copy(alpha = 0.12f))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.Edit, null, tint = colors.Primary, modifier = Modifier.size(13.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        editingHint,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                        color = colors.Primary
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        s.cancel,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+                        color = colors.Primary,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable(onClick = onCancelEdit)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        }
+
         // ──── 文件候选区（悬浮在输入框上方，显示文件名列表，可删除；仅标准模式）────
         if (pendingFiles.isNotEmpty()) {
             FileCandidateArea(
@@ -387,8 +545,11 @@ fun ChatInput(
         // ──── 全屏输入卡片（文字超过 3 行自动弹出 / 长按手动弹出，磨砂玻璃同款，平滑过渡）────
         AnimatedVisibility(
             visible = expanded,
-            enter = expandVertically(animationSpec = tween(220, easing = FastOutSlowInEasing)) + fadeIn(tween(200)),
-            exit = shrinkVertically(animationSpec = tween(180, easing = FastOutLinearInEasing)) + fadeOut(tween(160))
+            // 展开用减速入位、收起用加速离场（iOS 那一套）：展开时稳稳铺开，收起时干脆让位
+            enter = expandVertically(animationSpec = tween(220, easing = FreeChatAnimation.iosEaseOut)) +
+                fadeIn(tween(200, easing = FreeChatAnimation.iosEaseOut)),
+            exit = shrinkVertically(animationSpec = tween(180, easing = FreeChatAnimation.iosEaseIn)) +
+                fadeOut(tween(160, easing = FreeChatAnimation.iosEaseIn))
         ) {
             Column {
                 Box(
@@ -398,7 +559,9 @@ fun ChatInput(
                         .shadow(elevation = 6.dp, shape = RoundedCornerShape(18.dp))
                         .clip(RoundedCornerShape(18.dp))
                         .then(
-                            if (advancedMaterial && hazeState != null) Modifier.hazeEffect(state = hazeState) {
+                            if (advancedMaterial && hazeState != null) Modifier
+                                .liquidOpaqueBackground(colors.Background)
+                                .hazeEffect(state = hazeState) {
                                 blurRadius = 28.dp
                                 inputScale = HazeInputScale.None
                                 backgroundColor = if (isDark) Color.Black.copy(alpha = 0.42f) else Color.White.copy(alpha = 0.62f)
@@ -413,7 +576,7 @@ fun ChatInput(
                             Text(s.fullscreenInput, style = MaterialTheme.typography.labelMedium, color = colors.TextTertiary)
                             Spacer(Modifier.weight(1f))
                             IconButton(onClick = { expanded = false; mainFocusRequester.requestFocus() }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Filled.KeyboardArrowDown, "缩回", tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Filled.KeyboardArrowDown, s.collapseInput, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
                             }
                         }
                         BasicTextField(
@@ -452,7 +615,10 @@ fun ChatInput(
                         .clip(inputShape)
                         .then(
                             if (advancedMaterial && hazeState != null) {
-                                Modifier.hazeEffect(state = hazeState) {
+                                // 衬底：炫彩下补不透明底，磨砂才盖得住正文（见 liquidOpaqueBackground）
+                                Modifier
+                                    .liquidOpaqueBackground(colors.Background)
+                                    .hazeEffect(state = hazeState) {
                                     blurRadius = 28.dp
                                     inputScale = HazeInputScale.None
                                     backgroundColor = if (isDark) Color.Black.copy(alpha = 0.42f) else Color.White.copy(alpha = 0.62f)
@@ -492,71 +658,111 @@ fun ChatInput(
                         }
 
                         // 输入区
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 4.dp)
-                                .heightIn(min = 40.dp)
-                                .pointerInput(Unit) {
-                                    // 消费长按，阻止 BasicTextField 的文本选择工具栏弹出，改弹「全屏输入」选项
-                                    detectTapGestures(onLongPress = { showFullscreenMenu = true })
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            BasicTextField(
-                                value = TextFieldValue(if (expanded) "" else text, textSelection, if (expanded) null else textComposition),
-                                onValueChange = { v -> text = v.text; textSelection = v.selection; textComposition = v.composition },
-                                readOnly = expanded,
-                                textStyle = inputTextStyle,
-                                cursorBrush = SolidColor(colors.Primary),
+                        // 主输入框外面套一层「哑巴工具条」（见上面 SuppressedTextToolbar 的说明）：
+                        // 长按不再叠出系统那条「粘贴/自动填充」，剪贴板走长按菜单里的内置「粘贴」项。
+                        CompositionLocalProvider(LocalTextToolbar provides SuppressedTextToolbar) {
+                            Box(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .onGloballyPositioned { coords -> mainFieldWidthPx = coords.size.width }
-                                    .focusRequester(mainFocusRequester)
-                                    .onFocusChanged { focusState ->
-                                        hasFocus = focusState.isFocused
-                                        if (focusState.isFocused) {
-                                            showEmojiPicker = false
-                                            onInputFocused()
+                                    .weight(1f)
+                                    .padding(horizontal = 4.dp)
+                                    .heightIn(min = 40.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                BasicTextField(
+                                    value = TextFieldValue(if (expanded) "" else text, textSelection, if (expanded) null else textComposition),
+                                    onValueChange = { v ->
+                                        text = v.text
+                                        // 长按之后由「选词」带回来的选区一律不收（见 blockSelection 的说明）：
+                                        // 把旧的光标位置原样传回去，选区一直是收拢的，系统选字工具条就没理由出现
+                                        textSelection = if (blockSelection) textSelection else v.selection
+                                        textComposition = v.composition
+                                    },
+                                    readOnly = expanded,
+                                    textStyle = inputTextStyle,
+                                    cursorBrush = SolidColor(colors.Primary),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .onGloballyPositioned { coords -> mainFieldWidthPx = coords.size.width }
+                                        .focusRequester(mainFocusRequester)
+                                        .onFocusChanged { focusState ->
+                                            hasFocus = focusState.isFocused
+                                            if (focusState.isFocused) {
+                                                showEmojiPicker = false
+                                                onInputFocused()
+                                            }
+                                        }
+                                        // 长按输入框 → 全屏输入菜单。
+                                        //
+                                        // **必须在 Initial 这一趟拦**。事件在 Main 趟是「从最里层往上」走的，
+                                        // BasicTextField 自己的选字手势会先把长按认下来，挂在外层 Box 上的
+                                        // detectTapGestures 永远等不到那一下 —— 这就是之前「长按没反应」的全部原因。
+                                        // Initial 是「从外往里」，我们是它外面最近的一圈，第一个拿到。
+                                        //
+                                        // 检测器自己写、不用 detectTapGestures：那个 API 只能挂 Main 趟，
+                                        // 而 AwaitPointerEventScope.withTimeout 是 Compose 给指针作用域准备的
+                                        // 计时器（超时抛 PointerEventTimeoutCancellationException），
+                                        // 在 Initial 趟里正好用得上。
+                                        .pointerInput(Unit) {
+                                            awaitPointerEventScope {
+                                                while (true) {
+                                                    val down = awaitFirstDown(
+                                                        requireUnconsumed = false,
+                                                        pass = PointerEventPass.Initial
+                                                    )
+                                                    // 每一轮新手势都解除封锁：上一下长按的余波不带到下一次
+                                                    blockSelection = false
+                                                    val longPressed = try {
+                                                        withTimeout(viewConfiguration.longPressTimeoutMillis) {
+                                                            while (true) {
+                                                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                                                // 抬手了：这是普通点击（放光标），不是长按
+                                                                if (!change.pressed) break
+                                                            }
+                                                            false
+                                                        }
+                                                    } catch (_: PointerEventTimeoutCancellationException) {
+                                                        true
+                                                    }
+                                                    if (longPressed) {
+                                                        blockSelection = true
+                                                        onFullscreenMenuRequest()
+                                                        // 剩下的这段手势一直吃到抬手：拖拽/选字都不该再传给
+                                                        // BasicTextField —— 长按在我们这儿的意思是「叫出全屏输入」，
+                                                        // 不能再同时选一段词、弹一条复制粘贴工具条压在菜单上
+                                                        while (true) {
+                                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                                            event.changes.forEach { it.consume() }
+                                                            if (event.changes.none { it.pressed }) break
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    decorationBox = { inner ->
+                                        Box(contentAlignment = Alignment.CenterStart) {
+                                            if (expanded) {
+                                                Text(
+                                                    s.fullscreenInputting,
+                                                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp),
+                                                    color = colors.TextTertiary,
+                                                    modifier = Modifier.padding(top = 1.dp)
+                                                )
+                                            } else if (text.isEmpty() && pendingImages.isEmpty() && !hasFocus) {
+                                                Text(
+                                                    if (isCompanion) s.companionPlaceholder else s.inputPlaceholder,
+                                                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp),
+                                                    color = colors.TextTertiary,
+                                                    modifier = Modifier.padding(top = 1.dp)
+                                                )
+                                            }
+                                            inner()
                                         }
                                     },
-                                decorationBox = { inner ->
-                                    Box(contentAlignment = Alignment.CenterStart) {
-                                        if (expanded) {
-                                            Text(
-                                                "全屏输入中...",
-                                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp),
-                                                color = colors.TextTertiary,
-                                                modifier = Modifier.padding(top = 1.dp)
-                                            )
-                                        } else if (text.isEmpty() && pendingImages.isEmpty() && !hasFocus) {
-                                            Text(
-                                                if (isCompanion) s.companionPlaceholder else s.inputPlaceholder,
-                                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp),
-                                                color = colors.TextTertiary,
-                                                modifier = Modifier.padding(top = 1.dp)
-                                            )
-                                        }
-                                        inner()
-                                    }
-                                },
-                                maxLines = 3
-                            )
-                            // 长按输入框弹出的「全屏输入」选项菜单
-                            DropdownMenu(
-                                expanded = showFullscreenMenu,
-                                onDismissRequest = { showFullscreenMenu = false },
-                                modifier = Modifier.frostedCard(null, colors, advancedMaterial, RoundedCornerShape(20.dp), fallback = colors.Surface),
-                                shape = RoundedCornerShape(20.dp),
-                                containerColor = Color.Transparent,
-                                shadowElevation = 0.dp,
-                                properties = PopupProperties(focusable = false)
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text(s.fullscreenInput, color = colors.TextPrimary) },
-                                    onClick = { showFullscreenMenu = false; expanded = true },
-                                    leadingIcon = { Icon(Icons.Filled.OpenInFull, null, tint = colors.Primary, modifier = Modifier.size(20.dp)) }
+                                    maxLines = 3
                                 )
+                                // 长按弹出的「全屏输入」菜单不在这儿画：它要的磨砂玻璃得和背景同一个窗口，
+                                // 见 onFullscreenMenuRequest 的说明，实际渲染在 ChatScreen 的窗口内浮层里
                             }
                         }
 
@@ -608,12 +814,17 @@ fun ChatInput(
             Box(
                 modifier = Modifier
                     .size(40.dp)
-                    .scale(sendScale)
+                    // 按压缩放走绘制层（1.0.49）：`Modifier.scale(sendScale)` 是在**组合期**读的，
+                    // 弹簧那 200ms 里这个按钮的整棵子树每帧重组一次。graphicsLayer 的 lambda 只在
+                    // 绘制阶段读，缩放值一变只重绘 —— 手感一模一样，重组没了。
+                    .graphicsLayer { scaleX = sendScale; scaleY = sendScale }
                     .shadow(6.dp, CircleShape)
                     .clip(CircleShape)
                     .then(
                         if (advancedMaterial && hazeState != null) {
-                            Modifier.hazeEffect(state = hazeState) {
+                            Modifier
+                                .liquidOpaqueBackground(colors.Background)
+                                .hazeEffect(state = hazeState) {
                                 blurRadius = 28.dp
                                 inputScale = HazeInputScale.None
                                 backgroundColor = voiceBtnColor.copy(alpha = if (isDark) 0.55f else 0.7f)
@@ -628,7 +839,9 @@ fun ChatInput(
                         voiceBtnTopLeftWin = coords.positionInWindow()
                     }
                     .then(
-                        if (isEmpty && !isLoading) {
+                        // 单发模式生成中：即使输入框里已经有字，这个键也必须是终止键，
+                        // 所以这里先把 showStopKey 排除掉，走下面的 clickable 分支
+                        if (isEmpty && !isLoading && !showStopKey) {
                             // 空输入框：按住录音，移出语音键出现取消弧线，松手位置决定发送/取消
                             Modifier.pointerInput(Unit) {
                                 awaitEachGesture {
@@ -668,15 +881,15 @@ fun ChatInput(
                                 }
                             }
                         } else {
-                            Modifier.clickable(enabled = (isLoading || !isEmpty) && !isAddingImages) { doSend() }
+                            Modifier.clickable(enabled = (showStopKey || !isEmpty) && !isAddingImages) { doSend() }
                         }
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 when {
-                    isLoading && !isCompanion -> Icon(Icons.Filled.Stop, "停止", tint = iconTint, modifier = Modifier.size(18.dp))
-                    isEmpty -> Icon(Icons.Filled.Mic, "按住说话", tint = iconTint, modifier = Modifier.size(20.dp))
-                    else -> Icon(Icons.Filled.ArrowUpward, "发送", tint = iconTint, modifier = Modifier.size(18.dp))
+                    showStopKey -> Icon(Icons.Filled.Stop, s.stopAction, tint = iconTint, modifier = Modifier.size(18.dp))
+                    isEmpty -> Icon(Icons.Filled.Mic, s.holdToTalk, tint = iconTint, modifier = Modifier.size(20.dp))
+                    else -> Icon(Icons.Filled.ArrowUpward, s.sendAction, tint = iconTint, modifier = Modifier.size(18.dp))
                 }
             }
         }
@@ -742,13 +955,18 @@ private fun ImageCandidateArea(
     hazeState: HazeState?,
     advancedMaterial: Boolean
 ) {
+    val s = LocalStrings.current
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .shadow(elevation = 6.dp, shape = RoundedCornerShape(18.dp))
             .clip(RoundedCornerShape(18.dp))
             .then(
-                if (advancedMaterial && hazeState != null) Modifier.hazeEffect(state = hazeState) {
+                // 衬底：流动炫彩下补一层不透明底（非炫彩下空操作）—— 不补的话 Haze 抓到的是
+                // 一层透明样本，磨砂盖不住下面的正文，就成了一块半透明的 PPT 图层
+                if (advancedMaterial && hazeState != null) Modifier
+                    .liquidOpaqueBackground(colors.Background)
+                    .hazeEffect(state = hazeState) {
                     blurRadius = 28.dp
                     inputScale = HazeInputScale.None
                     backgroundColor = if (isDark) Color.Black.copy(alpha = 0.42f) else Color.White.copy(alpha = 0.62f)
@@ -763,7 +981,7 @@ private fun ImageCandidateArea(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "图片 ${images.size}/9",
+                    s.imageCountLabel(images.size, 9),
                     style = MaterialTheme.typography.labelSmall,
                     color = colors.TextTertiary
                 )
@@ -809,7 +1027,7 @@ private fun ImageCandidateArea(
                         ) {
                             Icon(
                                 Icons.Filled.Close,
-                                contentDescription = "移除",
+                                contentDescription = s.removeAction,
                                 tint = Color.White,
                                 modifier = Modifier.size(10.dp)
                             )
@@ -832,13 +1050,18 @@ private fun FileCandidateArea(
     hazeState: HazeState?,
     advancedMaterial: Boolean
 ) {
+    val s = LocalStrings.current
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .shadow(elevation = 6.dp, shape = RoundedCornerShape(18.dp))
             .clip(RoundedCornerShape(18.dp))
             .then(
-                if (advancedMaterial && hazeState != null) Modifier.hazeEffect(state = hazeState) {
+                // 衬底：流动炫彩下补一层不透明底（非炫彩下空操作）—— 不补的话 Haze 抓到的是
+                // 一层透明样本，磨砂盖不住下面的正文，就成了一块半透明的 PPT 图层
+                if (advancedMaterial && hazeState != null) Modifier
+                    .liquidOpaqueBackground(colors.Background)
+                    .hazeEffect(state = hazeState) {
                     blurRadius = 28.dp
                     inputScale = HazeInputScale.None
                     backgroundColor = if (isDark) Color.Black.copy(alpha = 0.42f) else Color.White.copy(alpha = 0.62f)
@@ -853,7 +1076,7 @@ private fun FileCandidateArea(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("文件 ${files.size}/3", style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
+                Text(s.fileCountLabel(files.size, 3), style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
                 Spacer(Modifier.weight(1f))
                 if (isAdding) {
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = colors.Primary)
@@ -881,7 +1104,7 @@ private fun FileCandidateArea(
                             .clickable { onRemove(idx) },
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Filled.Close, "移除", tint = colors.TextTertiary, modifier = Modifier.size(14.dp))
+                        Icon(Icons.Filled.Close, s.removeAction, tint = colors.TextTertiary, modifier = Modifier.size(14.dp))
                     }
                 }
             }
@@ -900,13 +1123,18 @@ private fun QuotePreviewCard(
     hazeState: HazeState?,
     advancedMaterial: Boolean
 ) {
+    val s = LocalStrings.current
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .shadow(elevation = 6.dp, shape = RoundedCornerShape(18.dp))
             .clip(RoundedCornerShape(18.dp))
             .then(
-                if (advancedMaterial && hazeState != null) Modifier.hazeEffect(state = hazeState) {
+                // 衬底：流动炫彩下补一层不透明底（非炫彩下空操作）—— 不补的话 Haze 抓到的是
+                // 一层透明样本，磨砂盖不住下面的正文，就成了一块半透明的 PPT 图层
+                if (advancedMaterial && hazeState != null) Modifier
+                    .liquidOpaqueBackground(colors.Background)
+                    .hazeEffect(state = hazeState) {
                     blurRadius = 28.dp
                     inputScale = HazeInputScale.None
                     backgroundColor = if (isDark) Color.Black.copy(alpha = 0.42f) else Color.White.copy(alpha = 0.62f)
@@ -925,20 +1153,20 @@ private fun QuotePreviewCard(
                 // 引用图片：显示图片缩略图（与图片候选区缩略图一致大小）
                 LocalImage(
                     path = imagePath,
-                    contentDescription = "引用图片",
+                    contentDescription = s.quotedImage,
                     modifier = Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)),
                     contentScale = ContentScale.Crop,
                     targetMaxDim = 256
                 )
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("引用", style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
+                    Text(s.quoteAction, style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
                     Spacer(Modifier.height(2.dp))
-                    Text("图片", style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
+                    Text(s.imageLabel, style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
                 }
             } else {
                 Column(Modifier.weight(1f)) {
-                    Text("引用", style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
+                    Text(s.quoteAction, style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
                     Spacer(Modifier.height(2.dp))
                     Text(
                         content ?: "",
@@ -950,7 +1178,7 @@ private fun QuotePreviewCard(
                 }
             }
             IconButton(onClick = onClear, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Filled.Close, "取消引用", tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                Icon(Icons.Filled.Close, s.cancelQuote, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -963,6 +1191,7 @@ private fun VoiceCancelArc(
     cancelColor: Color,
     density: androidx.compose.ui.unit.Density
 ) {
+    val s = LocalStrings.current
     val arcRadiusPx = with(density) { 60.dp.toPx() }
     Popup(
         popupPositionProvider = remember(fingerWinPos) { FixedPositionProvider(fingerWinPos) },
@@ -1004,7 +1233,7 @@ private fun VoiceCancelArc(
                 )
             }
             Text(
-                "松手取消",
+                s.releaseToCancel,
                 color = cancelColor.copy(alpha = 0.85f),
                 fontSize = 12.sp,
                 modifier = Modifier

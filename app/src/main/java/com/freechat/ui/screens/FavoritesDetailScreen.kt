@@ -41,6 +41,7 @@ import com.freechat.model.Message
 import com.freechat.model.Role
 import com.freechat.ui.components.LocalImage
 import com.freechat.ui.components.MarkdownText
+import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.components.cjkLineBreak
 import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.HazeSpec
@@ -56,6 +57,11 @@ import dev.chrisbanes.haze.rememberHazeState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import com.freechat.ui.theme.pageBackground
+import com.freechat.ui.theme.hazeBackground
+import com.freechat.ui.theme.pageHeaderBackground
+import com.freechat.ui.theme.liquidSourceBackdrop
+import com.freechat.ui.theme.LocalLiquidMode
 
 /**
  * 收藏详情：
@@ -100,12 +106,27 @@ fun FavoritesDetailScreen(
     val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + topFadeZoneDp).toPx() }
     val bottomBarHeightPx = with(density) { HazeSpec.BottomFadeHeightDp.toPx() }
 
-    Box(Modifier.fillMaxSize().background(colors.Background)) {
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        // ===== 底部渐隐区的「采样垫底」：垫在内容源节点下面的一小块不透明流光副本 =====
+        // 炫彩下页面源是透明的 → Haze 抓到的样本只有字没有底 → 磨完盖不住下面清晰的正文，
+        // 底部那条渐进模糊带就成了「墨汁晕开、但内容还读得出来」。这块让样本自己带上底。
+        // 详细原理与 zIndex 的讲究见 liquidSourceBackdrop 的注释。
+        if (advancedMaterial && LocalLiquidMode.current) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(HazeSpec.BottomFadeHeightDp)
+                    .hazeSource(state = hazeState, zIndex = -1f)
+                    .liquidSourceBackdrop(colors.Background)
+            )
+        }
+
         // ===== 内容区（可滚动，高级材质下作为模糊源，沉浸到标题栏之下） =====
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).background(colors.Background) else Modifier),
+                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier),
             contentPadding = PaddingValues(
                 start = 16.dp, end = 16.dp,
                 top = statusBarHeightDp + titleBarAreaDp + 8.dp,
@@ -133,6 +154,7 @@ fun FavoritesDetailScreen(
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp + topFadeZoneDp)
+                    .pageHeaderBackground(colors.Background)
                     .hazeEffect(state = hazeState) {
                         blurRadius = HazeSpec.TopBlurRadius
                         inputScale = HazeInputScale.None
@@ -150,7 +172,10 @@ fun FavoritesDetailScreen(
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp)
-                    .background(colors.Background)
+                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
+                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
+                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
+                    .pageHeaderBackground(colors.Background)
             )
         }
 
@@ -191,6 +216,11 @@ fun FavoritesDetailScreen(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .height(HazeSpec.BottomFadeHeightDp)
+                    // 1.0.50 尾巴：这里原来垫的是 liquidOpaqueBackground（一条与 progressive
+                    // 同斜率的渐显衬底）。它只能把正文**压暗**，压不掉那条半透明的模糊层
+                    // —— 用户看到的还是「墨汁晕开、内容仍可读」。现在衬底挪到了**源节点下面**
+                    // 那一块（见上面 liquidSourceBackdrop），让磨出来的层本身不透明，
+                    // 才真的把清晰正文替换掉。这里不能再垫了：两层叠起来正文会被吃掉两遍。
                     .hazeEffect(state = hazeState) {
                         blurRadius = HazeSpec.BottomBlurRadius
                         inputScale = HazeInputScale.None
@@ -243,26 +273,29 @@ fun FavoritesDetailScreen(
                 }
             }
         }
-    }
 
-    // 取消收藏确认弹窗
-    if (showUnfavoriteConfirm) {
-        AlertDialog(
-            onDismissRequest = { showUnfavoriteConfirm = false },
-            containerColor = colors.Surface,
-            title = { Text(s.unfavorite, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold) },
-            text = { Text(s.confirmUnfavorite, color = colors.TextSecondary) },
-            confirmButton = {
-                TextButton(onClick = { showUnfavoriteConfirm = false; onUnfavorite() }) {
-                    Text(s.confirm, color = colors.ErrorRed)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showUnfavoriteConfirm = false }) {
-                    Text(s.cancel, color = colors.TextSecondary)
-                }
-            }
-        )
+        // 这是窗口内的底部磨砂哑光玻璃弹层（原来用 AlertDialog：独立窗口糊不到背景，只能把背景压暗）
+        // 点外面 / 返回键 = 原来的 onDismissRequest（只关弹层，不取消收藏）
+        SheetPanel(
+            visible = showUnfavoriteConfirm,
+            onDismiss = { showUnfavoriteConfirm = false },
+            title = s.unfavorite,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState,
+            confirmLabel = s.confirm,
+            // 危险操作：确认键红底，别让它长得跟普通「确定」一样
+            confirmDanger = true,
+            onConfirm = { showUnfavoriteConfirm = false; onUnfavorite() }
+        ) {
+            // 连续段的详情页点「取消收藏」清的是整段（见 ChatViewModel.unfavoriteItems），
+            // 文案必须跟着说清楚条数，否则单条口吻的提示会让用户以为只掉一条
+            Text(
+                if (multi) s.confirmUnfavoriteRun(run.size) else s.confirmUnfavorite,
+                color = colors.TextSecondary
+            )
+        }
     }
 
     // 图片全屏预览（点击图片弹出，点任意处关闭）
@@ -308,7 +341,7 @@ private fun DetailMessageFlat(msg: Message, colors: FreeChatColors, s: AppString
 private fun DetailMessageHeader(msg: Message, colors: FreeChatColors, s: AppStrings) {
     val isUser = msg.role == Role.USER
     val time = remember(msg.timestamp) {
-        SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.CHINESE).format(Date(msg.timestamp))
+        SimpleDateFormat(s.dateYmdTime, Locale.getDefault()).format(Date(msg.timestamp))
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
@@ -337,6 +370,7 @@ private fun MessageBody(
     onPreviewImage: (String, Boolean) -> Unit,
     onOpenAttachment: (String?) -> Unit
 ) {
+    val s = LocalStrings.current
     if (isUser) {
         Text(
             msg.content,
@@ -409,7 +443,7 @@ private fun MessageBody(
             )
             Spacer(Modifier.weight(1f))
             Text(
-                "点击打开",
+                s.tapToOpen,
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.TextTertiary
             )
@@ -453,10 +487,11 @@ private fun FullScreenImagePreview(source: String, isLocal: Boolean, onDismiss: 
 
 /** 打开附件（docx/xlsx/pptx/pdf 等），交给系统对应应用 */
 private fun openAttachment(context: Context, path: String) {
+    val s = com.freechat.i18n.LocaleManager.strings()
     try {
         val file = File(path)
         if (!file.exists()) {
-            Toast.makeText(context, "文件不存在或已被删除", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, s.fileMissing, Toast.LENGTH_SHORT).show()
             return
         }
         val uri = FileProvider.getUriForFile(context, "com.freechat.fileprovider", file)
@@ -474,6 +509,6 @@ private fun openAttachment(context: Context, path: String) {
         }
         context.startActivity(intent)
     } catch (e: Exception) {
-        Toast.makeText(context, "无法打开文件：${e.message}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, s.openFileFailed(e.message ?: ""), Toast.LENGTH_SHORT).show()
     }
 }

@@ -10,12 +10,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.freechat.i18n.LocalStrings
 import com.freechat.ui.theme.*
 
 /** 简洁版欢迎头部 — 仅保留大号时间问候语 */
 @Composable
 fun WelcomeHeader(isDark: Boolean, greeting: String) {
     val colors = if (isDark) DarkColors else LightColors
+    val s = LocalStrings.current
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
@@ -33,7 +35,7 @@ fun WelcomeHeader(isDark: Boolean, greeting: String) {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "想聊点什么？",
+            s.welcomePrompt,
             style = MaterialTheme.typography.bodyLarge,
             color = colors.TextSecondary,
             textAlign = TextAlign.Center

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12+（dataExtractionRules）。
+
+    两个地方都要排掉 `freechat_session`，理由见 backup_rules.xml：
+    登录令牌和同步进度都只属于**这台设备上的这一次登录**，
+    既不该上云备份（cloud-backup），也不该在换机直传时过去（device-transfer）。
+    聊天内容本身不排除 —— 那才是用户真正在乎的东西。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="freechat_session.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="freechat_session.xml" />
+    </device-transfer>
+</data-extraction-rules>

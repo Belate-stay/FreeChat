@@ -1,20 +1,32 @@
 package com.freechat.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -22,13 +34,17 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.freechat.i18n.LocalStrings
 import com.freechat.ui.theme.LocalChatFontFamily
 import com.freechat.ui.theme.LocalFontScale
 import com.freechat.ui.theme.LocalLatinFontFamily
+import com.freechat.ui.theme.LocalFreeChatColors
 import kotlin.math.max
 
 /** CJK 标点禁则：标点（，。！？：；等）不出现在行首，悬挂到上一行行尾。Strict 映射 LINE_BREAK_STYLE_STRICT。 */
@@ -37,6 +53,15 @@ internal val cjkLineBreak = LineBreak(
     strictness = LineBreak.Strictness.Strict,
     wordBreak = LineBreak.WordBreak.Default
 )
+
+/**
+ * 列表序号那一栏多宽，以及序号和正文之间留多宽。
+ *
+ * 序号的槽位是**定宽**的：不定宽的话「1.」和「10.」会让正文起点左右跳，
+ * 一串条目排下来右边参差不齐。22dp 是 15sp 下「10.」的实测宽度，再窄就要折行。
+ */
+private val BulletGutterDp = 22.dp
+private val BulletGapDp = 4.dp
 
 // ========== 块结构 ==========
 internal sealed class MdBlock {
@@ -76,7 +101,7 @@ internal fun parseMarkdown(text: String): List<MdBlock> {
     var pendingParagraphLines = mutableListOf<String>()
     fun flushParagraph() {
         if (pendingParagraphLines.isNotEmpty()) {
-            blocks.add(MdBlock.Paragraph(pendingParagraphLines.joinToString("\n").trim()))
+            blocks.add(MdBlock.Paragraph(softJoin(pendingParagraphLines).trim()))
             pendingParagraphLines.clear()
         }
     }
@@ -186,6 +211,34 @@ internal fun parseMarkdown(text: String): List<MdBlock> {
     return mergeParagraphs(blocks)
 }
 
+/**
+ * 段落里的单换行按 Markdown 的规矩当**软换行** —— 合成一行，交给排版按屏幕宽度重新折。
+ *
+ * 原先的做法是保留 "\n"、渲染时再换成 `"  \n"`（Markdown 的硬换行），于是
+ * **模型自己在哪折的行，屏幕上就在哪断**。模型是按它那边的宽度折的，到手机上
+ * 经常一句话走到一半、后面空半行再接着写 —— 用户点名要的就是这个别再来。
+ *
+ * 接缝处要不要补空格看两侧是不是 CJK：中文之间补空格会凭空多出一道缝，
+ * 英文之间不补又会把两个词粘成一个。
+ */
+private fun softJoin(lines: List<String>): String {
+    if (lines.size <= 1) return lines.firstOrNull().orEmpty()
+    val sb = StringBuilder()
+    for (line in lines) {
+        if (sb.isEmpty()) { sb.append(line); continue }
+        val prev = sb.last()
+        val next = line.firstOrNull()
+        val glue = if (isCjk(prev) && (next == null || isCjk(next))) "" else " "
+        sb.append(glue).append(line)
+    }
+    return sb.toString()
+}
+
+private fun isCjk(ch: Char): Boolean {
+    val c = ch.code
+    return c in 0x2E80..0x9FFF || c in 0x3000..0x303F || c in 0xFF00..0xFFEF || c in 0xAC00..0xD7AF
+}
+
 private fun parseTableRow(line: String): List<String> {
     return line.trim('|').split("|").map { it.trim() }
 }
@@ -208,6 +261,83 @@ private fun mergeParagraphs(blocks: List<MdBlock>): List<MdBlock> {
 }
 
 // ========== 主组件 ==========
+/**
+ * 多选态下旁路 SelectionContainer：
+ * 系统选字要长按，长按会把 tap 吃掉 → 气泡的勾选层收不到点击。
+ * 关掉 SelectionContainer 后，长按/点击都落到多选点击层上。
+ */
+@Composable
+internal fun SelectionBox(enabled: Boolean, content: @Composable () -> Unit) {
+    if (enabled) SelectionContainer { content() } else content()
+}
+
+/**
+ * 代码卡的标题栏：左边是语言标签（```powershell 里那个 powershell），右边一个「一键复制」。
+ *
+ * 语言标签为空就**什么都不显示** —— 有些模型直接甩一个 ``` 出来，硬凑一个「代码」当名字
+ * 只是多一行噪音。点了复制之后按钮自己变成「已复制 ✓」，1.6 秒后变回来（不弹 Toast，
+ * 免得和系统那句「已复制到剪贴板」打架）。
+ */
+@Composable
+private fun CodeCardHeader(lang: String, code: String, textColor: Color) {
+    val s = LocalStrings.current
+    val context = LocalContext.current
+    var copied by remember(code) { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            kotlinx.coroutines.delay(1600)
+            copied = false
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 6.dp, top = 3.dp, bottom = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (lang.isNotBlank()) {
+            Text(
+                lang,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 0.6.sp
+                ),
+                color = textColor.copy(alpha = 0.45f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        } else {
+            Spacer(Modifier.weight(1f))
+        }
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(7.dp))
+                .clickable {
+                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as? android.content.ClipboardManager
+                    cm?.setPrimaryClip(android.content.ClipData.newPlainText("FreeChat", code))
+                    copied = true
+                }
+                .padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (copied) Icons.Filled.Check else Icons.Filled.ContentCopy,
+                contentDescription = s.copyMessage,
+                tint = if (copied) textColor.copy(alpha = 0.75f) else textColor.copy(alpha = 0.5f),
+                modifier = Modifier.size(13.dp)
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                if (copied) s.copied else s.copyMessage,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (copied) textColor.copy(alpha = 0.75f) else textColor.copy(alpha = 0.5f)
+            )
+        }
+    }
+}
+
 @Composable
 fun MarkdownText(
     content: String,
@@ -217,7 +347,9 @@ fun MarkdownText(
     quoteBarColor: Color,
     dividerColor: Color,
     highlightKeyword: String? = null,
-    highlightColor: Color = Color.Unspecified
+    highlightColor: Color = Color.Unspecified,
+    // 多选态传 false：关闭正文的选字能力（否则长按会弹系统选字工具栏）
+    selectionEnabled: Boolean = true
 ) {
     val blocks = remember(content) { parseMarkdown(content) }
     val baseSize = 15.sp
@@ -244,9 +376,12 @@ fun MarkdownText(
                         1 -> 22.sp; 2 -> 20.sp; 3 -> 17.sp; 4 -> 16.sp; else -> 15.sp
                     }
                     Spacer(modifier = Modifier.height(if (block.level <= 2) (18 * scale).dp else (10 * scale).dp))
-                    SelectionContainer {
+                    SelectionBox(selectionEnabled) {
                         Text(
-                            buildStyledLine(block.text, textColor, FontWeight.Bold, fs, chatFont, highlightKeyword, highlightColor),
+                            buildStyledLine(
+                                block.text, textColor, FontWeight.Bold, fs, chatFont,
+                                highlightKeyword, highlightColor, LocalFreeChatColors.current.Primary
+                            ),
                             modifier = Modifier.fillMaxWidth(),
                             lineHeight = fs * 1.4f
                         )
@@ -256,22 +391,35 @@ fun MarkdownText(
 
                 is MdBlock.CodeBlock -> {
                     Spacer(modifier = Modifier.height(6.dp))
-                    Box(
+                    // 代码卡：上面一条「语言标签 + 一键复制」的标题栏，下面才是代码，代码区自己横向滚动。
+                    // 标题栏必须**放在滚动区之外** —— 放进去的话代码一横向滑动，标签和复制按钮就跟着跑了。
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(10.dp))
                             .background(codeBgColor)
-                            .padding(12.dp)
                     ) {
-                        SelectionContainer {
-                            Text(
-                                block.code,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontFamily = FontFamily.Monospace, fontSize = 13.sp
-                                ),
-                                color = textColor
-                            )
+                        CodeCardHeader(
+                            lang = block.lang,
+                            code = block.code,
+                            textColor = textColor
+                        )
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(dividerColor.copy(alpha = 0.45f)))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(12.dp)
+                        ) {
+                            SelectionBox(selectionEnabled) {
+                                Text(
+                                    block.code,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontFamily = FontFamily.Monospace, fontSize = 13.sp
+                                    ),
+                                    color = textColor
+                                )
+                            }
                         }
                     }
                     Spacer(modifier = Modifier.height(6.dp))
@@ -287,7 +435,8 @@ fun MarkdownText(
                         Spacer(Modifier.width(8.dp))
                         RichText(block.text, textColor.copy(alpha = 0.85f), codeBgColor,
                             textAlign = TextAlign.Start, fontFamily = chatFont,
-                            highlightKeyword = highlightKeyword, highlightColor = highlightColor)
+                            highlightKeyword = highlightKeyword, highlightColor = highlightColor,
+                            selectionEnabled = selectionEnabled)
                     }
                 }
 
@@ -303,18 +452,26 @@ fun MarkdownText(
                                 block.bullet,
                                 color = textColor.copy(alpha = 0.5f),
                                 fontSize = baseSize,
-                                modifier = Modifier.width(16.dp)
+                                // 行高必须**和正文一模一样**（RichText 默认 fs * 1.75）。
+                                // Material 的默认行高比这窄一截，多出来的行距全堆在首行上方，
+                                // 于是「•」和它右边那行的首行基线就错开了 —— 用户看到的"一高一低快错行"。
+                                lineHeight = baseSize * 1.75f,
+                                // 右对齐：这样 1. 2. … 10. 的序号尾巴齐在一条线上，正文起点才恒定
+                                textAlign = TextAlign.End,
+                                modifier = Modifier.width(BulletGutterDp)
                             )
-                            Spacer(Modifier.width(4.dp))
+                            Spacer(Modifier.width(BulletGapDp))
                             RichText(block.text, textColor, codeBgColor, textAlign = TextAlign.Start, fontFamily = chatFont,
-                                highlightKeyword = highlightKeyword, highlightColor = highlightColor)
+                                highlightKeyword = highlightKeyword, highlightColor = highlightColor,
+                                selectionEnabled = selectionEnabled)
                         }
-                        // 要点下方的解释正文（进一步缩进）
+                        // 要点下方的解释正文（进一步缩进到与正文同一起点）
                         block.body.forEach { bodyLine ->
                             Spacer(Modifier.height(2.dp))
-                            Box(Modifier.fillMaxWidth().padding(start = 20.dp)) {
+                            Box(Modifier.fillMaxWidth().padding(start = BulletGutterDp + BulletGapDp)) {
                                 RichText(bodyLine, textColor, codeBgColor, textAlign = TextAlign.Start, fontFamily = chatFont,
-                                    highlightKeyword = highlightKeyword, highlightColor = highlightColor)
+                                    highlightKeyword = highlightKeyword, highlightColor = highlightColor,
+                                    selectionEnabled = selectionEnabled)
                             }
                         }
                     }
@@ -344,7 +501,7 @@ fun MarkdownText(
                                         .width(colWidths[ci].dp)
                                         .padding(horizontal = 8.dp)
                                 ) {
-                                    SelectionContainer {
+                                    SelectionBox(selectionEnabled) {
                                         Text(
                                             h, color = textColor,
                                             fontWeight = FontWeight.Bold,
@@ -372,7 +529,8 @@ fun MarkdownText(
                                             lineHeight = 20.sp,
                                             fontFamily = chatFont,
                                             highlightKeyword = highlightKeyword,
-                                            highlightColor = highlightColor
+                                            highlightColor = highlightColor,
+                                            selectionEnabled = selectionEnabled
                                         )
                                     }
                                 }
@@ -395,10 +553,14 @@ fun MarkdownText(
                 is MdBlock.Paragraph -> {
                     if (block.text.isNotBlank()) {
                         RichText(
-                            block.text.replace("\n", "  \n"), textColor, codeBgColor,
+                            // 这里**不再**把 "\n" 换成 "  \n"。段落里的单换行在解析阶段
+                            // 已经被 softJoin 合并掉了，屏幕上怎么折行只由排版决定 ——
+                            // 模型在它那边折到哪儿，跟手机上的行宽没关系。
+                            block.text, textColor, codeBgColor,
                             textAlign = TextAlign.Start,  // 两端对齐，视觉上每行结尾更整齐
                             fontFamily = chatFont,
-                            highlightKeyword = highlightKeyword, highlightColor = highlightColor
+                            highlightKeyword = highlightKeyword, highlightColor = highlightColor,
+                            selectionEnabled = selectionEnabled
                         )
                     }
                 }
@@ -416,11 +578,15 @@ private fun RichText(
     lineHeight: androidx.compose.ui.unit.TextUnit? = null,
     fontFamily: FontFamily = FontFamily.Default,
     highlightKeyword: String? = null,
-    highlightColor: Color = Color.Unspecified
+    highlightColor: Color = Color.Unspecified,
+    selectionEnabled: Boolean = true
 ) {
-    SelectionContainer {
+    // 正文里的网址要能直接点开（标准模式的需求）。用一个跟主题走的链接色，
+    // 而不是写死的蓝色 —— 六套主题各自有主色，蓝色在暖棕主题里会像一块补丁。
+    val linkColor = LocalFreeChatColors.current.Primary
+    SelectionBox(selectionEnabled) {
         Text(
-            buildStyledLineCJK(stripInlineMarkers(text), baseColor, FontWeight.Normal, fs, fontFamily, highlightKeyword, highlightColor),
+            buildStyledLineCJK(stripInlineMarkers(text), baseColor, FontWeight.Normal, fs, fontFamily, highlightKeyword, highlightColor, linkColor),
             modifier = Modifier.fillMaxWidth(),
             style = TextStyle(
                 lineBreak = cjkLineBreak
@@ -445,19 +611,41 @@ private fun buildStyledLineCJK(
     fs: androidx.compose.ui.unit.TextUnit,
     fontFamily: FontFamily = FontFamily.Default,
     highlightKeyword: String? = null,
-    highlightColor: Color = Color.Unspecified
-) = buildStyledLine(text, baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor)
+    highlightColor: Color = Color.Unspecified,
+    linkColor: Color = Color.Unspecified
+) = buildStyledLine(text, baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor, linkColor)
 
 private fun buildStyledLine(
     text: String, baseColor: Color, baseWeight: FontWeight,
     fs: androidx.compose.ui.unit.TextUnit,
     fontFamily: FontFamily = FontFamily.Default,
     highlightKeyword: String? = null,
-    highlightColor: Color = Color.Unspecified
+    highlightColor: Color = Color.Unspecified,
+    linkColor: Color = Color.Unspecified
 ) = buildAnnotatedString {
     pushStyle(SpanStyle(color = baseColor, fontWeight = baseWeight, fontSize = fs, fontFamily = fontFamily))
     var rem = text
     while (rem.isNotEmpty()) {
+        // [文字](链接) —— markdown 链接语法。必须排在所有行内标记之前：
+        // 「[」不是任何别的规则的起点，但里面的文字常常带 * 和 `，先切出来整段当成链接最干净
+        if (rem.startsWith("[")) {
+            val labelEnd = rem.indexOf("](")
+            val hrefEnd = if (labelEnd > 0) rem.indexOf(')', labelEnd + 2) else -1
+            if (labelEnd > 0 && hrefEnd > labelEnd + 2) {
+                val label = rem.substring(1, labelEnd)
+                val href = rem.substring(labelEnd + 2, hrefEnd).trim()
+                val href2 = normalizeUrl(href)
+                if (href2 != null) {
+                    withLink(
+                        LinkAnnotation.Url(
+                            href2,
+                            TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
+                        )
+                    ) { append(label) }
+                    rem = rem.substring(hrefEnd + 1); continue
+                }
+            }
+        }
         // ~~删除线~~
         if (rem.startsWith("~~")) {
             val end = rem.indexOf("~~", 2)
@@ -529,6 +717,7 @@ private fun buildStyledLine(
 
         // 找下一个特殊 token
         val next = listOfNotNull(
+            nextLinkStart(rem).takeIf { it >= 0 },
             rem.indexOf("**").takeIf { it >= 0 },
             rem.indexOf("__").takeIf { it >= 0 },
             rem.indexOf("~~").takeIf { it >= 0 },
@@ -540,16 +729,91 @@ private fun buildStyledLine(
         ).minOrNull()
 
         if (next != null && next > 0) {
-            appendHighlighted(rem.substring(0, next), highlightKeyword, highlightColor)
+            appendPlainWithLinks(rem.substring(0, next), highlightKeyword, highlightColor, linkColor)
             rem = rem.substring(next)
         } else if (next == null) {
-            appendHighlighted(rem, highlightKeyword, highlightColor); rem = ""
+            appendPlainWithLinks(rem, highlightKeyword, highlightColor, linkColor); rem = ""
         } else {
             // next == 0 but no rule matched — skip char to avoid infinite loop
-            appendHighlighted(rem[0].toString(), highlightKeyword, highlightColor); rem = rem.substring(1)
+            appendPlainWithLinks(rem[0].toString(), highlightKeyword, highlightColor, linkColor); rem = rem.substring(1)
         }
     }
     pop()
+}
+
+/** 裸链接：`http(s)://` 开头，或者 `www.` 开头。停在中英文的空白与引号上。 */
+private val UrlRegex = Regex("""(?:https?://|www\.)[^\s<>"'“”‘’]+""")
+
+/**
+ * 下一个 markdown 链接 `[文字](href)` 的起始下标，没有就 -1。
+ *
+ * 为什么要专门找它：上面那个 `[` 分支只在**串首**生效。一旦链接前面还有别的内容
+ * （「详见 [这里](https://x.com)」），主循环就会把「…详见 」连同后面的链接
+ * 一起当普通文本吐出去 —— 用户看到的是原样的 `[这里](https://x.com)`。
+ * 所以它必须和 `**`、`` ` `` 一样参与「下一个特殊 token」的竞争，
+ * 让主循环先切掉前面的普通文本，把 `[` 顶到串首。
+ */
+private fun nextLinkStart(s: String): Int {
+    var i = s.indexOf('[')
+    while (i >= 0) {
+        val labelEnd = s.indexOf("](", i + 1)
+        if (labelEnd > i && s.indexOf(')', labelEnd + 2) > labelEnd + 2) return i
+        i = s.indexOf('[', i + 1)
+    }
+    return -1
+}
+
+/**
+ * 链接末尾常被句读粘住（「详见 https://a.com。」里的句号是句子的，不是网址的）。
+ * 中文标点一律剔；英文的 `)` 只在括号不配对时剔（维基那种 `xxx_(abc)` 得留住）。
+ */
+private fun trimUrlTail(raw: String): String {
+    var end = raw.length
+    while (end > 0 && raw[end - 1] in ".,;:!?、。，；：！？”’】》") end--
+    while (end > 0 && raw[end - 1] == ')' && raw.take(end).count { it == ')' } > raw.take(end).count { it == '(' }) end--
+    return raw.substring(0, end)
+}
+
+/** 已带协议的原样返回；`www.` 开头的补上 `https://`；其余返回 null（不是链接，当普通文本） */
+private fun normalizeUrl(s: String): String? = when {
+    s.startsWith("http://") || s.startsWith("https://") -> s
+    s.startsWith("www.") && s.length > 5 -> "https://$s"
+    else -> null
+}
+
+/**
+ * 追加一段普通文本，但**把其中的裸网址摘出来做成可点的链接**（`LinkAnnotation.Url`，
+ * 点一下由系统唤起浏览器），剩下的照旧走高亮逻辑。
+ *
+ * 链接不用自己处理点击：`LinkAnnotation.Url` 交给 Compose 的文本层，长按选字、点按跳转两不误。
+ */
+private fun androidx.compose.ui.text.AnnotatedString.Builder.appendPlainWithLinks(
+    text: String, keyword: String?, highlightColor: Color, linkColor: Color
+) {
+    if (text.isEmpty()) return
+    var from = 0
+    for (m in UrlRegex.findAll(text)) {
+        val raw = trimUrlTail(m.value)
+        val href = normalizeUrl(raw)
+        // 太短的一律不算（比如孤零零一个 "www."），当普通文本
+        if (href == null || raw.length < 8) continue
+        if (m.range.first > from) {
+            appendHighlighted(text.substring(from, m.range.first), keyword, highlightColor)
+        }
+        withLink(
+            LinkAnnotation.Url(
+                href,
+                TextLinkStyles(
+                    SpanStyle(
+                        color = if (linkColor == Color.Unspecified) highlightColor else linkColor,
+                        textDecoration = TextDecoration.Underline
+                    )
+                )
+            )
+        ) { append(raw) }
+        from = m.range.first + raw.length
+    }
+    if (from < text.length) appendHighlighted(text.substring(from), keyword, highlightColor)
 }
 
 /** 在追加普通文本时，把搜索关键词用高亮色标红（大小写不敏感）；无关键词/颜色未指定则原样追加 */

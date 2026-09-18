@@ -42,6 +42,9 @@ import dev.chrisbanes.haze.HazeProgressive
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import com.freechat.ui.theme.pageBackground
+import com.freechat.ui.theme.hazeBackground
+import com.freechat.ui.theme.pageHeaderBackground
 
 /** 用户协议与免责声明页 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,17 +59,17 @@ fun AgreementScreen(onBack: () -> Unit) {
     val titleBarAreaDp = 48.dp
     val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp).toPx() }
 
-    Box(Modifier.fillMaxSize().background(colors.Background)) {
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).background(colors.Background) else Modifier)
+                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                 .verticalScroll(rememberScrollState())
                 .padding(top = statusBarHeightDp + titleBarAreaDp + 36.dp, bottom = 40.dp)
                 .padding(horizontal = 22.dp)
         ) {
             Text(
-                "免责声明与使用须知",
+                s.agreementTitle,
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 color = colors.TextPrimary,
@@ -75,48 +78,15 @@ fun AgreementScreen(onBack: () -> Unit) {
             )
             Spacer(Modifier.height(32.dp))
 
-            AgreementSection("1. 用途限制", colors) {
-                AgreementParagraph(listOf(
-                    "FreeChat 是一个开源的 AI 客户端工具，旨在为用户提供更灵活、个性化的 AI 交互体验。" to false,
-                    "本软件仅限用于学习、研究及个人合法用途" to true,
-                    "，不得用于任何违反中华人民共和国法律法规的活动。" to false
-                ), colors)
-            }
-
-            AgreementSection("2. 用户责任", colors) {
-                AgreementParagraph(listOf(
-                    "用户需自行获取并配置 API Key，所有通过本软件发出的请求均视为" to false,
-                    "用户本人行为" to true,
-                    "。" to false
-                ), colors)
-                AgreementParagraph(listOf("用户应对其使用 AI 模型所产生的内容负全部责任，包括但不限于：" to false), colors)
-                AgreementBullet("确保输入内容不违反法律法规", colors)
-                AgreementBullet("对输出内容的合法性、准确性自行判断", colors)
-                AgreementBullet("不利用本软件生成、传播违法或不良信息", colors)
-            }
-
-            AgreementSection("3. API 服务独立性", colors) {
-                AgreementParagraph(listOf(
-                    "本软件仅为客户端工具，" to false,
-                    "不提供任何 AI 模型服务" to true,
-                    "。所有 AI 能力均通过用户自行配置的第三方 API 实现，软件开发者不对第三方 API 服务的可用性、稳定性及内容安全性承担责任。" to false
-                ), colors)
-            }
-
-            AgreementSection("4. 开源声明", colors) {
-                AgreementParagraph(listOf(
-                    "本项目基于 MIT License 开源，您可自由使用、修改、分发，但需保留原始版权声明。软件按" to false,
-                    "「现状」" to true,
-                    "提供，不提供任何明示或暗示的担保。" to false
-                ), colors)
-            }
-
-            AgreementSection("5. 法律责任", colors) {
-                AgreementParagraph(listOf(
-                    "若用户将本软件用于任何违法用途，软件开发者不承担任何" to false,
-                    "连带法律责任" to true,
-                    "。" to false
-                ), colors)
+            // 协议正文整段整段地跟着语言包走（`**…**` 之间加粗，`· ` 开头当条目），
+            // 这样三种语言各写各的，不用在代码里拼句子——拼出来的语序一定有一门是别扭的。
+            s.agreementSections.forEach { section ->
+                AgreementSection(section.title, colors) {
+                    section.paragraphs.forEach { p ->
+                        if (p.startsWith("· ")) AgreementBullet(p.removePrefix("· "), colors)
+                        else AgreementParagraph(p, colors)
+                    }
+                }
             }
         }
 
@@ -127,6 +97,7 @@ fun AgreementScreen(onBack: () -> Unit) {
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp)
+                    .pageHeaderBackground(colors.Background)
                     .hazeEffect(state = hazeState) {
                         blurRadius = HazeSpec.TopBlurRadius
                         inputScale = HazeInputScale.None
@@ -140,7 +111,10 @@ fun AgreementScreen(onBack: () -> Unit) {
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp)
-                    .background(colors.Background)
+                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
+                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
+                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
+                    .pageHeaderBackground(colors.Background)
             )
         }
 
@@ -175,12 +149,14 @@ private fun AgreementSection(title: String, colors: FreeChatColors, content: @Co
     }
 }
 
+/** 把 `**强调**` 解析成加粗片段；其余按普通字渲染 */
 @Composable
-private fun AgreementParagraph(segments: List<Pair<String, Boolean>>, colors: FreeChatColors) {
+private fun AgreementParagraph(text: String, colors: FreeChatColors) {
     val annotated = buildAnnotatedString {
-        segments.forEach { (text, bold) ->
-            if (bold) withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = colors.Primary)) { append(text) }
-            else append(text)
+        text.split("**").forEachIndexed { i, part ->
+            // 奇数段落 = 被 ** 包住的那一段
+            if (i % 2 == 1) withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = colors.Primary)) { append(part) }
+            else append(part)
         }
     }
     Text(annotated, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary, lineHeight = 26.sp)
@@ -207,9 +183,10 @@ fun AgreementGateDialog(
     colors: FreeChatColors
 ) {
     val context = LocalContext.current
+    val s = LocalStrings.current
     var agreed by remember { mutableStateOf(false) }
 
-    Box(Modifier.fillMaxSize().background(colors.Background), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background), contentAlignment = Alignment.Center) {
         Surface(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
             shape = RoundedCornerShape(20.dp),
@@ -217,13 +194,12 @@ fun AgreementGateDialog(
             shadowElevation = 10.dp
         ) {
             Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("使用前请阅读：", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = colors.TextPrimary)
-                Text("1. FreeChat 是开源客户端工具，不提供 API 服务，需自行配置模型 API。", style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, lineHeight = 22.sp)
-                Text("2. FreeChat 内置的模型为作者本人自用的 API，并不保证随时有额度，可适当白嫖。", style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, lineHeight = 22.sp)
-                Text("3. 请勿使用本软件生成、传播违法违规内容。", style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, lineHeight = 22.sp)
-                Text("4. 本软件仅供学习研究使用，若商用则需自行评估法律风险。", style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, lineHeight = 22.sp)
+                Text(s.agreementGateHead, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = colors.TextPrimary)
+                s.agreementGateItems.forEach { item ->
+                    Text(item, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, lineHeight = 22.sp)
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("5. 发布页：", style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
+                    Text(s.agreementReleasePage, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
                     Text(
                         "https://github.com/Belate-stay/FreeChat",
                         style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
@@ -243,9 +219,9 @@ fun AgreementGateDialog(
                         onCheckedChange = { agreed = it },
                         colors = CheckboxDefaults.colors(checkedColor = colors.Primary)
                     )
-                    Text("我已阅读并同意", style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, modifier = Modifier.clickable { agreed = !agreed })
+                    Text(s.agreementAgreePrefix, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, modifier = Modifier.clickable { agreed = !agreed })
                     Text(
-                        "《用户协议》",
+                        s.agreementDocName,
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.Primary,
                         fontWeight = FontWeight.Bold,
@@ -265,7 +241,7 @@ fun AgreementGateDialog(
                         disabledContentColor = colors.TextTertiary
                     )
                 ) {
-                    Text("确定并继续", fontWeight = FontWeight.SemiBold)
+                    Text(s.agreementContinue, fontWeight = FontWeight.SemiBold)
                 }
             }
         }

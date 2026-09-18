@@ -26,6 +26,7 @@ import com.freechat.i18n.LocalStrings
 import com.freechat.model.ModelInfo
 import com.freechat.model.ModelType
 import com.freechat.model.Provider
+import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.LocalAdvancedMaterial
@@ -36,6 +37,9 @@ import dev.chrisbanes.haze.HazeProgressive
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import com.freechat.ui.theme.pageBackground
+import com.freechat.ui.theme.hazeBackground
+import com.freechat.ui.theme.pageHeaderBackground
 
 /** 添加 / 编辑用户自定义模型页（5 类模型通用） */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -97,11 +101,11 @@ fun ModelEditorScreen(
     val titleBarAreaDp = 48.dp
     val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp).toPx() }
 
-    Box(Modifier.fillMaxSize().background(colors.Background)) {
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).background(colors.Background) else Modifier)
+                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                 .verticalScroll(rememberScrollState())
                 .padding(top = statusBarHeightDp + titleBarAreaDp + 16.dp, bottom = 40.dp)
                 .padding(horizontal = 20.dp),
@@ -138,6 +142,7 @@ fun ModelEditorScreen(
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp)
+                    .pageHeaderBackground(colors.Background)
                     .hazeEffect(state = hazeState) {
                         blurRadius = HazeSpec.TopBlurRadius
                         inputScale = HazeInputScale.None
@@ -151,7 +156,10 @@ fun ModelEditorScreen(
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp)
-                    .background(colors.Background)
+                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
+                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
+                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
+                    .pageHeaderBackground(colors.Background)
             )
         }
 
@@ -180,42 +188,46 @@ fun ModelEditorScreen(
                 }
             }
         }
-    }
 
-    if (showUnsaved) {
-        AlertDialog(
-            onDismissRequest = { showUnsaved = false },
-            containerColor = colors.Surface,
-            title = { Text(s.unsavedTitle, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold) },
-            text = { Text(s.unsavedMessage, color = colors.TextSecondary) },
-            confirmButton = {
-                TextButton(onClick = { showUnsaved = false; onBack() }) {
-                    Text(s.delete, color = colors.ErrorRed)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showUnsaved = false }) { Text(s.cancel, color = colors.TextSecondary) }
-            }
-        )
-    }
+        // 这是窗口内的底部磨砂哑光玻璃弹层（原来用 AlertDialog：独立窗口糊不到背景，只能把背景压暗）
+        // 点外面 / 返回键 = 原来的 onDismissRequest（留在本页继续编辑）
+        SheetPanel(
+            visible = showUnsaved,
+            onDismiss = { showUnsaved = false },
+            title = s.unsavedTitle,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState,
+            confirmLabel = s.delete,
+            // 危险操作：确认键红底，别让它长得跟普通「确定」一样
+            confirmDanger = true,
+            onConfirm = { showUnsaved = false; onBack() }
+        ) {
+            Text(s.unsavedMessage, color = colors.TextSecondary)
+        }
 
-    if (showDelete) {
-        AlertDialog(
-            onDismissRequest = { showDelete = false },
-            containerColor = colors.Surface,
-            title = { Text(s.deleteModel, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold) },
-            text = { Text(s.deleteWarning, color = colors.TextSecondary) },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDelete = false
-                    editing?.let { viewModel.deleteCustomModel(it.id, it.modelType) }
-                    onBack()
-                }) { Text(s.delete, color = colors.ErrorRed) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDelete = false }) { Text(s.cancel, color = colors.TextSecondary) }
+        // 这是窗口内的底部磨砂哑光玻璃弹层（原来用 AlertDialog：独立窗口糊不到背景，只能把背景压暗）
+        // 点外面 / 返回键 = 原来的 onDismissRequest（不删除）
+        SheetPanel(
+            visible = showDelete,
+            onDismiss = { showDelete = false },
+            title = s.deleteModel,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState,
+            confirmLabel = s.delete,
+            // 危险操作：确认键红底，别让它长得跟普通「确定」一样
+            confirmDanger = true,
+            onConfirm = {
+                showDelete = false
+                editing?.let { viewModel.deleteCustomModel(it.id, it.modelType) }
+                onBack()
             }
-        )
+        ) {
+            Text(s.deleteWarning, color = colors.TextSecondary)
+        }
     }
 }
 

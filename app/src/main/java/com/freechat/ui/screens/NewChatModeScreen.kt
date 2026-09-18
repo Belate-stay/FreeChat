@@ -36,6 +36,9 @@ import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import com.freechat.ui.theme.pageBackground
+import com.freechat.ui.theme.hazeBackground
+import com.freechat.ui.theme.pageHeaderBackground
 
 /**
  * 新对话模式选择页：标准问答 vs 拟人陪伴。
@@ -59,11 +62,11 @@ fun NewChatModeScreen(
     val titleBarAreaDp = 48.dp
     val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp).toPx() }
 
-    Box(Modifier.fillMaxSize().background(colors.Background)) {
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).background(colors.Background) else Modifier)
+                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                 .padding(top = statusBarHeightDp + titleBarAreaDp + 24.dp, bottom = 40.dp)
                 .padding(horizontal = 40.dp),
             verticalArrangement = Arrangement.Center,
@@ -93,6 +96,7 @@ fun NewChatModeScreen(
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp)
+                    .pageHeaderBackground(colors.Background)
                     .hazeEffect(state = hazeState) {
                         blurRadius = HazeSpec.TopBlurRadius
                         inputScale = HazeInputScale.None
@@ -106,7 +110,10 @@ fun NewChatModeScreen(
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .height(statusBarHeightDp + titleBarAreaDp)
-                    .background(colors.Background)
+                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
+                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
+                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
+                    .pageHeaderBackground(colors.Background)
             )
         }
 

@@ -1,6 +1,7 @@
 package com.freechat.ui.theme
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 
 interface FreeChatColors {
     val Background: Color
@@ -343,3 +344,43 @@ object WhiteOledDarkColors : FreeChatColors {
     override val StatusBar = Color(0xFF000000)
     override val NavBar = Color(0xFF0D0D0D)
 }
+
+// ============================================================
+//  选项表 / 菜单里「选中项」的统一配色（1.0.50）
+// ============================================================
+
+/**
+ * 选中项的底色：**就是「确定」按钮那口颜色**（`SheetPanel` 的 confirm 按钮用的
+ * `colors.Primary` + 白字）。所以纯白主题下选中项是一块近黑的实心板子，
+ * 和确定按钮一模一样 —— 用户的要求原话。
+ *
+ * 在这之前，各处选中态是各写各的：`SheetOption` 和 `frostedCard` 都用 AccentMuted
+ * （一层几乎看不出的淡底）+ 一个 ✓ 图标；模型卡又是另一套。1.0.50 起统一成这一处定义、
+ * 各选项表引用它 —— 顺带把所有 ✓ 都去掉（底色已经说清楚了，再挂个勾是两套语言）。
+ */
+val FreeChatColors.selectedFill: Color get() = Primary
+
+/** 选中项上的字：用主题自带的 OnPrimary，深色主题下自动翻成深字，不再写死白 */
+val FreeChatColors.selectedText: Color get() = OnPrimary
+
+/** 选中项上的副标题：同一支颜色压到 72%，够读、又不跟主标题抢 */
+val FreeChatColors.selectedSubText: Color get() = OnPrimary.copy(alpha = 0.72f)
+
+// ============================================================
+//  行内「链接」式的操作文字（1.0.53）
+// ============================================================
+
+/**
+ * 二级风险弹层里那两行「仍然开启 / 仍然关闭」的颜色 —— **蓝色**（用户点名的：带下划线的
+ * 蓝字是「这里可以点」的通用符号，比正文色或红字都显眼得多，一眼就认得出是可点的选项）。
+ *
+ * 刻意**不跟主题**：Primary 在暖棕主题里是棕色，和弹层里那个主按钮撞成一片，反而更看不出
+ * 哪个是行内链接。深浅两套值只是为了让各自底色上都读得清，判据沿用全 App 那一条
+ * `TextPrimary.luminance() > 0.5f`（见 DrawerContent / Frosted 里的用法）。
+ */
+val LinkBlueLight = Color(0xFF2E6BD6)
+val LinkBlueDark = Color(0xFF7FB0FF)
+
+/** 当前主题下该用的链接蓝（深色主题用亮一档的，浅色主题用深一档的） */
+val FreeChatColors.linkInk: Color
+    get() = if (TextPrimary.luminance() > 0.5f) LinkBlueDark else LinkBlueLight

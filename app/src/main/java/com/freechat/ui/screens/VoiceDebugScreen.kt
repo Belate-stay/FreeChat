@@ -19,8 +19,16 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.freechat.i18n.AppStrings
 import com.freechat.i18n.LocalStrings
+import com.freechat.ui.components.SheetOption
+import com.freechat.ui.components.SheetPanel
+import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.viewmodel.ChatViewModel
+import com.freechat.ui.theme.LocalLiquidMode
+import com.freechat.ui.theme.pageHeaderBackground
+import androidx.compose.ui.graphics.Color
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 
 /** 语音调试子页面 — 与主设置页保持一致的排版布局与配色 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -39,6 +47,13 @@ fun VoiceDebugScreen(
 
     var showVoicePicker by remember { mutableStateOf(false) }
 
+    val advancedMaterial = LocalAdvancedMaterial.current
+    val hazeState = rememberHazeState()
+
+    // 外层套一个 Box：音色选择弹层要挂在它最后一个子节点上（SheetPanel 靠 align 贴底、
+    // 铺满整屏，挂进 Scaffold 的 Column 里会被约束住）
+    Box(Modifier.fillMaxSize()) {
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -48,22 +63,28 @@ fun VoiceDebugScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.TextPrimary)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.Background),
-                modifier = Modifier.height(96.dp)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                modifier = Modifier
+                    .height(96.dp)
+                    // 高级材质：顶栏真·透明（沉浸，内容从标题下穿过去）。
+                    // 关掉高级材质后顶栏必须**挡住**内容（跟其它页面同一条规矩）——
+                    // 所以这里不能用颜色，得用 pageHeaderBackground：炫彩关=这块底色本身，
+                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
+                    .then(if (advancedMaterial) Modifier else Modifier.pageHeaderBackground(colors.Background))
             )
         },
-        containerColor = colors.Background
+        containerColor = if (LocalLiquidMode.current) Color.Transparent else colors.Background
     ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(horizontal = 16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .verticalScroll(rememberScrollState())
+                // 弹层要糊的是这一页的内容，所以这一页得先当一次模糊源
+                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState) else Modifier),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Spacer(modifier = Modifier.height(0.dp))
-
             // 自动朗读
             SectionLabel(Icons.Filled.RecordVoiceOver, s.voiceAutoPlay)
             SettingsRow {
@@ -93,7 +114,8 @@ fun VoiceDebugScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            // 段间距：与 12dp 的卡片间距叠出 32dp（同设置主列表）
+            Spacer(modifier = Modifier.height(8.dp))
 
             // 音色
             SectionLabel(Icons.Filled.Face, s.voiceTone)
@@ -116,7 +138,7 @@ fun VoiceDebugScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             // 语速
             SectionLabel(Icons.Filled.Speed, s.voiceSpeed)
@@ -144,7 +166,7 @@ fun VoiceDebugScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             // 音调
             SectionLabel(Icons.Filled.GraphicEq, s.voicePitch)
@@ -175,40 +197,31 @@ fun VoiceDebugScreen(
         }
     }
 
-    // 音色选择
-    if (showVoicePicker) {
-        AlertDialog(
-            onDismissRequest = { showVoicePicker = false },
-            containerColor = colors.Surface,
-            title = { Text(s.voiceTone, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    viewModel.ttsVoices.forEach { voice ->
-                        val sel = voice == ttsVoice
-                        Box(
-                            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                                .background(if (sel) colors.AccentMuted else colors.Surface)
-                                .clickable {
-                                    viewModel.setTtsVoice(voice)
-                                    showVoicePicker = false
-                                }
-                                .padding(12.dp)
-                        ) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    voiceLabel(voice, s),
-                                    color = if (sel) colors.Primary else colors.TextPrimary,
-                                    fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal
-                                )
-                                if (sel) Icon(Icons.Filled.Check, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            }
-                        }
-                    }
+    // 音色选择 —— 窗口内的底部磨砂哑光玻璃弹层。
+    // 原来是 AlertDialog：独立窗口看不到本页自己画的内容，「模糊背景」根本做不到，
+    // 只能把背景压暗（就是「悬浮卡片背景加暗」那种效果）。现在换成真模糊、不压暗。
+    SheetPanel(
+        visible = showVoicePicker,
+        onDismiss = { showVoicePicker = false },
+        title = s.voiceTone,
+        colors = colors,
+        isDark = isDark,
+        advancedMaterial = advancedMaterial,
+        hazeState = hazeState,
+        maxContentHeight = 360.dp
+    ) {
+        viewModel.ttsVoices.forEach { voice ->
+            SheetOption(
+                selected = voice == ttsVoice,
+                title = voiceLabel(voice, s),
+                colors = colors,
+                onClick = {
+                    viewModel.setTtsVoice(voice)
+                    showVoicePicker = false
                 }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { showVoicePicker = false }) { Text(s.close, color = colors.TextSecondary) } }
-        )
+            )
+        }
+    }
     }
 }
 

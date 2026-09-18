@@ -375,13 +375,23 @@ $shapes
 </p:sp>"""
     }
 
+    /**
+     * 段落语言标记。Word 会按它决定断行与断字规则，写死 zh-CN 的话英文文档会按中文规则折行。
+     * 注意这是 OOXML 的 lang，取值跟界面语言码不完全一样（英文要 en-US，不是 en）。
+     */
+    private fun docLang(): String = when (com.freechat.i18n.LocaleManager.strings().localeCode) {
+        "zh-TW" -> "zh-TW"
+        "en" -> "en-US"
+        else -> "zh-CN"
+    }
+
     private fun paragraph(text: String, sz: Int, bold: Boolean, color: String): String {
         val b = if (bold) """ b="1"""" else ""
-        return """<a:p><a:pPr algn="l"/><a:r><a:rPr lang="zh-CN" sz="$sz"$b><a:solidFill><a:srgbClr val="$color"/></a:solidFill><a:latin typeface="${DocTheme.FONT_EN}"/><a:ea typeface="${DocTheme.FONT_CN}"/></a:rPr><a:t>${esc(text)}</a:t></a:r></a:p>"""
+        return """<a:p><a:pPr algn="l"/><a:r><a:rPr lang="${docLang()}" sz="$sz"$b><a:solidFill><a:srgbClr val="$color"/></a:solidFill><a:latin typeface="${DocTheme.FONT_EN}"/><a:ea typeface="${DocTheme.FONT_CN}"/></a:rPr><a:t>${esc(text)}</a:t></a:r></a:p>"""
     }
 
     private fun bulletParagraph(text: String): String {
-        return """<a:p><a:pPr marL="274320" indent="-274320"><a:buFont typeface="Arial"/><a:buChar char="•"/></a:pPr><a:r><a:rPr lang="zh-CN" sz="2000"><a:solidFill><a:srgbClr val="${DocTheme.DARK}"/></a:solidFill><a:latin typeface="${DocTheme.FONT_EN}"/><a:ea typeface="${DocTheme.FONT_CN}"/></a:rPr><a:t>${esc(text)}</a:t></a:r></a:p>"""
+        return """<a:p><a:pPr marL="274320" indent="-274320"><a:buFont typeface="Arial"/><a:buChar char="•"/></a:pPr><a:r><a:rPr lang="${docLang()}" sz="2000"><a:solidFill><a:srgbClr val="${DocTheme.DARK}"/></a:solidFill><a:latin typeface="${DocTheme.FONT_EN}"/><a:ea typeface="${DocTheme.FONT_CN}"/></a:rPr><a:t>${esc(text)}</a:t></a:r></a:p>"""
     }
 
     private fun slideMasterXml(): String = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

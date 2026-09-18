@@ -52,6 +52,7 @@ fun ModelChip(
     isDark: Boolean
 ) {
     val colors = if (isDark) DarkColors else LightColors
+    val s = com.freechat.i18n.LocalStrings.current
     val borderColor by animateColorAsState(
         targetValue = if (isSelected) colors.Primary else colors.ChipBorder,
         animationSpec = tween(200),
@@ -78,9 +79,9 @@ fun ModelChip(
                 color = if (isSelected) colors.Primary else colors.TextPrimary,
                 fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
             )
-            if (model.description.isNotEmpty()) {
+            if (com.freechat.i18n.localizedModelDesc(model, s).isNotEmpty()) {
                 Text(
-                    model.description,
+                    com.freechat.i18n.localizedModelDesc(model, s),
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.TextTertiary
                 )

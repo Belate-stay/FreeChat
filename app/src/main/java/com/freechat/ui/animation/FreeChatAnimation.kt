@@ -1,9 +1,16 @@
 package com.freechat.ui.animation
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.*
 import androidx.compose.animation.core.Spring.DampingRatioNoBouncy
 import androidx.compose.animation.core.Spring.StiffnessMedium
 import androidx.compose.animation.core.Spring.StiffnessMediumLow
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.unit.IntOffset
 
 /**
@@ -33,6 +40,64 @@ object FreeChatAnimation {
     val easeOut = FastOutSlowInEasing
     val easeEnter = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f)    // 弹性入场
     val easeExit = CubicBezierEasing(0.3f, 0.0f, 0.8f, 0.15f)      // 加速退场
+
+    // ==================== iOS 手感曲线（1.0.49） ====================
+    // 参考 UIKit / Core Animation 的默认缓动。人眼对「匀速」和「收尾撞墙」最敏感：
+    // 位移类动画一律「起步轻—中段快—收尾稳」，入场用减速曲线（稳稳落位），
+    // 退场用加速曲线（干脆走掉、别拖尾巴）。下面是三种基本形，别再各写各的三次贝塞尔。
+    /** 慢—快—慢（对应 `CAMediaTimingFunction(0.42, 0, 0.58, 1)`）：位移/换位用它 */
+    val iosEaseInOut = CubicBezierEasing(0.42f, 0.0f, 0.58f, 1.0f)
+    /** 减速入位（对应 `CAMediaTimingFunction(0.25, 0.1, 0.25, 1)`）：淡入/展开/滑入用它 */
+    val iosEaseOut = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1.0f)
+    /** 加速离场（对应 `CAMediaTimingFunction(0.4, 0, 1, 1)`）：淡出/收起/滑出用它 */
+    val iosEaseIn = CubicBezierEasing(0.4f, 0.0f, 1.0f, 1.0f)
+
+    // ==================== 侧滑页「当前对话」竖条 ====================
+    /**
+     * 竖条换行滑行：慢—快—慢，190ms。
+     * 距离可能横跨整屏（从列表头滑到列表尾），时长写死不用 Spring ——
+     * 距离一长，Spring 会在收尾处拖出可见的物理尾巴，看着「弹」而不「稳」。
+     * 190ms 是「要快」定的：点完对话是**马上要进 Chat 页**的，动画拖过 0.2s 就成了等待。
+     * 慢—快—慢的曲线在这个时长里照样读得出来（起步轻、中段冲、收尾稳），
+     * 长度上再叠「先拉长再缩小」（[DrawerIndicatorBar] 的绘制块）补足灵动感。
+     */
+    const val INDICATOR_SLIDE_MS = 190
+    val indicatorSlideTween = tween<Float>(INDICATOR_SLIDE_MS, easing = iosEaseInOut)
+
+    /**
+     * 抽屉延时关闭的时长（= 竖条的滑行与抽屉起滑的**重叠**量）。
+     *
+     * 为什么不能立刻关：竖条贴在面板左缘（屏幕 x≈45，宽 12px），面板往左一滑 56px 它就被
+     * 屏幕裁掉了；而关闭曲线 [drawerCloseTween] 是加速的（iosEaseIn），起步后 ~38ms 就能滑出
+     * 70px —— 立刻关＝竖条只走到全程的百分之几就走了，动画等于没做。
+     * 为什么也不能等它滑完：用户要的是「点了就进 Chat 页」，等 190ms 就是肉眼可见的卡顿。
+     *
+     * 取值就卡在中间：延时 + 38ms（出屏时刻）≈ 滑行时长的 72% 处 —— 抽屉起滑的那一瞬间
+     * 竖条已经走完约九成，剩下的零头跟面板一起滑出屏幕左缘，看着是「交接」不是「消失」。
+     * 两处必须同源，改一个就得改另一个（写死两个数字迟早对不上）。
+     */
+    const val INDICATOR_DRAWER_DELAY_MS = 100
+
+    // ==================== 菜单 / 浮层卡片（全 App 一套） ====================
+    /**
+     * 菜单卡片入场：88% 放大到 100% + 淡入，200ms 减速入位。
+     *
+     * 三个参数都是「手感最贵」的位置，别在各处再各写一套：
+     * - 起始缩放 0.88：比 0.9 更有「从锚点长出来」的感觉，但不会糊成一团；
+     * - 200ms：再快像闪现，再慢像卡顿（人眼对 150–250ms 的缩放最不敏感于时长、最敏感于曲线）；
+     * - 减速曲线：起步就快、收尾稳稳停住；用 Material 那条中段发飘的曲线，收尾会有一下「顿住」。
+     */
+    fun menuEnter(origin: TransformOrigin): EnterTransition =
+        scaleIn(initialScale = 0.88f, transformOrigin = origin, animationSpec = tween(200, easing = iosEaseOut)) +
+            fadeIn(tween(200, easing = iosEaseOut))
+
+    /**
+     * 菜单卡片退场：缩到 92% + 淡出，150ms 加速离场。
+     * 退场一定要比入场快 —— 用户已经做完了决定，多留一毫秒都是拖沓。
+     */
+    fun menuExit(origin: TransformOrigin): ExitTransition =
+        scaleOut(targetScale = 0.92f, transformOrigin = origin, animationSpec = tween(150, easing = iosEaseIn)) +
+            fadeOut(tween(150, easing = iosEaseIn))
 
     // ==================== Tween 规格 ====================
     val fastTween = tween<Float>(DURATION_FAST, easing = easeOut)
@@ -82,10 +147,16 @@ object FreeChatAnimation {
         durationMillis = 280,
         easing = CubicBezierEasing(0.22f, 0.0f, 0.0f, 1.0f) // 模拟 Spring 手感但无物理计算
     )
-    /** 抽屉关闭 — 快速无后摇 */
+    /**
+     * 抽屉关闭 — 加速离场。
+     * 原来是 150ms 的 Material 曲线：起步就慢，看着像「被人拽回去」。
+     * 改成 220ms + 加速曲线：先轻轻动、越走越快，和 iOS 收起侧栏一个手感。
+     * （抽屉上那根「当前对话」竖条的滑行 190ms 只比它早 [INDICATOR_DRAWER_DELAY_MS] 起跑，
+     *   两者是**同时进行**的：竖条落位 ≈ 面板刚滑出竖条那点宽度，然后一起出屏）
+     */
     val drawerCloseTween = tween<Float>(
-        durationMillis = 150,
-        easing = FastOutSlowInEasing
+        durationMillis = 220,
+        easing = iosEaseIn
     )
     /** 页面切换 — 无弹跳 */
     val pageSpring = spring<Float>(
@@ -155,10 +226,14 @@ object FreeChatAnimation {
         dampingRatio = Spring.DampingRatioNoBouncy,
         stiffness = Spring.StiffnessMediumLow
     )
-    /** 图片展开位置/尺寸动画 — 缓出曲线 */
+    /**
+     * 图片展开位置/尺寸动画 — 减速入位。
+     * 原来用的是 (0.32, 0, 0.67, 0)：收尾速度为零点几，是「越到后面越快」的加速曲线，
+     * 展开到位那一下像撞上去。iOS 放大图片是减速入位，这里改成 [iosEaseOut]。
+     */
     val imageExpandTween = tween<Float>(
         durationMillis = 350,
-        easing = CubicBezierEasing(0.32f, 0.0f, 0.67f, 0.0f)  // 强调加速感
+        easing = iosEaseOut
     )
     /** 图片关闭缩回动画 — 略微加速 */
     val imageShrinkTween = tween<Float>(

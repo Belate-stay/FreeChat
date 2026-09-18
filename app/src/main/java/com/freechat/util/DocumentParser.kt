@@ -27,11 +27,11 @@ object DocumentParser {
                 n.endsWith(".pptx") -> extractPptx(file)
                 // 老二进制 .doc/.xls/.ppt 无法直接解包，返回提示
                 n.endsWith(".doc") || n.endsWith(".xls") || n.endsWith(".ppt") ->
-                    "（旧版二进制格式，暂不支持直接解析，请另存为 docx/xlsx/pptx 后重试）"
+                    com.freechat.i18n.LocaleManager.strings().legacyBinaryFile
                 else -> ""
             }
         } catch (e: Exception) {
-            "（读取文件失败：${e.message}）"
+            com.freechat.i18n.LocaleManager.strings().readFileFailed(e.message ?: "")
         }
     }
 
@@ -113,7 +113,7 @@ object DocumentParser {
                     .filter { it.isNotBlank() }
                     .toList()
                 if (texts.isNotEmpty()) {
-                    out.add("【第 ${i + 1} 页】" + texts.joinToString("\n"))
+                    out.add(com.freechat.i18n.LocaleManager.strings().pageMarker(i + 1) + texts.joinToString("\n"))
                 }
             }
             return out.joinToString("\n\n")

@@ -21,14 +21,18 @@ android {
         applicationId = "com.freechat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 118
-        versionName = "1.0.18"
+        versionCode = 164
+        versionName = "1.0.64"
 
         buildConfigField("String", "XIAOMI_API_KEY", "\"${secretKey("XIAOMI_API_KEY")}\"")
-        buildConfigField("String", "XIAOMI_ULTRASPEED_API_KEY", "\"${secretKey("XIAOMI_ULTRASPEED_API_KEY")}\"")
         buildConfigField("String", "DOUBAO_API_KEY", "\"${secretKey("DOUBAO_API_KEY")}\"")
         buildConfigField("String", "MIMO_TTS_KEY", "\"${secretKey("MIMO_TTS_KEY")}\"")
+        // SerpAPI 支持多 key：免费版 250 次/月/账号，串起来当一个池子用
+        // （见 data/SerpApiPool.kt —— 哪个有额度用哪个，429 自动换下一个）。
+        // 以后再加账号：secrets.properties 加一行 SERPAPI_API_KEY_3 + 这里加一行 buildConfigField
+        // + SerpApiPool.KEYS 里加一个 BuildConfig 引用即可，三处，别漏。
         buildConfigField("String", "SERPAPI_API_KEY", "\"${secretKey("SERPAPI_API_KEY")}\"")
+        buildConfigField("String", "SERPAPI_API_KEY_2", "\"${secretKey("SERPAPI_API_KEY_2")}\"")
     }
 
     buildTypes {

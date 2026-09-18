@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
-import android.graphics.Bitmap
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
@@ -19,9 +18,9 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
@@ -34,9 +33,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -59,6 +55,7 @@ import coil.request.ImageRequest
 import com.freechat.data.TtsController
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.Message
+import com.freechat.model.MultiSelectAction
 import com.freechat.model.Role
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.theme.FreeChatColors
@@ -67,14 +64,7 @@ import com.freechat.ui.theme.LocalLatinFontFamily
 import com.freechat.ui.theme.LocalFontScale
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
-import com.freechat.util.ShareImageGenerator
-import com.freechat.util.ShareSegment
-import com.freechat.util.saveBitmapToGallery
-import com.freechat.util.saveMarkdown
-import com.freechat.util.shareBitmap
-import com.freechat.util.shareMarkdown
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -91,20 +81,30 @@ fun ChatBubble(
     liveThinkingMs: Long = 0L,
     isThinking: Boolean = false,
     showThinking: Boolean = true,
-    onDelete: (() -> Unit)? = null,
     onRegenerate: (() -> Unit)? = null,
     onSpeak: (() -> Unit)? = null,
     onQuote: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
-    onFavorite: (() -> Unit)? = null,
     isFavorited: Boolean = false,
     highlightKeyword: String? = null,
-    highlightColor: Color? = null
+    highlightColor: Color? = null,
+    // ===== 多选：操作栏的 分享/删除/收藏 不再是「直接执行」，而是「进入多选」的入口 =====
+    multiSelectEnabled: Boolean = false,
+    onEnterMultiSelect: ((MultiSelectAction) -> Unit)? = null,
+    onToggleSelect: (() -> Unit)? = null,
+    // 剧情补足：AI 回复不套气泡框，像小说正文一样以纯文本流直接铺开（左对齐满宽、不解析 Markdown）。
+    // 只影响 AI 侧；用户消息仍带气泡，方便区分「谁说的」和「谁写的」。
+    textFlow: Boolean = false
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
     val isUser = message.role == Role.USER
     val isCompanion = message.mode == com.freechat.model.ChatMode.COMPANION
+    // 纯图片消息（只有图、没有正文）：操作栏照常显示（复制/引用/收藏/删除…都还有意义），
+    // 唯独隐藏「分享」——单张图片直接长按下载保存即可，做成美化长图分享没有意义。
+    val imageOnly: Boolean = (
+        message.imagePaths.orEmpty().isNotEmpty() || message.imageUrls.orEmpty().isNotEmpty()
+        ) && message.content.isBlank()
     val context = LocalContext.current
     val scale = LocalFontScale.current  // 字号联动：气泡宽度随字号缩放
     var fullscreenImage by remember { mutableStateOf<String?>(null) }
@@ -122,160 +122,17 @@ fun ChatBubble(
     }
 
     // 分享：图片（Markdown 渲染美化长图，生成后预览）/ Markdown（.md 文件）
-    var showShareMenu by remember { mutableStateOf(false) }
-    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var showMarkdownAction by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    val shareMarkdownText = message.content.ifBlank { "[图片]" }
-    val shareMessage = { showShareMenu = true }
-
-    // 生成图片并进入预览
-    fun prepareImage() {
-        showShareMenu = false
-        scope.launch {
-            val label = if (isUser) s.roleUser else s.roleAi
-            val labelColor = if (isUser) 0xFF3B82F6.toInt() else colors.Primary.toArgb()
-            val bmp = withContext(Dispatchers.IO) {
-                ShareImageGenerator.generate(context, listOf(ShareSegment(label, shareMarkdownText, labelColor)), colors.Primary.toArgb())
-            }
-            previewBitmap = bmp
-        }
-    }
-
-    fun sharePreviewImage() {
-        val bmp = previewBitmap ?: return
-        scope.launch {
-            val ok = withContext(Dispatchers.IO) { context.shareBitmap(bmp) }
-            if (!ok) Toast.makeText(context, "分享失败", Toast.LENGTH_SHORT).show()
-            previewBitmap = null
-        }
-    }
-
-    fun savePreviewImage() {
-        val bmp = previewBitmap ?: return
-        scope.launch {
-            val ok = withContext(Dispatchers.IO) { context.saveBitmapToGallery(bmp) }
-            if (ok) Toast.makeText(context, "已保存", Toast.LENGTH_SHORT).show()
-            else Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
-            previewBitmap = null
-        }
-    }
-
-    fun doMarkdown(save: Boolean) {
-        showMarkdownAction = false
-        scope.launch {
-            val ok = withContext(Dispatchers.IO) { if (save) context.saveMarkdown(shareMarkdownText) else context.shareMarkdown(shareMarkdownText) }
-            if (save && ok) Toast.makeText(context, "已保存", Toast.LENGTH_SHORT).show()
-            else if (!ok) Toast.makeText(context, if (save) "保存失败" else "分享失败", Toast.LENGTH_SHORT).show()
-        }
-    }
+    // ★ 已下线：分享/删除/收藏 现在都是「进入多选」的入口，单条分享整条路径不再可达。
 
     // 语音朗读状态 — 播放中/合成中
+    // 注意这里**只留离散量**（谁在播 / 谁在合成 / 是否暂停）：这三个值一次播放里只变几次。
+    // 进度类（playFraction / bufferFraction / isBuffering）是每 100ms 级的，归 [SpeechProgressBar] 自己订阅，
+    // 别在这个高度上 collect —— 那会让整条气泡连同 Markdown 正文每秒重组十次。
     val playingId by TtsController.playingMessageId.collectAsState()
     val loadingId by TtsController.loadingMessageId.collectAsState()
     val paused by TtsController.isPaused.collectAsState()
-    val playFraction by TtsController.playFraction.collectAsState()
-    val bufferFraction by TtsController.bufferFraction.collectAsState()
-    val isBuffering by TtsController.isBuffering.collectAsState()
     val isSpeaking = playingId == message.id
     val isSpeechLoading = loadingId == message.id
-
-    // 删除确认框 + 淡出收起动画
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-    var dismissing by remember { mutableStateOf(false) }
-    LaunchedEffect(dismissing) {
-        if (dismissing) {
-            delay(280)  // 等 exit 动画（fadeOut + shrinkVertically 260ms）播完再真正删除
-            onDelete?.invoke()
-        }
-    }
-
-    // ===== 删除确认框 =====
-    if (showDeleteConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = false },
-            title = { Text(s.deleteMessage, color = colors.TextPrimary) },
-            text = { Text(s.deleteMessageConfirm, color = colors.TextSecondary) },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDeleteConfirm = false
-                    dismissing = true
-                }) { Text(s.confirm, color = colors.ErrorRed) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) { Text(s.cancel, color = colors.TextSecondary) }
-            },
-            containerColor = colors.Surface
-        )
-    }
-
-    // ===== 分享菜单：图片 / Markdown =====
-    if (showShareMenu) {
-        AlertDialog(
-            onDismissRequest = { showShareMenu = false },
-            title = { Text(s.share, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    ShareMenuRow(Icons.Filled.Image, s.shareAsImage, colors) { prepareImage() }
-                    ShareMenuRow(Icons.Filled.Description, s.shareAsMarkdown, colors) {
-                        showShareMenu = false
-                        showMarkdownAction = true
-                    }
-                }
-            },
-            confirmButton = {},
-            containerColor = colors.Surface
-        )
-    }
-
-    // ===== Markdown 动作：分享 / 保存 =====
-    if (showMarkdownAction) {
-        AlertDialog(
-            onDismissRequest = { showMarkdownAction = false },
-            title = { Text(s.shareAsMarkdown, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    ShareMenuRow(Icons.Filled.Share, s.share, colors) { doMarkdown(save = false) }
-                    ShareMenuRow(Icons.Filled.Download, s.saveMarkdown, colors) { doMarkdown(save = true) }
-                }
-            },
-            confirmButton = {},
-            containerColor = colors.Surface
-        )
-    }
-
-    // ===== 图片预览：生成后的分享图全屏预览 + 分享/保存 =====
-    if (previewBitmap != null) {
-        Dialog(
-            onDismissRequest = { previewBitmap = null },
-            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
-        ) {
-            Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Image(
-                        previewBitmap!!.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxWidth(),
-                        contentScale = ContentScale.Fit
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    TextButton(onClick = { sharePreviewImage() }, modifier = Modifier.weight(1f)) {
-                        Text(s.share, color = colors.Primary, fontWeight = FontWeight.SemiBold)
-                    }
-                    TextButton(onClick = { savePreviewImage() }, modifier = Modifier.weight(1f)) {
-                        Text(s.saveImage, color = colors.Primary, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
-        }
-    }
 
     // ===== 全屏图片预览 =====
     if (fullscreenImage != null) {
@@ -289,7 +146,7 @@ fun ChatBubble(
     }
 
     AnimatedVisibility(
-        visible = !dismissing,
+        visible = true,
         enter = slideInVertically(
             animationSpec = FreeChatAnimation.messageSlideIn,
             initialOffsetY = { (it * FreeChatAnimation.BUBBLE_RISE_FRACTION).toInt() }
@@ -300,6 +157,7 @@ fun ChatBubble(
         ),
         modifier = modifier
     ) {
+      Box {
         if (isUser) {
             // ========== 用户消息 — 图片网格（若有）+ 文本气泡 + 长按 ==========
             Column(
@@ -344,7 +202,7 @@ fun ChatBubble(
                 // 上传的文件（附件 chip）
                 if (message.attachmentPath != null) {
                     FileAttachmentCard(
-                        name = message.attachmentName ?: "文件",
+                        name = message.attachmentName ?: s.fileLabel,
                         isUser = true,
                         onClick = { openFile(context, message.attachmentPath!!) }
                     )
@@ -360,19 +218,10 @@ fun ChatBubble(
                             Spacer(Modifier.height(4.dp))
                         }
                         Row(verticalAlignment = Alignment.Bottom) {
-                            // 剧情模式：用户最后一条消息左下角显示「编辑」图标（改写提示词重新生成）
-                            if (onEdit != null) {
-                                Box(
-                                    modifier = Modifier
-                                        .padding(end = 6.dp, bottom = 2.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .clickable(onClick = onEdit)
-                                        .padding(6.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Filled.Edit, s.editMessage, tint = colors.TextTertiary, modifier = Modifier.size(14.dp))
-                                }
-                            }
+                            // 改写提示词：**直接点气泡**，不再在旁边挂一个铅笔图标。
+                            // 铅笔只对「最后一条用户消息」有意义，却又永远占着一个位置、还得用户先看懂它是干嘛的；
+                            // 直接把整条气泡做成入口更符合直觉（微信/Telegram 的编辑也是长按或点整条）。
+                            // 多选态不接管点击：那时点整条 = 勾选，抢过来会让多选失灵。
                             Box(
                                 modifier = Modifier
                                     .widthIn(max = (320 * scale).dp)
@@ -383,11 +232,21 @@ fun ChatBubble(
                                             bottomStart = 16.dp, bottomEnd = 4.dp
                                         )
                                     )
-                                    .then(if (isCompanion) Modifier.combinedClickable(onClick = {}, onLongClick = { onQuote?.invoke() }) else Modifier)
+                                    .then(
+                                        when {
+                                            multiSelectEnabled -> Modifier
+                                            isCompanion -> Modifier.combinedClickable(
+                                                onClick = { onEdit?.invoke() },
+                                                onLongClick = { onQuote?.invoke() }
+                                            )
+                                            onEdit != null -> Modifier.combinedClickable(onClick = { onEdit() })
+                                            else -> Modifier
+                                        }
+                                    )
                                     .background(if (isCompanion) colors.SurfaceVariant.copy(alpha = 0.6f) else colors.UserBubble)
                                     .padding(horizontal = 14.dp, vertical = 10.dp)
                             ) {
-                                SelectionContainer {
+                                SelectionBox(!multiSelectEnabled) {
                                     Text(
                                         buildHighlightedText(message.content, highlightKeyword, highlightColor),
                                         style = MaterialTheme.typography.bodyMedium.copy(
@@ -399,39 +258,46 @@ fun ChatBubble(
                                 }
                             }
                         }
-                        // 用户消息操作栏 — 复制 / 删除（拟人模式不显示）
-                        if (!isCompanion) {
-                            Row(
-                                modifier = Modifier.padding(top = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                MessageActionIcon(onClick = { copyMessage() }) {
-                                    Icon(Icons.Filled.ContentCopy, s.copyMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
-                                }
-                                MessageActionIcon(onClick = { shareMessage() }) {
-                                    Icon(Icons.Filled.Share, s.share, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
-                                }
-                                if (onFavorite != null) {
-                                    MessageActionIcon(onClick = { onFavorite() }) {
-                                        Icon(
-                                            if (isFavorited) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                                            if (isFavorited) s.unfavorite else s.favorite,
-                                            tint = if (isFavorited) colors.ErrorRed else colors.TextTertiary,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-                                }
-                                if (onQuote != null) {
-                                    MessageActionIcon(onClick = { onQuote() }) {
-                                        Icon(Icons.Filled.FormatQuote, "引用", tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
-                                    }
-                                }
-                                if (onDelete != null) {
-                                    MessageActionIcon(onClick = { showDeleteConfirm = true }) {
-                                        Icon(Icons.Filled.DeleteOutline, s.deleteMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
-                                    }
-                                }
+                    }
+                }
+
+                // 用户消息操作栏 — 复制 / 分享 / 收藏 / 引用 / 删除（拟人模式不显示；多选态整体隐藏）
+                // 提在文本气泡之外：纯图片消息没有正文气泡，但操作栏照样要有
+                if (!isCompanion && !multiSelectEnabled) {
+                    Row(
+                        modifier = Modifier.padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MessageActionIcon(onClick = { copyMessage() }) {
+                            Icon(Icons.Filled.ContentCopy, s.copyMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                        }
+                        // 分享/删除/收藏：不再是「直接执行」，而是进入多选并把这条连同配对一起勾上
+                        if (!imageOnly) {
+                            MessageActionIcon(onClick = { onEnterMultiSelect?.invoke(MultiSelectAction.SHARE) }) {
+                                Icon(Icons.Filled.Share, s.share, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        if (onEnterMultiSelect != null) {
+                            MessageActionIcon(onClick = { onEnterMultiSelect(MultiSelectAction.FAVORITE) }) {
+                                Icon(
+                                    if (isFavorited) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                                    // 文案固定是「收藏」：这颗心现在是「进多选的收藏入口」，不是开关。
+                                    // 已收藏时图标填红只是状态提示；取消收藏走收藏夹页（批量收藏一律置为已收藏）。
+                                    s.favorite,
+                                    tint = if (isFavorited) colors.ErrorRed else colors.TextTertiary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                        if (onQuote != null) {
+                            MessageActionIcon(onClick = { onQuote() }) {
+                                Icon(Icons.Filled.FormatQuote, s.quoteAction, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        if (onEnterMultiSelect != null) {
+                            MessageActionIcon(onClick = { onEnterMultiSelect(MultiSelectAction.DELETE) }) {
+                                Icon(Icons.Filled.DeleteOutline, s.deleteMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
                             }
                         }
                     }
@@ -442,8 +308,17 @@ fun ChatBubble(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 8.dp, end = 24.dp)
+                    // 剧情补足是纯文本流：要的是「左对齐满宽」，这两侧内缩必须一起去掉，
+                    // 否则正文左 24dp / 右 40dp，比用户气泡还窄一圈、右侧白白空掉一段
+                    .padding(start = if (textFlow) 0.dp else 8.dp, end = if (textFlow) 0.dp else 24.dp)
             ) {
+                // 生成失败标识：挂在气泡最上面 —— 这一条的正文本身是错误提示（"请求失败：…"），
+                // 不标出来会被当成"AI 就这么答的"
+                if (message.failed) {
+                    FailedBadge(colors)
+                    Spacer(Modifier.height(6.dp))
+                }
+
                 // 推理过程显示：与正文同列上下排列（修复思考卡与正文重叠），受「显示思考过程」开关控制
                 if (showThinking && message.reasoningContent.orEmpty().isNotEmpty()) {
                     ReasoningBubble(message.reasoningContent.orEmpty(), colors)
@@ -459,11 +334,19 @@ fun ChatBubble(
                             lineBreak = cjkLineBreak
                         ),
                         color = colors.TextPrimary,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .combinedClickable(onClick = {}, onLongClick = { onQuote?.invoke() })
-                            .background(colors.SurfaceVariant.copy(alpha = 0.6f))
-                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                        // 剧情补足（textFlow）：去掉气泡底/圆角/内边距，左对齐满宽，正文原样铺开。
+                        // 长按引用两种形态都保留，否则文字流里没法引用某一段。
+                        modifier = if (textFlow) {
+                            Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(onClick = {}, onLongClick = { onQuote?.invoke() })
+                        } else {
+                            Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .combinedClickable(onClick = {}, onLongClick = { onQuote?.invoke() })
+                                .background(colors.SurfaceVariant.copy(alpha = 0.6f))
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                        }
                     )
                 } else {
                     MarkdownText(
@@ -473,7 +356,8 @@ fun ChatBubble(
                         quoteBarColor = colors.Primary.copy(alpha = 0.5f),
                         dividerColor = colors.Divider,
                         highlightKeyword = highlightKeyword,
-                        highlightColor = highlightColor ?: Color.Unspecified
+                        highlightColor = highlightColor ?: Color.Unspecified,
+                        selectionEnabled = !multiSelectEnabled
                     )
                 }
 
@@ -481,7 +365,7 @@ fun ChatBubble(
                 if (message.attachmentPath != null) {
                     Spacer(Modifier.height(8.dp))
                     FileAttachmentCard(
-                        name = message.attachmentName ?: "文档",
+                        name = message.attachmentName ?: s.docLabel,
                         isUser = false,
                         onClick = { openFile(context, message.attachmentPath!!) }
                     )
@@ -543,8 +427,8 @@ fun ChatBubble(
                     }
                 }
 
-                // 操作栏 + 模型名（拟人模式不显示，模拟真实气泡对话）
-                if (!isCompanion) {
+                // 操作栏 + 模型名（拟人模式不显示，模拟真实气泡对话；多选态整体隐藏）
+                if (!isCompanion && !multiSelectEnabled) {
                     Row(
                         modifier = Modifier.padding(top = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -553,11 +437,16 @@ fun ChatBubble(
                         MessageActionIcon(onClick = { copyMessage() }) {
                             Icon(Icons.Filled.ContentCopy, s.copyMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
                         }
-                        MessageActionIcon(onClick = { shareMessage() }) {
-                            Icon(Icons.Filled.Share, s.share, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                        // 纯图片回复（只有图、没有正文）：隐藏分享，其余按钮保留
+                        // 生成失败的一条：分享与收藏都不给（那是错误提示，不是内容）——
+                        // 复制/删除/重新生成照旧留着，用户要留着那句话去反馈问题也有个去处
+                        if (!imageOnly && !message.failed) {
+                            MessageActionIcon(onClick = { onEnterMultiSelect?.invoke(MultiSelectAction.SHARE) }) {
+                                Icon(Icons.Filled.Share, s.share, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                            }
                         }
-                        if (onDelete != null) {
-                            MessageActionIcon(onClick = { showDeleteConfirm = true }) {
+                        if (onEnterMultiSelect != null) {
+                            MessageActionIcon(onClick = { onEnterMultiSelect(MultiSelectAction.DELETE) }) {
                                 Icon(Icons.Filled.DeleteOutline, s.deleteMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
                             }
                         }
@@ -566,11 +455,13 @@ fun ChatBubble(
                                 Icon(Icons.Filled.Refresh, s.regenerate, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
                             }
                         }
-                        if (onFavorite != null) {
-                            MessageActionIcon(onClick = { onFavorite() }) {
+                        if (onEnterMultiSelect != null && !message.failed) {
+                            MessageActionIcon(onClick = { onEnterMultiSelect(MultiSelectAction.FAVORITE) }) {
                                 Icon(
                                     if (isFavorited) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                                    if (isFavorited) s.unfavorite else s.favorite,
+                                    // 文案固定是「收藏」：这颗心现在是「进多选的收藏入口」，不是开关。
+                                    // 已收藏时图标填红只是状态提示；取消收藏走收藏夹页（批量收藏一律置为已收藏）。
+                                    s.favorite,
                                     tint = if (isFavorited) colors.ErrorRed else colors.TextTertiary,
                                     modifier = Modifier.size(16.dp)
                                 )
@@ -578,7 +469,7 @@ fun ChatBubble(
                         }
                         if (onQuote != null) {
                             MessageActionIcon(onClick = { onQuote() }) {
-                                Icon(Icons.Filled.FormatQuote, "引用", tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                                Icon(Icons.Filled.FormatQuote, s.quoteAction, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
                             }
                         }
                         if (onSpeak != null) {
@@ -600,9 +491,6 @@ fun ChatBubble(
                             }
                             SpeechProgressBar(
                                 visible = isSpeaking,
-                                fraction = if (isSpeaking) playFraction else 0f,
-                                bufferFraction = if (isSpeaking) bufferFraction else 0f,
-                                isBuffering = isBuffering,
                                 colors = colors
                             )
                         }
@@ -624,6 +512,21 @@ fun ChatBubble(
                 }
             }
         }
+
+        // ★ 多选点击层：必须声明在内容之后 —— 后声明的兄弟在命中测试里优先，
+        //   这一层一次性盖住正文 SelectionContainer / 图片点击 / 附件卡 / 推理卡展开 / 编辑铅笔，
+        //   不用逐个去关子节点的 clickable（逐个关一定会漏）。
+        if (multiSelectEnabled) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { onToggleSelect?.invoke() }
+            )
+        }
+      }
     }
 }
 
@@ -803,7 +706,7 @@ private fun ImagePreviewDialog(
                     ) {
                         Icon(
                             Icons.Filled.Close,
-                            contentDescription = "关闭",
+                            contentDescription = s.close,
                             tint = Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(24.dp)
                         )
@@ -816,6 +719,7 @@ private fun ImagePreviewDialog(
 
 /** 保存图片字节到 Pictures/FreeChat（API 29+ 用 MediaStore，否则直接写文件） */
 private suspend fun saveImageBytes(context: Context, bytes: ByteArray) {
+    val s = com.freechat.i18n.LocaleManager.strings()
     withContext(Dispatchers.IO) {
         try {
             val filename = "FreeChat_${System.currentTimeMillis()}.jpg"
@@ -836,10 +740,10 @@ private suspend fun saveImageBytes(context: Context, bytes: ByteArray) {
                         out.write(bytes)
                     }
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "图片已保存到 Pictures/FreeChat", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, s.imageSavedTo("Pictures/FreeChat"), Toast.LENGTH_SHORT).show()
                     }
                 } ?: withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "保存失败，请检查存储空间", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, s.storageSaveFailed, Toast.LENGTH_SHORT).show()
                 }
             } else {
                 val dir = File(
@@ -849,12 +753,12 @@ private suspend fun saveImageBytes(context: Context, bytes: ByteArray) {
                 dir.mkdirs()
                 FileOutputStream(File(dir, filename)).use { it.write(bytes) }
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "图片已保存到 Pictures/FreeChat", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, s.imageSavedTo("Pictures/FreeChat"), Toast.LENGTH_SHORT).show()
                 }
             }
         } catch (e: Exception) {
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "保存失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, s.saveFailedWith(e.message ?: ""), Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -862,6 +766,7 @@ private suspend fun saveImageBytes(context: Context, bytes: ByteArray) {
 
 /** 下载图片到 Pictures 目录 */
 private suspend fun downloadImage(context: Context, url: String) {
+    val s = com.freechat.i18n.LocaleManager.strings()
     withContext(Dispatchers.IO) {
         try {
             val connection = URL(url).openConnection()
@@ -871,7 +776,7 @@ private suspend fun downloadImage(context: Context, url: String) {
             saveImageBytes(context, bytes)
         } catch (e: Exception) {
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "下载失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, s.downloadFailedWith(e.message ?: ""), Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -879,19 +784,20 @@ private suspend fun downloadImage(context: Context, url: String) {
 
 /** 保存本地图片（用户上传的图）到 Pictures 目录 */
 private suspend fun saveLocalImage(context: Context, path: String) {
+    val s = com.freechat.i18n.LocaleManager.strings()
     withContext(Dispatchers.IO) {
         try {
             val src = File(path)
             if (!src.exists()) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "图片不存在或已被删除", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, s.imageMissing, Toast.LENGTH_SHORT).show()
                 }
                 return@withContext
             }
             saveImageBytes(context, src.readBytes())
         } catch (e: Exception) {
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "保存失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, s.saveFailedWith(e.message ?: ""), Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -964,17 +870,24 @@ fun formatMessageTime(timestamp: Long): String {
     val sameDay = now.get(java.util.Calendar.YEAR) == msg.get(java.util.Calendar.YEAR) &&
         now.get(java.util.Calendar.DAY_OF_YEAR) == msg.get(java.util.Calendar.DAY_OF_YEAR)
     if (sameDay) return time
+    // 日期格式**按当前语言来**：中文是「3月5日」，英文得是「Mar 5」——
+    // 原先写死的「%d月%d日」在英文界面里会变成「3月5日」这种半中半英的样子。
+    val s = com.freechat.i18n.LocaleManager.strings()
     val sameYear = now.get(java.util.Calendar.YEAR) == msg.get(java.util.Calendar.YEAR)
-    return if (sameYear) String.format("%d月%d日 %s", msg.get(java.util.Calendar.MONTH) + 1, msg.get(java.util.Calendar.DAY_OF_MONTH), time)
-    else String.format("%d年%d月%d日 %s", msg.get(java.util.Calendar.YEAR), msg.get(java.util.Calendar.MONTH) + 1, msg.get(java.util.Calendar.DAY_OF_MONTH), time)
+    val date = java.text.SimpleDateFormat(
+        if (sameYear) s.dateMd else s.dateYmd,
+        java.util.Locale.getDefault()
+    ).format(java.util.Date(timestamp))
+    return "$date $time"
 }
 
 /** 用 FileProvider 打开本地文件（docx/xlsx/pptx/pdf 等），交给系统对应应用编辑 */
 private fun openFile(context: Context, path: String) {
+    val s = com.freechat.i18n.LocaleManager.strings()
     try {
         val file = File(path)
         if (!file.exists()) {
-            Toast.makeText(context, "文件不存在或已被删除", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, s.fileMissing, Toast.LENGTH_SHORT).show()
             return
         }
         val uri = androidx.core.content.FileProvider.getUriForFile(context, "com.freechat.fileprovider", file)
@@ -992,7 +905,7 @@ private fun openFile(context: Context, path: String) {
         }
         context.startActivity(intent)
     } catch (e: Exception) {
-        Toast.makeText(context, "无法打开文件：${e.message}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, s.openFileFailed(e.message ?: ""), Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -1019,6 +932,7 @@ private fun buildHighlightedText(text: String, keyword: String?, color: Color?):
 @Composable
 private fun FileAttachmentCard(name: String, isUser: Boolean, onClick: () -> Unit) {
     val colors = LocalFreeChatColors.current
+    val s = LocalStrings.current
     val icon = when (name.substringAfterLast('.', "").lowercase()) {
         "pptx", "ppt" -> Icons.Filled.Slideshow
         "xlsx", "xls" -> Icons.Filled.TableChart
@@ -1040,7 +954,7 @@ private fun FileAttachmentCard(name: String, isUser: Boolean, onClick: () -> Uni
             Spacer(Modifier.width(10.dp))
             Column {
                 Text(name, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold)
-                Text(if (isUser) "附件" else "点击打开编辑", style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
+                Text(if (isUser) s.attachmentLabel else s.tapToOpenEdit, style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
             }
         }
     }
@@ -1079,6 +993,34 @@ private fun QuotedThumbnail(quotedText: String?, quotedImagePath: String?, color
     }
 }
 
+/**
+ * 「生成失败」标识 —— 挂在失败的那条 AI 气泡顶部。
+ *
+ * 失败覆盖所有原因（网络断了、连不上、API 没配好、模型限制…）：正文里那句
+ * "请求失败：…" 本来就看得出是错的，但**看起来仍像一条正常回答**，用户划过去就以为
+ * AI 真这么答的。一枚红色标识把它钉死，顺带解释为什么这条没有收藏和分享按钮。
+ */
+@Composable
+private fun FailedBadge(colors: FreeChatColors) {
+    val s = LocalStrings.current
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(colors.ErrorRed.copy(alpha = 0.12f))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Filled.ErrorOutline, null, tint = colors.ErrorRed, modifier = Modifier.size(13.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(
+            s.genFailed,
+            color = colors.ErrorRed,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
 /** 消息下方的小操作图标按钮 — 无背景、低调，点击区略大于图标便于点按 */
 @Composable
 private fun MessageActionIcon(
@@ -1100,16 +1042,23 @@ private fun MessageActionIcon(
 @Composable
 private fun SpeechProgressBar(
     visible: Boolean,
-    fraction: Float,
-    bufferFraction: Float,
-    isBuffering: Boolean,
     colors: FreeChatColors
 ) {
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(200)) + expandHorizontally(tween(240, easing = FastOutSlowInEasing)),
-        exit = fadeOut(tween(180)) + shrinkHorizontally(tween(200, easing = FastOutSlowInEasing))
+        enter = fadeIn(tween(200, easing = FreeChatAnimation.iosEaseOut)) +
+            expandHorizontally(tween(240, easing = FreeChatAnimation.iosEaseOut)),
+        exit = fadeOut(tween(180, easing = FreeChatAnimation.iosEaseIn)) +
+            shrinkHorizontally(tween(200, easing = FreeChatAnimation.iosEaseIn))
     ) {
+        // 朗读进度**只在这一格订阅**（1.0.49 性能）：playFraction 播放期间每 100ms 写一次，
+        // 原来这三个 flow 是在气泡顶层 collect 的，于是「说话的那条气泡」整棵子树
+        // （含 Markdown 正文）每秒被重组十次 —— 而真正要用它们的只有这根 76dp 的进度条。
+        // 挪进 AnimatedVisibility 的 content 里还有第二个好处：不可见时这几个 flow 根本没人订阅。
+        val playFraction by TtsController.playFraction.collectAsState()
+        val bufferFraction by TtsController.bufferFraction.collectAsState()
+        val isBuffering by TtsController.isBuffering.collectAsState()
+
         // 缓冲时白条 alpha 呼吸提示（未缓冲时不用该动画，transition 懒驱动无额外开销）
         val bufferTransition = rememberInfiniteTransition(label = "ttsBuffer")
         val bufferAlpha by bufferTransition.animateFloat(
@@ -1151,11 +1100,11 @@ private fun SpeechProgressBar(
                         .clip(RoundedCornerShape(1.5.dp))
                         .background(colors.Primary.copy(alpha = 0.28f))
                 )
-                // 白条：播放进度
+                // 白条：播放进度（100ms 一次的重组被关在这根 76dp 的进度条里，气泡不出来）
                 Box(
                     modifier = Modifier
                         .fillMaxHeight()
-                        .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                        .fillMaxWidth(playFraction.coerceIn(0f, 1f))
                         .clip(RoundedCornerShape(1.5.dp))
                         .background(colors.Primary.copy(alpha = barAlpha))
                 )
@@ -1164,24 +1113,3 @@ private fun SpeechProgressBar(
     }
 }
 
-/** 分享菜单的一行：图标 + 文字 */
-@Composable
-private fun ShareMenuRow(
-    icon: ImageVector,
-    label: String,
-    colors: FreeChatColors,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 13.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(icon, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-        Spacer(Modifier.width(14.dp))
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
-    }
-}

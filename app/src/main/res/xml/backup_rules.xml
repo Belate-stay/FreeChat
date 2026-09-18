@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 11 及以下（fullBackupContent）。
+
+    allowBackup 是开着的，这是好事：换机时聊天记录能跟着 Google 备份回来。
+    但**登录令牌绝对不能跟着走** —— 那条令牌代表的是一次已经完成的登录，
+    恢复到新设备上等于把别人的账号会话搬过去，而且用户在旧设备上点了"退出登录"
+    也没法把它收回来（令牌早就在备份里了）。
+    账号该由用户在新设备上重新登一次，那是他想清楚了才做的动作。
+
+    sync_state（游标 + 版本号 + 待推队列）同样排除：它指向的是**服务端针对某台设备**的
+    进度，恢复到另一台设备上只会让两台机器的进度互相打架。宁可从头拉一遍。
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="freechat_session.xml" />
+</full-backup-content>
