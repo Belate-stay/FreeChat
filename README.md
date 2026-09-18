@@ -8,6 +8,7 @@
 
 一款 Android 端的多模型 AI 聊天应用 —— 既能当全能 AI 助手，也能成为你的专属拟人陪伴。
 
+[![Website](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-118.178.227.178-4C6FFF?style=flat-square&logo=googlechrome&logoColor=white)](https://118.178.227.178/)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](https://github.com/Belate-stay/FreeChat)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://github.com/Belate-stay/FreeChat)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material3-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white)](https://github.com/Belate-stay/FreeChat)
@@ -81,9 +82,9 @@ FreeChat 是一个 Android 端的多模型 AI 聊天应用，内置**两种模�
 
 ## 📥 下载
 
-前往 [Releases](https://github.com/Belate-stay/FreeChat/releases) 下载最新 APK。
-
-> 要求 Android 8.0（API 26）及以上。
+- **Android 客户端** —— 前往 [Releases](https://github.com/Belate-stay/FreeChat/releases) 下载最新 APK
+  > 要求 Android 8.0（API 26）及以上。
+- **网页版** —— 免安装，浏览器直接打开 [官方网站](https://118.178.227.178/)，与手机端账号互通
 
 ---
 
@@ -159,7 +160,7 @@ app/src/main/java/com/freechat/
 
 ## 👤 作者
 
-[Belate](https://github.com/Belate-stay) · [GitHub 仓库](https://github.com/Belate-stay/FreeChat)
+[Belate](https://github.com/Belate-stay) · [GitHub 仓库](https://github.com/Belate-stay/FreeChat) · [官方网站](https://118.178.227.178/)
 
 ---
 
