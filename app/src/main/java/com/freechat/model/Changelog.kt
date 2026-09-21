@@ -18,6 +18,15 @@ data class ChangelogEntry(
 object ChangelogData {
     val entries: List<ChangelogEntry> = listOf(
         ChangelogEntry(
+            version = "Version 1.0.65",
+            date = "2026-09-21",
+            sections = listOf(
+                ChangelogSection("漏洞修补", listOf(
+                    "修复 Web新建对话对象错误导致Android下拉结果为Null而造成的同步失败的问题。"
+                ))
+            )
+        ),
+        ChangelogEntry(
             version = "Version 1.0.64",
             date = "2026-09-19",
             sections = listOf(

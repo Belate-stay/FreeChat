@@ -80,6 +80,14 @@ object SyncEngine {
 
     private var cursor = 0L
 
+    /**
+     * 本轮拉取里出现过的对话 id（只属于一轮同步，见 [pull]）。
+     *
+     * 用途只有一个：消息那条防线的判断 —— 远端来了一条消息，而本地还没有它的消息文件时，
+     * 得先分清楚是「这台设备还没收到过」还是「用户在这台设备上删了这条对话」。
+     */
+    private val pulledConvIds = mutableSetOf<String>()
+
     // ============================================================
     //  装配
     // ============================================================
@@ -234,6 +242,7 @@ object SyncEngine {
 
     private suspend fun pull(auth: Session.Auth, userId: String) {
         var guard = 0
+        pulledConvIds.clear()
         while (guard++ < 50) {
             val res = ApiClient.changes(auth.token, cursor)
             if (res.changes.isEmpty()) {
@@ -245,6 +254,11 @@ object SyncEngine {
             val wanted = res.changes.filter { !it.deleted }.map { it.kind to it.id }
             val fetched = if (wanted.isEmpty()) emptyMap()
             else ApiClient.fetchObjects(auth.token, wanted).associateBy { it.kind to it.id }
+
+            // 这一批里出现过的对话：**先整批登记，再逐条应用**。消息那条防线要按
+            // 「这条对话是不是刚同步过来的」来判断（见 applyChange 的 MSGS 分支），
+            // 而 conv 和 msgs 在批里的先后顺序并不由我们决定，所以不能等应用到了才登记。
+            for (m in res.changes) if (m.kind == SyncKind.CONV && !m.deleted) pulledConvIds.add(m.id)
 
             for (meta in res.changes) {
                 if (accountChanged(userId)) return
@@ -282,8 +296,23 @@ object SyncEngine {
         when (meta.kind) {
             SyncKind.CONV -> applyConv(meta.id, data)
             SyncKind.MSGS -> {
-                // 本地已经删了这条对话的消息 → 云端这份是旧的，别把它弄回来
-                if (!LocalStore.messagesFile(meta.id).exists() && !Adapter.dirtyKeys().contains(key)) return
+                /**
+                 * 本地已经删了这条对话 → 云端这份消息是旧的，别把它弄回来。
+                 *
+                 * 但**「本地没有这条消息」不等于「本地删过它」**，两种情况必须分开：
+                 *  · 对话在本地还在（刚在这一批里拉下来的，或者更早拉下来过）——
+                 *    那只是"这台设备还没收到过它的消息"，照收；
+                 *  · 对话在本地也没了 —— 才是用户在这台设备上删掉了它，跳过。
+                 *
+                 * 原来只判「消息文件在不在」，于是**另一台设备新建的对话**同步过来
+                 * 只有对话、没有消息：本地还没建消息文件 → 跳过 → 游标照常往前走 → 永久丢
+                 * （消息文件是聊天页保存消息时才创建的，`applyConversations` 不建）。
+                 */
+                val skip = !LocalStore.messagesFile(meta.id).exists() &&
+                    !Adapter.dirtyKeys().contains(key) &&
+                    meta.id !in pulledConvIds &&
+                    Relay.conversations().none { it.id == meta.id }
+                if (skip) return
                 Relay.applyMessages(meta.id, Wire.msgsFromWire(data, Relay.messages(meta.id)))
             }
             SyncKind.MEMS -> Relay.applyMemories(meta.id, Wire.memsFromWire(data) ?: return)

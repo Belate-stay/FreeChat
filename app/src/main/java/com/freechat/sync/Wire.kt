@@ -54,7 +54,7 @@ object Wire {
     /** 对话 → 线上格式（挖掉设备本地字段） */
     fun convToWire(conv: Conversation): JsonObject {
         val obj = AppJson.gson.toJsonTree(conv).asJsonObject
-        val profile = obj.getAsJsonObject("characterProfile") ?: return obj
+        val profile = obj.subObject("characterProfile") ?: return obj
         // 头像：**本体跟着角色卡一起走**（另一台设备/网页端根本没有这个文件，只给路径等于什么都没给）
         val avatar = readFile(conv.characterProfile?.avatarPath)
         profile.addProperty(K_AVATAR_HASH, avatar?.let { hashOf(it) } ?: "")
@@ -177,7 +177,7 @@ object Wire {
     private fun adoptAvatar(wire: JsonElement, lp: CharacterProfile?): AdoptedAvatar {
         val keep = AdoptedAvatar(lp?.avatarPath ?: "", lp?.avatarHash ?: "")
         val profile = wire.takeIf { it.isJsonObject }?.asJsonObject
-            ?.getAsJsonObject("characterProfile") ?: return keep
+            ?.subObject("characterProfile") ?: return keep
         val hash = profile.get(K_AVATAR_HASH)?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
         val data = profile.get(K_AVATAR_DATA)?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
         val cleared = profile.get(K_AVATAR_CLEARED)?.takeIf { it.isJsonPrimitive }?.asBoolean == true
@@ -298,3 +298,18 @@ object Wire {
 
     suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }
 }
+
+/**
+ * 取一个子对象，**「值是 null」和「压根没这个键」当成一回事**（都返回 null）。
+ *
+ * 不能用 Gson 自带的 `getAsJsonObject(key)`：它是**裸强转** ——
+ * `(JsonObject) members.get(key)`，碰上「键在、值是 null」直接抛
+ * `class com.google.gson.JsonNull cannot be cast to class com.google.gson.JsonObject`。
+ * 而 `"x": null` 是完全合法的 JSON，网页端（JS 里 `?? null` 那种写法）就会写出这种东西。
+ *
+ * 1.0.64 那次「同步出错」就是这么炸的：网页端建过的对话带着 `"characterProfile": null` 上云，
+ * 手机**拉取**时在 [Wire.adoptAvatar] 这里抛异常 → 整轮同步中断 → 手机既不拉也不推，
+ * 表现成"网页说已同步、两边却什么都没动"。凡是解析**对面写来的** JSON，都走这个入口。
+ */
+internal fun JsonObject.subObject(key: String): JsonObject? =
+    get(key)?.takeIf { it.isJsonObject }?.asJsonObject

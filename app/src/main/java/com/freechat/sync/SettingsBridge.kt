@@ -278,7 +278,9 @@ object SettingsBridge {
             }
         }
 
-        remote.getAsJsonObject(ANDROID_PREFS)?.let { applyAndroidPrefs(repo, it) }
+        // 用 subObject 而不是 getAsJsonObject：后者碰上 `"androidPrefs": null` 会抛
+        // JsonNull 强转异常（同 [Wire.subObject] 那段注释，1.0.64 的「同步出错」）
+        remote.subObject(ANDROID_PREFS)?.let { applyAndroidPrefs(repo, it) }
     }
 
     private suspend fun applyAndroidPrefs(repo: SettingsRepository, o: JsonObject) {
@@ -326,7 +328,7 @@ object SettingsBridge {
         for (k in ours.keySet()) {
             val mine = ours.get(k)
             if (k == ANDROID_PREFS && mine.isJsonObject) {
-                val rem = remote.getAsJsonObject(ANDROID_PREFS)
+                val rem = remote.subObject(ANDROID_PREFS)
                 val sub = JsonObject()
                 if (rem != null) for (x in rem.keySet()) sub.add(x, rem.get(x))
                 for (x in mine.asJsonObject.keySet()) sub.add(x, mine.asJsonObject.get(x))
