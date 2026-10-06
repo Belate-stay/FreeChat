@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/icon.png" width="120" height="120" alt="FreeChat Logo" />
+<img src="docs/icon.png?v=1.1.0" width="120" height="120" alt="FreeChat Logo" />
 
 # FreeChat
 
