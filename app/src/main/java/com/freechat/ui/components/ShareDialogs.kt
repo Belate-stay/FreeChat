@@ -18,7 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.freechat.ui.animation.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -105,6 +105,53 @@ internal fun ShareImagePreviewDialog(
                 }
                 TextButton(onClick = onSave, modifier = Modifier.weight(1f)) {
                     Text(s.saveImage, color = colors.Primary, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 「在线网页链接」生成结果：链接文本 + 复制 / 分享。
+ * 与长图预览同款无状态模式——复制与分享的行为由调用方注入（复制进剪贴板、分享走系统面板）。
+ * 链接文本可长按选中（SelectableText），万一按钮失灵也能手动拷。
+ */
+@Composable
+internal fun ShareLinkResultDialog(
+    url: String,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onShare: () -> Unit
+) {
+    val colors = LocalFreeChatColors.current
+    val s = LocalStrings.current
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(colors.Surface)
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(s.shareLinkDialogTitle, style = MaterialTheme.typography.titleMedium, color = colors.TextPrimary)
+            Text(s.shareLinkHint, style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
+            Text(
+                url,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.Primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(colors.SurfaceVariant.copy(alpha = 0.5f))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TextButton(onClick = onCopy, modifier = Modifier.weight(1f)) {
+                    Text(s.shareLinkCopy, color = colors.Primary, fontWeight = FontWeight.SemiBold)
+                }
+                TextButton(onClick = onShare, modifier = Modifier.weight(1f)) {
+                    Text(s.share, color = colors.Primary, fontWeight = FontWeight.SemiBold)
                 }
             }
         }

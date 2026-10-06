@@ -63,6 +63,9 @@ class VoiceLevelRecorder {
                 16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
                 bufSize * 2
             )
+        } catch (_: SecurityException) {
+            // Permission may be revoked after the UI check; never start a capture session.
+            null
         } catch (e: Exception) {
             null
         }
@@ -72,6 +75,9 @@ class VoiceLevelRecorder {
         }
         try {
             rec.startRecording()
+        } catch (_: SecurityException) {
+            rec.release()
+            return
         } catch (e: Exception) {
             rec.release()
             return

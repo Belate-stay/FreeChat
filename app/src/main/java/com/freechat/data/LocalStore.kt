@@ -193,6 +193,17 @@ object LocalStore {
         key?.let { onWrite?.invoke(it) }
     }
 
+    /**
+     * 读改写一步到位（整段持锁）：「读出来改几个字再写回」两步各自拿锁的话，
+     * 中间会被并发写插队丢更新（1.0.99.4b：healReferences 的竞态）。
+     * 文件不存在返回 false。写照常通知监听（改动要标脏上云）。
+     */
+    fun transformText(file: File, transform: (String) -> String): Boolean = synchronized(LOCK) {
+        val text = readText(file) ?: return false
+        writeText(file, transform(text))
+        true
+    }
+
     /** 删文件（删对话 / 删记忆）。删除也要通知 —— 同步靠它知道该给云端立墓碑。 */
     fun deleteFile(file: File) {
         val key: String?

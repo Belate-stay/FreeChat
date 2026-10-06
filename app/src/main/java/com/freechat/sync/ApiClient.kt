@@ -1,6 +1,7 @@
 package com.freechat.sync
 
 import com.freechat.data.AppJson
+import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -278,4 +279,94 @@ object ApiClient {
 
     suspend fun health(): Boolean =
         runCatching { call("GET", "/health").get("ok")?.asBoolean == true }.getOrDefault(false)
+
+    // ============================================================
+    //  分享（在线网页链接）
+    // ============================================================
+
+    /**
+     * 创建一次「在线网页分享」。body 形状见 ShareLinkPayload.build()：
+     * { title, messages: [{role, content, timestamp}], images: [{messageIndex, mime, data}] }。
+     * 服务端校验条数/字数/大小，超限回 413 payload_too_large（message 里明说原因，直接展示给用户）。
+     */
+    suspend fun createShare(token: String, body: JsonObject): ShareLinkResult =
+        call("POST", "/share", token = token, body = body).into()
+
+    suspend fun listShares(token: String): List<ShareInfo> =
+        call("GET", "/share", token = token).into<ShareListResult>().shares
+
+    /** 撤销分享：服务端置 revoked 并删图片，链接随即 404。幂等 */
+    suspend fun revokeShare(token: String, id: String) {
+        call("DELETE", "/share/$id", token = token)
+    }
+
+    // ============================================================
+    //  微信 ClawBot（M3，登录特权）
+    // ============================================================
+
+    /** 取官方二维码（iLink get_bot_qrcode 转发）。[imgContent] 是二维码图 URL 或内容 */
+    suspend fun wechatBindStart(token: String): Pair<String, String> {
+        val o = call("POST", "/wechat/bind/start", token = token, body = JsonObject())
+        return (o.get("qrcode")?.asString ?: "") to (o.get("qrcode_img_content")?.asString ?: "")
+    }
+
+    /**
+     * 轮询扫码状态（wait/scaned/confirmed/expired/need_verifycode/…）。confirmed 时服务端已落库并拉起收发。
+     * [verifyCode]：need_verifycode 分支的二次验证码（1.0.94 补上——服务器一直收，App 之前没传，
+     * 验证码分支是个死胡同）；空串=纯轮询。
+     */
+    suspend fun wechatBindStatus(token: String, convId: String, verifyCode: String = ""): String {
+        val q = buildString {
+            append("/wechat/bind/status?conv_id=$convId")
+            if (verifyCode.isNotBlank()) append("&verify_code=").append(java.net.URLEncoder.encode(verifyCode, "UTF-8"))
+        }
+        return call("GET", q, token = token).get("status")?.asString ?: "wait"
+    }
+
+    suspend fun wechatUnbind(token: String) {
+        call("POST", "/wechat/unbind", token = token, body = JsonObject())
+    }
+
+    /** 绑定概览：bound / conv_id / paused_until */
+    suspend fun wechatStatus(token: String): JsonObject = call("GET", "/wechat/status", token = token)
+
+    /**
+     * 大脑生成（M4 收口）：接微信的角色 App 里聊也走服务器生成。
+     * 经 FreeChatServer 鉴权代理到 127.0.0.1:3100 的大脑（手机直接够不到回环）。
+     * [skipUserWrite] = true：用户消息由 App 本地落盘+同步，大脑不重复写（收口语义）。
+     * 返回 { slept, silence, emotion, segments: [...], messageIds: [...] }。
+     */
+    suspend fun companionReply(token: String, convId: String, userText: String, skipUserWrite: Boolean = false): JsonObject {
+        val body = JsonObject()
+        body.addProperty("convId", convId)
+        body.addProperty("userText", userText)
+        body.addProperty("skipUserWrite", skipUserWrite)
+        return call("POST", "/companion/reply", token = token, body = body)
+    }
+
+    // ============================================================
+    //  建议与反馈（1.0.95：可匿名提交；登录则顺手挂账号）
+    // ============================================================
+
+    /**
+     * 提交反馈。**不带令牌**——未登录也能发（拍板）；登录态多带一份 Authorization，
+     * 服务器把反馈挂到账号上。[device] = 机型/系统/应用版本/语言 的一行摘要。
+     */
+    suspend fun submitFeedback(content: String, clientId: String, device: String, token: String? = null): JsonObject {
+        val body = JsonObject()
+        body.addProperty("content", content)
+        body.addProperty("clientId", clientId)
+        body.addProperty("device", device)
+        return call("POST", "/feedback", token = token, body = body)
+    }
+
+    /** 我的反馈（只读清单）：user_id 或 clientId 命中都算；未登录只带 clientId */
+    suspend fun myFeedback(clientId: String, token: String? = null): JsonArray {
+        val o = call(
+            "GET",
+            "/feedback/mine?clientId=${java.net.URLEncoder.encode(clientId, "UTF-8")}",
+            token = token
+        )
+        return o.getAsJsonArray("feedbacks") ?: JsonArray()
+    }
 }

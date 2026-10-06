@@ -20,6 +20,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -29,6 +30,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalWindowInfo
 import com.freechat.model.ColorTheme
+import kotlinx.coroutines.delay
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.sin
@@ -54,12 +56,12 @@ import kotlin.math.sin
 //       看起来像一块脏抹布。所以中间额外插一个「亮而不灰」的暖白，把插值路径掰成明度轴。
 //
 //  性能：
-//    · 动画相位来自 `withInfiniteAnimationFrameMillis`（全局动画时钟），
+//    · 动画相位来自一个限速的全局动画时钟，
 //      所以同一时刻「根背景 / 各页面的背景副本 / 侧滑页」算出的图案完全一致，
 //      页面切换或抽屉滑出时背景不会「跳一下」。
-//    · 所有 State 只在 `drawBehind` 的 lambda 里读 —— 每帧只重绘，不重组。
-//    · 应用退到后台时 Compose 的帧时钟自动停摆，动画随之暂停，不空转耗电。
-//    · 这是进阶选项，默认关闭；开启后以视觉效果优先（用户明确要求）。
+//    · State 只在绘制期读；Haze 内使用 drawWithCache 的显式观察，不驱动页面重组。
+//    · 全局色场时钟每 80ms 最多更新一次（约 12.5Hz），不要求整个 App 满帧刷新渐变。
+//    · 应用退到后台时 Compose 的帧时钟自动停摆，动画随之暂停。
 
 /** 一次背景绘制所需的全部颜色。九套色板（棕/蓝/白 × 浅/深/纯黑）各一份，见文件末尾。 */
 data class LiquidPalette(
@@ -89,6 +91,7 @@ data class LiquidPalette(
 
 /** 当前是否开启流动炫彩。为 true 时各页面不再铺不透明底色，改由根背景透上来。 */
 val LocalLiquidMode = staticCompositionLocalOf { false }
+val LocalLiquidProgress = staticCompositionLocalOf<State<Float>?> { null }
 
 /**
  * 全局动画时钟。由 MainActivity 建一次、往下传，全 App 的流动背景共用同一个帧回调 ——
@@ -124,15 +127,9 @@ private fun phase(ms: Long, periodMs: Long, offset: Float = 0f): Float {
 @Composable
 fun rememberLiquidClock(): State<Long> {
     val clock = remember { mutableLongStateOf(0L) }
-    val context = androidx.compose.ui.platform.LocalContext.current
-    LaunchedEffect(Unit) {
-        // 系统「动画时长缩放」= 0 表示用户在系统层关了动画（无障碍/省电），这时不该硬转。
-        // 自己读，不交给 withInfiniteAnimationFrameMillis —— 见下面的说明。
-        val cr = context.contentResolver
-        val scale = android.provider.Settings.Global.getFloat(
-            cr, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f
-        )
-        if (scale <= 0f) return@LaunchedEffect
+    val motionEnabled = com.freechat.ui.animation.rememberMotionEnabled()
+    LaunchedEffect(motionEnabled) {
+        if (!motionEnabled) return@LaunchedEffect
         // ⚠️ 这里**故意**不用 withInfiniteAnimationFrameMillis：
         // 它把整段交给系统那个 InfiniteAnimationPolicy，某些 ROM / 模拟器上那个策略会在启动后
         // 悄悄抛 CancellationException（只取消这一条协程，不打任何日志、不影响别的动画），
@@ -143,6 +140,7 @@ fun rememberLiquidClock(): State<Long> {
         // 帧时钟自己会停（Recomposer 的可暂停时钟），不会空转。
         while (true) {
             androidx.compose.runtime.withFrameNanos { ns -> clock.longValue = ns / 1_000_000 }
+            delay(80L)
         }
     }
     return clock
@@ -163,63 +161,75 @@ fun rememberLiquidClock(): State<Long> {
 fun DrawScope.drawLiquidField(
     palette: LiquidPalette,
     ms: Long,
-    frame: Rect = Rect(0f, 0f, size.width, size.height)
+    frame: Rect = Rect(0f, 0f, size.width, size.height),
+    alpha: Float = 1f,
 ) {
+    if (alpha <= 0f) return
+    // 渐变的三个色层必须作为整体淡入：逐层乘 alpha 会改变混色结果，
+    // 让背景、卡片和标题栏在开关动画中短暂出现色差。稳态不创建离屏层。
+    if (alpha < 1f) {
+        drawIntoCanvas { canvas ->
+            canvas.saveLayer(Rect(Offset.Zero, size), Paint().apply { this.alpha = alpha })
+            drawLiquidField(palette, ms, frame)
+            canvas.restore()
+        }
+        return
+    }
     val w = frame.width
     val h = frame.height
     if (w <= 0f || h <= 0f) return
     val ox = frame.left
     val oy = frame.top
 
-    // L1 底色。铺满整个参照系（不是本节点）—— 平移过的副本也要把屏幕矩形盖严
-    drawRect(color = palette.base, topLeft = Offset(ox, oy), size = Size(w, h))
-
-    // L2 场：端点点在画面之外（外扩 28% 最大边），漂移量只有 5~8%，
+    // 场的三个停点都是不透明色，已经完整覆盖参照系；不再额外画一次全屏底色。
+    // 端点点在画面之外（外扩 28% 最大边），漂移量只有 5~8%，
     // 所以无论怎么漂，画面四角都不会露出「渐变还没开始」的空白
-    val drift = phase(ms, 17_000L) * TAU
-    val dx = sin(drift) * w * 0.08f
-    val dy = cos(drift) * h * 0.065f
+    val drift = phase(ms, 14_000L) * TAU
+    val dx = sin(drift) * w * 0.16f
+    val dy = cos(drift) * h * 0.12f
     val over = max(w, h) * 0.28f
     drawRect(
         brush = Brush.linearGradient(
             colors = palette.field,
             start = Offset(ox - over + dx, oy - over + dy),
-            end = Offset(ox + w + over + dx, oy + h + over + dy),
+            end = Offset(ox + w + over - dx, oy + h + over - dy),
         ),
         topLeft = Offset(ox, oy),
-        size = Size(w, h)
+        size = Size(w, h), alpha = alpha,
     )
 
-    // L3 左上柔光：11s 一圈，半径与圆心各自呼吸，避免「一个圆在原地打转」的机械感
-    val g = phase(ms, 11_000L) * TAU
+    // 光域跨越更大的屏幕范围，9s/12s 错位漂移；仍只绘制三层，不加高耗能滤镜。
+    val g = phase(ms, 9_000L) * TAU
     drawRect(
         brush = Brush.radialGradient(
             colors = palette.glow,
             center = Offset(
-                ox + w * 0.16f + sin(g) * w * 0.13f,
-                oy + h * 0.11f + cos(g) * h * 0.10f,
+                ox + w * 0.24f + sin(g) * w * 0.27f,
+                oy + h * 0.28f + cos(g) * h * 0.24f,
             ),
-            radius = w * (0.94f + 0.10f * sin(g * 1.3f)),
+            radius = w * (1.30f + 0.16f * sin(g * 1.3f)),
         ),
         topLeft = Offset(ox, oy),
-        size = Size(w, h)
+        size = Size(w, h), alpha = alpha,
     )
 
-    // L4 右下光晕：13s 一圈（与 L3 的 11s 互质，合成周期 11×13×17 ≈ 40 分钟，看不出重复）
-    val b = phase(ms, 13_000L) * TAU
+    val b = phase(ms, 12_000L, offset = 0.18f) * TAU
     drawRect(
         brush = Brush.radialGradient(
             colors = palette.bloom,
             center = Offset(
-                ox + w * 0.78f + cos(b) * w * 0.15f,
-                oy + h * 0.88f + sin(b) * h * 0.11f,
+                ox + w * 0.74f + cos(b) * w * 0.28f,
+                oy + h * 0.70f + sin(b) * h * 0.24f,
             ),
-            radius = w * (0.88f + 0.12f * cos(b * 1.2f)),
+            radius = w * (1.40f + 0.16f * cos(b * 1.2f)),
         ),
         topLeft = Offset(ox, oy),
-        size = Size(w, h)
+        size = Size(w, h), alpha = alpha,
     )
 }
+
+/** 同一幅屏幕色场在任意节点上的裁片；保留根矩形原点，不重复抵消祖先位移。 */
+internal fun liquidFrameAtOrigin(frame: Rect, origin: Offset): Rect = frame.translate(-origin)
 
 /**
  * 整幅流动背景。正常情况下**全局只该有一个实例** —— MainActivity 根 Box 里那个。
@@ -236,7 +246,8 @@ fun LiquidBackdrop(
 ) {
     val ms = clock ?: rememberLiquidClock()
     val frame = LocalLiquidFrame.current
-    Box(modifier.fillMaxSize().drawBehind {
+    val progress = LocalLiquidProgress.current
+    Box(modifier.fillMaxSize().graphicsLayer { alpha = progress?.value ?: 1f }.drawBehind {
         // 参照系取 MainActivity 量的那个根矩形（与页面里的副本同源）；量不到时退回自己的大小
         // —— 本节点就是 fillMaxSize 的根背景，两者恒等。
         val f = frame?.value?.takeIf { it.width > 0f } ?: Rect(0f, 0f, size.width, size.height)
@@ -260,8 +271,14 @@ fun LiquidBackdrop(
  * 现在缝两侧退回的是同一张根背景，比原来「同一个纯色」还更稳。
  */
 @Composable
-fun Modifier.pageBackground(base: Color): Modifier =
-    if (LocalLiquidMode.current) this else this.background(base)
+fun Modifier.pageBackground(base: Color): Modifier {
+    if (!LocalLiquidMode.current) return background(base)
+    val progress = LocalLiquidProgress.current
+    return drawWithCache {
+        val alpha = 1f - (progress?.value ?: 1f)
+        onDrawBehind { if (alpha > 0f) drawRect(base.copy(alpha = alpha)) }
+    }
+}
 
 /**
  * 当前所在层的**实时平移量**（px）—— 不存数字，交出一个**现算的 lambda**：
@@ -326,7 +343,11 @@ val LocalLiquidPageShift = staticCompositionLocalOf<LiquidPageShift?> { null }
 fun Modifier.hazeBackground(base: Color): Modifier {
     // 不开流动炫彩：照旧铺不透明底色（模糊带抓到的就是它，颜色对得上）
     if (!LocalLiquidMode.current) return this.background(base)
-    return this
+    val progress = LocalLiquidProgress.current
+    return drawWithCache {
+        val alpha = 1f - (progress?.value ?: 1f)
+        onDrawBehind { if (alpha > 0f) drawRect(base.copy(alpha = alpha)) }
+    }
 }
 
 /**
@@ -355,10 +376,17 @@ fun Modifier.hazeBackground(base: Color): Modifier {
  * 的 else 分支上，而页面的 hazeSource 只在 advancedMaterial 为真时才挂 —— 两者天然互斥。
  */
 @Composable
-fun Modifier.pageHeaderBackground(base: Color, overlay: Color = Color.Transparent): Modifier {
-    // 不开流动炫彩：照旧铺不透明底色（就是原来那一套）
-    if (!LocalLiquidMode.current) return this.background(base)
-    return this.liquidOpaqueBackground(base, overlay)
+fun Modifier.pageHeaderBackground(
+    base: Color,
+    overlay: Color = Color.Transparent,
+    strength: () -> Float = { 1f },
+): Modifier {
+    // 普通标题栏也是不透正文的实体面；流光开关只改变颜色，不改变材质。
+    if (LocalLiquidMode.current) return liquidSourceBackdrop(base, overlay, strength)
+    return drawWithCache {
+        val opacity = strength().coerceIn(0f, 1f)
+        onDrawBehind { if (opacity > 0f) drawRect(base.copy(alpha = base.alpha * opacity)) }
+    }
 }
 
 /**
@@ -395,6 +423,7 @@ fun Modifier.liquidOpaqueBackground(
     base: Color,
     overlay: Color = Color.Transparent,
     fadeEndPx: Float = 0f,
+    strength: () -> Float = { 1f },
 ): Modifier {
     if (!LocalLiquidMode.current) return this
     val palette = LocalLiquidPalette.current
@@ -416,7 +445,7 @@ fun Modifier.liquidOpaqueBackground(
             val frame = frameState?.value
             if (frame == null || frame.width <= 0f) {
                 // 根矩形还没量到（理论上只有第一帧）：宁可铺一层纯底色，也不能透
-                drawRect(color = base)
+                drawRect(color = base.copy(alpha = strength()))
                 return@drawBehind
             }
             val o = origin.value
@@ -435,17 +464,13 @@ fun Modifier.liquidOpaqueBackground(
                 drawLiquidField(
                     palette = palette,
                     ms = clock?.value ?: 0L,
-                    frame = Rect(
-                        left = -o.x,
-                        top = -o.y,
-                        right = -o.x + frame.width,
-                        bottom = -o.y + frame.height,
-                    )
+                    alpha = strength(),
+                    frame = liquidFrameAtOrigin(frame, o)
                 )
                 // 罩色：侧滑页整块面板上有一层极淡的罩色（drawerVeil，α≈0.07），
                 // 标题带要跟它下面的面板同色，就得把同一层罩色也叠上，
                 // 否则带的边界会显出一条极淡的横线（用户对「接缝/色差」很敏感）。
-                if (overlay.alpha > 0f) drawRect(color = overlay)
+                if (overlay.alpha > 0f) drawRect(color = overlay.copy(alpha = overlay.alpha * strength()))
             }
             if (fadeEndPx <= 0f) {
                 paintField()
@@ -508,11 +533,13 @@ fun Modifier.liquidOpaqueBackground(
 fun Modifier.liquidSourceBackdrop(
     base: Color,
     overlay: Color = Color.Transparent,
+    strength: () -> Float = { 1f },
 ): Modifier {
     if (!LocalLiquidMode.current) return this
     val palette = LocalLiquidPalette.current
     val clock = LocalLiquidClock.current
     val frameState = LocalLiquidFrame.current
+    val liquidProgress = LocalLiquidProgress.current
     val origin = remember { mutableStateOf(Offset.Zero) }
     return this
         .onGloballyPositioned { origin.value = it.positionInRoot() }
@@ -520,25 +547,26 @@ fun Modifier.liquidSourceBackdrop(
         .clipToBounds()
         .drawWithCache {
             // 这三个读数都放在构造块里（= 绘制期），走显式观察 → 每帧作废、重录
-            val ms = clock?.value ?: 0L
+            val strengthValue = strength().coerceIn(0f, 1f)
+            val ms = if (strengthValue > 0f) clock?.value ?: 0L else 0L
             val frame = frameState?.value
             val o = origin.value
+            val opacity = liquidProgress?.value ?: 1f
             onDrawBehind {
-                if (frame == null || frame.width <= 0f) {
+                if (strengthValue <= 0f) return@onDrawBehind
+                val paintSurface = {
                     drawRect(color = base)
-                    return@onDrawBehind
+                    if (frame != null && frame.width > 0f && frame.height > 0f) {
+                        drawLiquidField(palette, ms,
+                            frame = liquidFrameAtOrigin(frame, o), alpha = opacity)
+                        if (overlay.alpha > 0f) drawRect(overlay.copy(alpha = overlay.alpha * opacity))
+                    }
                 }
-                drawLiquidField(
-                    palette = palette,
-                    ms = ms,
-                    frame = Rect(
-                        left = -o.x,
-                        top = -o.y,
-                        right = -o.x + frame.width,
-                        bottom = -o.y + frame.height,
-                    )
-                )
-                if (overlay.alpha > 0f) drawRect(color = overlay)
+                if (strengthValue >= 1f) paintSurface() else drawIntoCanvas { canvas ->
+                    canvas.saveLayer(Rect(Offset.Zero, size), Paint().apply { alpha = strengthValue })
+                    paintSurface()
+                    canvas.restore()
+                }
             }
         }
 }
@@ -554,7 +582,8 @@ fun Modifier.liquidSourceBackdrop(
 //   3. 每个光晕的第二个停点是**桥接色**：它必须亮，不能灰。见文件头第 3 条。
 
 fun liquidPalette(colorTheme: ColorTheme, isDark: Boolean, isOled: Boolean): LiquidPalette =
-    when (colorTheme) {
+    // 浅色流光与强调色独立，主题切换不会把整屏背景染成蓝/棕。
+    if (!isDark && !isOled) WhiteLightLiquid else when (colorTheme) {
         ColorTheme.BROWN -> when {
             isOled -> BrownOledLiquid
             isDark -> BrownDarkLiquid
@@ -570,17 +599,28 @@ fun liquidPalette(colorTheme: ColorTheme, isDark: Boolean, isOled: Boolean): Liq
             isDark -> WhiteDarkLiquid
             else -> WhiteLightLiquid
         }
+        // 自定义色只用于交互重点；流光背景维持中性，不让整页染上自选色。
+        ColorTheme.CUSTOM -> when {
+            isOled -> WhiteOledLiquid
+            isDark -> WhiteDarkLiquid
+            else -> WhiteLightLiquid
+        }
+        ColorTheme.PINE, ColorTheme.CORAL -> when {
+            isOled -> WhiteOledLiquid
+            isDark -> WhiteDarkLiquid
+            else -> WhiteLightLiquid
+        }
     }
 
 // ---- 莫兰迪暖棕 ----
 
-/** 暖棕·浅：奶油底 + 蜂蜜光（左上）+ 玫瑰光（右下）。整体比原底色暖半档，不脏。 */
+/** 浅棕：奶油底、蜂蜜光与沙棕光；不再用玫瑰色把棕色推成珊瑚红。 */
 private val BrownLightLiquid = LiquidPalette(
-    base = Color(0xFFF7F2EC),
-    field = listOf(Color(0xFFFCF8F2), Color(0xFFF6EDE3), Color(0xFFF1E7DC)),
-    glow = listOf(Color(0xFFFFF0D2), Color(0xFFFBE4D8), Color(0x00FBE4D8)),
-    bloom = listOf(Color(0xFFF2DCE6), Color(0xFFF6E8DC), Color(0x00F6E8DC)),
-    drawerVeil = Color(0x12EDE4DB),
+    base = Color(0xFFFCFBF9),
+    field = listOf(Color(0xFFFEFDFC), Color(0xFFFAF8F5), Color(0xFFF7F4F0)),
+    glow = listOf(Color(0xA8FFE1C6), Color(0x55F7E5D5), Color(0x00F7E5D5)),
+    bloom = listOf(Color(0x88DECCAC), Color(0x44EAE2D2), Color(0x00EAE2D2)),
+    drawerVeil = Color(0x0EFFFFFF),
 )
 
 /** 暖棕·深：底色不动，两块光把暗部推开一点，避免大屏纯暗显闷。 */
@@ -588,7 +628,7 @@ private val BrownDarkLiquid = LiquidPalette(
     base = Color(0xFF1C1A17),
     field = listOf(Color(0xFF232019), Color(0xFF1C1916), Color(0xFF16130F)),
     glow = listOf(Color(0x6B4A3A1F), Color(0x3D4A3A2A), Color(0x004A3A2A)),
-    bloom = listOf(Color(0x5C3A2130), Color(0x333A2A28), Color(0x003A2A28)),
+    bloom = listOf(Color(0x5C393326), Color(0x33342E23), Color(0x00342E23)),
     drawerVeil = Color(0x1A24211D),
 )
 
@@ -597,7 +637,7 @@ private val BrownOledLiquid = LiquidPalette(
     base = Color(0xFF040404),
     field = listOf(Color(0xFF0C0B09), Color(0xFF070706), Color(0xFF000000)),
     glow = listOf(Color(0x4A2E2415), Color(0x242E2415), Color(0x002E2415)),
-    bloom = listOf(Color(0x3D241423), Color(0x1F241423), Color(0x00241423)),
+    bloom = listOf(Color(0x3D242016), Color(0x1F242016), Color(0x00242016)),
     drawerVeil = Color(0x1A0D0D0D),
 )
 
@@ -605,11 +645,11 @@ private val BrownOledLiquid = LiquidPalette(
 
 /** 浅蓝·浅：雾底 + 天光（左上）+ 丁香紫（右下）。冷色主题给一点互补的暖紫才不死板。 */
 private val BlueLightLiquid = LiquidPalette(
-    base = Color(0xFFEFF3F7),
-    field = listOf(Color(0xFFF8FBFD), Color(0xFFEBF1F7), Color(0xFFE3EBF3)),
-    glow = listOf(Color(0xFFD9ECFF), Color(0xFFE6EFF8), Color(0x00E6EFF8)),
-    bloom = listOf(Color(0xFFE4DEFB), Color(0xFFE9E9F6), Color(0x00E9E9F6)),
-    drawerVeil = Color(0x12E5EBF0),
+    base = Color(0xFFFAFCFF),
+    field = listOf(Color(0xFFFFFFFF), Color(0xFFF7FAFD), Color(0xFFF2F7FC)),
+    glow = listOf(Color(0xBBD2E9FF), Color(0x55E1F0FC), Color(0x00E1F0FC)),
+    bloom = listOf(Color(0x88DFE3FA), Color(0x44EBECFA), Color(0x00EBECFA)),
+    drawerVeil = Color(0x0EFFFFFF),
 )
 
 private val BlueDarkLiquid = LiquidPalette(
@@ -630,13 +670,13 @@ private val BlueOledLiquid = LiquidPalette(
 
 // ---- 纯白 ----
 
-/** 纯白·浅：纸底 + 极淡的天蓝与藕荷，比原纯白「有空气感」，仍然干净。 */
+/** 中性浅色：可感知的天蓝、玫瑰、薄荷流光；与主题强调色独立。 */
 private val WhiteLightLiquid = LiquidPalette(
-    base = Color(0xFFFCFCFD),
-    field = listOf(Color(0xFFFFFFFF), Color(0xFFF8F9FC), Color(0xFFF3F5FA)),
-    glow = listOf(Color(0xFFE3EFFF), Color(0xFFEFF4FC), Color(0x00EFF4FC)),
-    bloom = listOf(Color(0xFFEFE8FC), Color(0xFFF3F1FB), Color(0x00F3F1FB)),
-    drawerVeil = Color(0x12F5F5F5),
+    base = Color(0xFFF2F4F7),
+    field = listOf(Color(0xFFE5F0FE), Color(0xFFF9EDF5), Color(0xFFE8F5EB)),
+    glow = listOf(Color(0xCCBFDEFA), Color(0x66D3F3EC), Color(0x00D3F3EC)),
+    bloom = listOf(Color(0xBAECCDFA), Color(0x60FFE7CF), Color(0x00FFE7CF)),
+    drawerVeil = Color(0x0EFFFFFF),
 )
 
 private val WhiteDarkLiquid = LiquidPalette(

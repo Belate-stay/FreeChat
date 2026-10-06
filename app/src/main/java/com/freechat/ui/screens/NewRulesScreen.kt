@@ -1,7 +1,8 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.components.HeaderIconButton
+
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -40,16 +41,14 @@ import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.viewmodel.ChatViewModel
-import dev.chrisbanes.haze.HazeInputScale
-import dev.chrisbanes.haze.HazeProgressive
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.delay
 import com.freechat.ui.theme.pageBackground
 import com.freechat.ui.theme.hazeBackground
-import com.freechat.ui.theme.pageHeaderBackground
+import com.freechat.ui.components.TopBarBackdrop
+import com.freechat.ui.components.TopBarBackdropSource
 
 /**
  * 「新规则」二级页：针对当前对话的模型选择 + AI 系统优化定制。
@@ -73,6 +72,9 @@ fun NewRulesScreen(
     val selectedModel by viewModel.selectedModel.collectAsState()
     val selectedVisualModel by viewModel.selectedVisualModel.collectAsState()
     val selectedVisionModel by viewModel.selectedVisionModel.collectAsState()
+    val languageModels by viewModel.languageModels.collectAsState()
+    val visualModels by viewModel.visualModels.collectAsState()
+    val visionModels by viewModel.visionModels.collectAsState()
     val enableWebSearch by viewModel.enableWebSearch.collectAsState()
     val showThinking by viewModel.showThinking.collectAsState()
     val autoSummarizeMemory by viewModel.autoSummarizeMemory.collectAsState()
@@ -93,14 +95,21 @@ fun NewRulesScreen(
     val builtInAssistant = conversations.find { it.id == convId }?.builtInAssistant?.isNotBlank() == true
 
     // 有效值 = 每对话覆盖（非 null）优先，否则全局默认
-    val effModel = per.languageModelId?.let { id -> viewModel.languageModels.value.find { it.id == id } } ?: selectedModel
-    val effVisual = per.visualModelId?.let { id -> viewModel.visualModels.value.find { it.id == id } } ?: selectedVisualModel
-    val effVision = per.visionModelId?.let { id -> viewModel.visionModels.value.find { it.id == id } } ?: selectedVisionModel
+    val catalog = languageModels + visualModels + visionModels
+    val effectiveModels = com.freechat.data.ModelSelectionResolver.resolve(
+        com.freechat.data.RequestModels(selectedModel, selectedVisualModel, selectedVisionModel), catalog, per)
+    val effModel = effectiveModels.language
+    val effVisual = effectiveModels.visual
+    val effVision = effectiveModels.vision
     // 语音同理：覆盖里的 id 在库里找不到（模型被删了）就当没设，跟随全局 —— 跟 ViewModel 里
     // effectiveTtsModelId/effectiveAsrModelId 的判定保持一致，免得「这里显示 A、实际用 B」
     val effTts = per.ttsModelId?.let { id -> ttsModels.find { it.id == id } } ?: ttsModels.find { it.id == voiceModel }
     val effAsr = per.asrModelId?.let { id -> asrModels.find { it.id == id } } ?: asrModels.find { it.id == asrModel }
     val effSearch = per.enableWebSearch ?: enableWebSearch
+    // 1.0.75 深度思考三态（双键：对话×模型）：null = 跟随全局（即**该模型**绑定的全局开关）、
+    // true/false = 显式覆盖（同时绑定该对话和该模型）。与完整输入框按钮互通同一个值。
+    val deepThinkTri = viewModel.deepThinkOverride(per, effModel)
+    val effDeepThink = viewModel.deepThinkFor(per, effModel)
     val effThinking = per.showThinking ?: showThinking
     val effAutoMem = per.autoSummarizeMemory ?: autoSummarizeMemory
     val effTemp = TempMode.entries.getOrElse(per.tempModeOrdinal ?: tempMode.ordinal) { TempMode.AUTO }
@@ -123,6 +132,12 @@ fun NewRulesScreen(
 
     var showTempPicker by remember { mutableStateOf(false) }
     var showLengthPicker by remember { mutableStateOf(false) }
+    // 1.0.75：四个开关改**三态菜单**（跟随全局/开/关，用户点名）——原来是 Switch，一键翻转
+    // 分不清「跟随全局」和「这条对话自己开的」，三选一菜单才说得清
+    var showSearchTri by remember { mutableStateOf(false) }
+    var showThinkingTri by remember { mutableStateOf(false) }
+    var showDeepTri by remember { mutableStateOf(false) }
+    var showAutoMemTri by remember { mutableStateOf(false) }
 
     // 规则输入框是整页**最后一个**控件。Compose 自带的「把光标滚进可视区」只保证光标那一行露出来，
     // 输入框自己的下边框还会压在键盘底下 —— 看着就像输入框插进了键盘里。所以拿到焦点、且键盘已经
@@ -142,16 +157,15 @@ fun NewRulesScreen(
     BackHandler(enabled = true) { onBack() }
 
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val titleBarAreaDp = 48.dp
-    val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp).toPx() }
 
-    // 七个选择框（语言/生图/视觉/语音合成/语音识别模型、温度、长度）全都是**窗口内**的底部磨砂玻璃弹层，
+    // 各选择框/三态菜单（模型×5、温度、长度、开关×4）全都是**窗口内**的底部磨砂玻璃弹层，
     // 实际渲染在下面页面根 Box 的末尾。不能在这里 if (showX) 调用：
     // SheetPanel 是 BoxScope 扩展，得挂在根 Box 的最后一个子节点上才铺得满整屏、盖得住悬浮标题栏。
     // 不能再用 AlertDialog：它是一个独立窗口，看不到 App 自己画的内容，
     // 想「模糊背景」是做不到的，只能把背景压暗（就是用户说的「悬浮卡片背景加暗」）。
 
     Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
         CompositionLocalProvider(LocalSettingsHazeState provides hazeState) {
         Column(
             modifier = Modifier
@@ -162,7 +176,7 @@ fun NewRulesScreen(
                 // 给在后面只是往滚动内容尾巴上添一段留白，视口还是被键盘压着的那一整屏。
                 .imePadding()
                 .verticalScroll(rememberScrollState())
-                .padding(top = statusBarHeightDp + titleBarAreaDp + 8.dp, bottom = 32.dp)
+                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -276,113 +290,51 @@ fun NewRulesScreen(
             // ──── AI 系统优化 ────
             SectionLabel(Icons.Filled.AutoAwesome, s.sectionAiOptimize)
 
-            SettingsRow {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Filled.Language, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(s.webSearch, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                            Text(if (effSearch) s.webSearchOn else s.webSearchOff, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                        }
-                    }
-                    Switch(
-                        checked = effSearch,
-                        onCheckedChange = { v -> set { it.copy(enableWebSearch = v) } },
-                        colors = switchColors(colors)
-                    )
-                }
-            }
+            // 1.0.75：四项开关全部改三态菜单（跟随全局/开/关）。选「跟随全局」= 跟着全局变（不绑对话）；
+            // 选开/关 = 绑定这条对话（深度思考还同时绑定当前所选模型 —— 双键，用户点名）
+            TriStateRow(
+                icon = Icons.Filled.Language,
+                title = s.webSearch,
+                stateLabel = triStateLabel(per.enableWebSearch, effSearch, s),
+                colors = colors,
+                s = s
+            ) { showSearchTri = true }
 
-            if (effModel.supportsThinking) {
-                SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Filled.Psychology, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.showThinking, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(s.showThinkingDesc, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                        }
-                        Switch(
-                            checked = effThinking,
-                            onCheckedChange = { v -> set { it.copy(showThinking = v) } },
-                            colors = switchColors(colors)
-                        )
-                    }
-                }
+            SettingsGroup(expanded = com.freechat.data.SettingsPresentationPolicy.deepThinkingChildren(
+                effDeepThink, effModel.supportsDeepThinking), parent = {
+                TriStateRow(
+                    icon = Icons.Filled.AutoAwesome,
+                    title = s.deepThinkingMode,
+                    stateLabel = if (effModel.supportsDeepThinking) triStateLabel(deepThinkTri, effDeepThink, s) else s.deepThinkUnsupported,
+                    caption = if (effModel.supportsDeepThinking) s.deepThinkSettingDesc else null,
+                    colors = colors, s = s, enabled = effModel.supportsDeepThinking, embedded = true
+                ) { showDeepTri = true }
+            }) {
+                TriStateRow(icon = Icons.Filled.Psychology, title = s.showThinking,
+                    stateLabel = triStateLabel(per.showThinking, effThinking, s),
+                    caption = s.showThinkingDesc, colors = colors, s = s,
+                    enabled = effModel.supportsThinking, embedded = true
+                ) { showThinkingTri = true }
             }
 
             // 内置「Claude风格助理」不显示这四项：温度、长度、AI 记忆对它没有意义（风格与篇幅由人设定死），
             // 「规则」更是会和它自己的人设打架。摆着只会让人以为调了有用。
             if (!builtInAssistant) {
-                SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Filled.Bookmark, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.memorySummary, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(s.memorySummaryDesc, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                        }
-                        Switch(
-                            checked = effAutoMem,
-                            onCheckedChange = { v -> set { it.copy(autoSummarizeMemory = v) } },
-                            colors = switchColors(colors)
-                        )
-                    }
-                }
+                TriStateRow(
+                    icon = Icons.Filled.Bookmark,
+                    title = s.memorySummary,
+                    stateLabel = triStateLabel(per.autoSummarizeMemory, effAutoMem, s),
+                    caption = s.memorySummaryDesc,
+                    colors = colors,
+                    s = s
+                ) { showAutoMemTri = true }
 
-                SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().clickable { showTempPicker = true }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.Thermostat, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.replyTemp, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(tempLabel(effTemp, s), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                        }
-                        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
-                    }
-                }
-
-                SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().clickable { showLengthPicker = true }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.ShortText, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.replyLength, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(lengthLabel(effLength, s), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                        }
-                        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
-                    }
+                SettingsGroup(parent = {
+                    SettingsItem(Icons.Outlined.Thermostat, s.replyTemp, tempLabel(effTemp, s),
+                        colors, onClick = { showTempPicker = true })
+                }) {
+                    SettingsItem(Icons.Outlined.ShortText, s.replyLength, lengthLabel(effLength, s),
+                        colors, onClick = { showLengthPicker = true })
                 }
 
                 // ──── 规则：这条对话的系统级提示词 ────
@@ -432,33 +384,7 @@ fun NewRulesScreen(
         }
         }
 
-        // 顶部标题栏背景（高级材质开=真模糊，关=纯色）
-        if (advancedMaterial) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp)
-                    .pageHeaderBackground(colors.Background)
-                    .hazeEffect(state = hazeState) {
-                        blurRadius = HazeSpec.TopBlurRadius
-                        inputScale = HazeInputScale.None
-                        backgroundColor = Color.Transparent
-                        progressive = HazeProgressive.verticalGradient(easing = LinearEasing, startY = 0f, startIntensity = 1f, endY = topBarHeightPx, endIntensity = 0f)
-                    }
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp)
-                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
-                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
-                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
-                    .pageHeaderBackground(colors.Background)
-            )
-        }
+        TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
 
         // 悬浮标题栏
         Row(
@@ -469,8 +395,8 @@ fun NewRulesScreen(
                 .padding(top = 8.8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.TextPrimary)
+            HeaderIconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
                 s.newRulesTitle,
@@ -480,7 +406,7 @@ fun NewRulesScreen(
             )
         }
 
-        // ===== 七个二级选择框（底部磨砂玻璃弹层，窗口内浮层）=====
+        // ===== 二级选择框 / 三态菜单（底部磨砂玻璃弹层，窗口内浮层）=====
         // 放在根 Box 的最后：要盖在所有东西之上（包括悬浮标题栏）。拦截层本身就是一层 haze，
         // 把背后整页**糊掉**而不是压暗，和 App 其它地方的材质是同一套语言。
 
@@ -494,7 +420,9 @@ fun NewRulesScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState
         ) {
-            ModelPickerOptions(viewModel.languageModels.value, effModel, colors, s) { m ->
+            ModelPickerOptions(languageModels, effModel, colors, s,
+                followGlobal = com.freechat.data.ModelSelectionResolver.followsGlobal(per.languageModelId, com.freechat.model.ModelType.LANGUAGE, catalog),
+                onFollowGlobal = { set { it.copy(languageModelId = null) }; showLangPicker = false }) { m ->
                 set { it.copy(languageModelId = m.id) }
                 showLangPicker = false
             }
@@ -510,7 +438,9 @@ fun NewRulesScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState
         ) {
-            ModelPickerOptions(viewModel.visualModels.value, effVisual, colors, s) { m ->
+            ModelPickerOptions(visualModels, effVisual, colors, s,
+                followGlobal = com.freechat.data.ModelSelectionResolver.followsGlobal(per.visualModelId, com.freechat.model.ModelType.VISUAL, catalog),
+                onFollowGlobal = { set { it.copy(visualModelId = null) }; showVisualPicker = false }) { m ->
                 set { it.copy(visualModelId = m.id) }
                 showVisualPicker = false
             }
@@ -526,7 +456,9 @@ fun NewRulesScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState
         ) {
-            ModelPickerOptions(viewModel.visionModels.value, effVision, colors, s) { m ->
+            ModelPickerOptions(visionModels, effVision, colors, s,
+                followGlobal = com.freechat.data.ModelSelectionResolver.followsGlobal(per.visionModelId, com.freechat.model.ModelType.VISION, catalog),
+                onFollowGlobal = { set { it.copy(visionModelId = null) }; showVisionPicker = false }) { m ->
                 set { it.copy(visionModelId = m.id) }
                 showVisionPicker = false
             }
@@ -543,7 +475,9 @@ fun NewRulesScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState
         ) {
-            ModelPickerOptions(ttsModels, effTts, colors, s) { m ->
+            ModelPickerOptions(ttsModels, effTts, colors, s,
+                followGlobal = per.ttsModelId == null,
+                onFollowGlobal = { set { it.copy(ttsModelId = null) }; showTtsPicker = false }) { m ->
                 set { it.copy(ttsModelId = m.id) }
                 showTtsPicker = false
             }
@@ -560,7 +494,9 @@ fun NewRulesScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState
         ) {
-            ModelPickerOptions(asrModels, effAsr, colors, s) { m ->
+            ModelPickerOptions(asrModels, effAsr, colors, s,
+                followGlobal = per.asrModelId == null,
+                onFollowGlobal = { set { it.copy(asrModelId = null) }; showAsrPicker = false }) { m ->
                 set { it.copy(asrModelId = m.id) }
                 showAsrPicker = false
             }
@@ -576,7 +512,7 @@ fun NewRulesScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState
         ) {
-            TempModeOptions(effTemp, colors, s) { m ->
+            TempModeOptions(effTemp, colors, s, per.tempModeOrdinal == null, { set { it.copy(tempModeOrdinal = null) }; showTempPicker = false }) { m ->
                 set { it.copy(tempModeOrdinal = m.ordinal) }
                 showTempPicker = false
             }
@@ -592,9 +528,71 @@ fun NewRulesScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState
         ) {
-            LengthModeOptions(effLength, colors, s) { m ->
+            LengthModeOptions(effLength, colors, s, per.lengthModeOrdinal == null, { set { it.copy(lengthModeOrdinal = null) }; showLengthPicker = false }) { m ->
                 set { it.copy(lengthModeOrdinal = m.ordinal) }
                 showLengthPicker = false
+            }
+        }
+
+        // ===== 1.0.75 四个开关的三态菜单（跟随全局/开/关）=====
+        SheetPanel(
+            visible = showSearchTri,
+            onDismiss = { showSearchTri = false },
+            title = s.webSearch,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState
+        ) {
+            TriStateOptions(per.enableWebSearch, effSearch, colors, s) { v ->
+                set { it.copy(enableWebSearch = v) }
+                showSearchTri = false
+            }
+        }
+
+        SheetPanel(
+            visible = showThinkingTri,
+            onDismiss = { showThinkingTri = false },
+            title = s.showThinking,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState
+        ) {
+            TriStateOptions(per.showThinking, effThinking, colors, s) { v ->
+                set { it.copy(showThinking = v) }
+                showThinkingTri = false
+            }
+        }
+
+        // 深度思考写的是**双键**（对话×模型，setDeepThinkOverride），不是整对话的布尔
+        SheetPanel(
+            visible = showDeepTri,
+            onDismiss = { showDeepTri = false },
+            title = s.deepThinkingMode,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState
+        ) {
+            TriStateOptions(deepThinkTri, effDeepThink, colors, s) { v ->
+                viewModel.setDeepThinkOverride(convId, effModel.id, v)
+                showDeepTri = false
+            }
+        }
+
+        SheetPanel(
+            visible = showAutoMemTri,
+            onDismiss = { showAutoMemTri = false },
+            title = s.memorySummary,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState
+        ) {
+            TriStateOptions(per.autoSummarizeMemory, effAutoMem, colors, s) { v ->
+                set { it.copy(autoSummarizeMemory = v) }
+                showAutoMemTri = false
             }
         }
     }
@@ -603,6 +601,9 @@ fun NewRulesScreen(
 /**
  * 模型选择的**选项行**。外壳（SheetPanel）挂在页面根 Box 的末尾，这里只出行 ——
  * 私有 composable 没法自己扛 BoxScope 的弹层，所以拆成「行」和「壳」两半。
+ *
+ * 1.0.75：列表顶部多一个「跟随全局」项（用户点名「所有选项都加入跟随全局」）——
+ * 选它 = 这条对话不定制这一项（写 null），全局怎么变就跟着怎么变。
  */
 @Composable
 private fun ModelPickerOptions(
@@ -610,8 +611,18 @@ private fun ModelPickerOptions(
     selected: ModelInfo?,
     colors: com.freechat.ui.theme.FreeChatColors,
     s: AppStrings,
+    followGlobal: Boolean = false,
+    onFollowGlobal: (() -> Unit)? = null,
     onSelect: (ModelInfo) -> Unit
 ) {
+    if (onFollowGlobal != null) {
+        SheetOption(
+            selected = followGlobal,
+            title = s.followGlobalDefault,
+            colors = colors,
+            onClick = onFollowGlobal
+        )
+    }
     // 空库：别把一个空壳弹层推上来（语音识别默认就是空的），给一句话
     if (models.isEmpty()) {
         Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
@@ -621,7 +632,7 @@ private fun ModelPickerOptions(
     }
     models.forEach { m ->
         SheetOption(
-            selected = m.id == selected?.id,
+            selected = !followGlobal && m.id == selected?.id,
             title = m.displayName,
             subtitle = com.freechat.i18n.localizedModelDesc(m, s),
             colors = colors,
@@ -632,13 +643,23 @@ private fun ModelPickerOptions(
     }
 }
 
-/** 回复温度的选项行（外壳在页面根 Box 末尾，见 [ModelPickerOptions]） */
+/** 回复温度的选项行（外壳在页面根 Box 末尾，见 [ModelPickerOptions]）。1.0.75 顶部加「跟随全局」 */
 @Composable
-private fun TempModeOptions(selected: TempMode, colors: com.freechat.ui.theme.FreeChatColors, s: AppStrings, onSelect: (TempMode) -> Unit) {
+private fun TempModeOptions(
+    selected: TempMode,
+    colors: com.freechat.ui.theme.FreeChatColors,
+    s: AppStrings,
+    followGlobal: Boolean = false,
+    onFollowGlobal: (() -> Unit)? = null,
+    onSelect: (TempMode) -> Unit
+) {
+    if (onFollowGlobal != null) {
+        SheetOption(selected = followGlobal, title = s.followGlobalDefault, colors = colors, onClick = onFollowGlobal)
+    }
     val icons = mapOf(TempMode.AUTO to Icons.Filled.Update, TempMode.WARM to Icons.Filled.Favorite, TempMode.OBJECTIVE to Icons.Filled.Psychology)
     TempMode.entries.forEach { m ->
         SheetOption(
-            selected = m == selected,
+            selected = !followGlobal && m == selected,
             title = tempLabel(m, s),
             colors = colors,
             onClick = { onSelect(m) },
@@ -647,12 +668,22 @@ private fun TempModeOptions(selected: TempMode, colors: com.freechat.ui.theme.Fr
     }
 }
 
-/** 回复长度的选项行（外壳在页面根 Box 末尾，见 [ModelPickerOptions]） */
+/** 回复长度的选项行（外壳在页面根 Box 末尾，见 [ModelPickerOptions]）。1.0.75 顶部加「跟随全局」 */
 @Composable
-private fun LengthModeOptions(selected: LengthMode, colors: com.freechat.ui.theme.FreeChatColors, s: AppStrings, onSelect: (LengthMode) -> Unit) {
+private fun LengthModeOptions(
+    selected: LengthMode,
+    colors: com.freechat.ui.theme.FreeChatColors,
+    s: AppStrings,
+    followGlobal: Boolean = false,
+    onFollowGlobal: (() -> Unit)? = null,
+    onSelect: (LengthMode) -> Unit
+) {
+    if (onFollowGlobal != null) {
+        SheetOption(selected = followGlobal, title = s.followGlobalDefault, colors = colors, onClick = onFollowGlobal)
+    }
     LengthMode.entries.forEach { m ->
         SheetOption(
-            selected = m == selected,
+            selected = !followGlobal && m == selected,
             title = lengthLabel(m, s),
             colors = colors,
             onClick = { onSelect(m) }
@@ -660,13 +691,84 @@ private fun LengthModeOptions(selected: LengthMode, colors: com.freechat.ui.them
     }
 }
 
+// ============================================================
+//  1.0.75 三态开关（跟随全局 / 开 / 关）—— 选项行 + 状态行
+// ============================================================
+
+/** 三态标签：跟随全局（当前：开/关）/ 开 / 关 */
+private fun triStateLabel(state: Boolean?, eff: Boolean, s: AppStrings): String =
+    if (state == null) "${s.followGlobal}（${if (eff) s.optionOn else s.optionOff}）"
+    else if (state) s.optionOn else s.optionOff
+
+/** 三态开关的**状态行**：点开底部弹层三选一。行长得跟选择类一致（副标题=当前状态，尾部箭头） */
 @Composable
-private fun switchColors(colors: com.freechat.ui.theme.FreeChatColors) = SwitchDefaults.colors(
-    checkedThumbColor = colors.OnPrimary,
-    checkedTrackColor = colors.Primary,
-    uncheckedThumbColor = colors.TextTertiary,
-    uncheckedTrackColor = colors.SurfaceVariant
-)
+private fun TriStateRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    stateLabel: String,
+    colors: com.freechat.ui.theme.FreeChatColors,
+    s: AppStrings,
+    enabled: Boolean = true,
+    caption: String? = null,
+    embedded: Boolean = false,
+    onOpen: () -> Unit
+) {
+    val row: @Composable () -> Unit = {
+        Row(
+            Modifier.fillMaxWidth()
+                .clickable(enabled = enabled, role = androidx.compose.ui.semantics.Role.Button, onClick = onOpen)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Icon(icon, null, tint = if (enabled) colors.Primary else colors.TextTertiary, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (enabled) colors.TextPrimary else colors.TextTertiary
+                    )
+                    Text(
+                        stateLabel,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
+                        color = colors.TextSecondary
+                    )
+                    if (caption != null) {
+                        Text(
+                            caption,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
+                            color = colors.TextTertiary
+                        )
+                    }
+                }
+            }
+            Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+        }
+    }
+    if (embedded) row() else SettingsRow { row() }
+}
+
+/** 三态开关的**选项行**（外壳在页面根 Box 末尾）：跟随全局（默认）/ 开 / 关 */
+@Composable
+private fun TriStateOptions(
+    selected: Boolean?,
+    eff: Boolean,
+    colors: com.freechat.ui.theme.FreeChatColors,
+    s: AppStrings,
+    onSelect: (Boolean?) -> Unit
+) {
+    SheetOption(
+        selected = selected == null,
+        title = s.followGlobalDefault,
+        subtitle = if (eff) s.optionOn else s.optionOff,
+        colors = colors,
+        onClick = { onSelect(null) }
+    )
+    SheetOption(selected = selected == true, title = s.optionOn, colors = colors, onClick = { onSelect(true) })
+    SheetOption(selected = selected == false, title = s.optionOff, colors = colors, onClick = { onSelect(false) })
+}
 
 private fun tempLabel(mode: TempMode, s: AppStrings): String = when (mode) {
     TempMode.AUTO -> s.tempAuto

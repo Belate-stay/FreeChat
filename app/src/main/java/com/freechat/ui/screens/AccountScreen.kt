@@ -1,6 +1,7 @@
 package com.freechat.ui.screens
 
-import androidx.compose.animation.core.LinearEasing
+import com.freechat.ui.components.HeaderIconButton
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -10,6 +11,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
+import com.freechat.ui.animation.MotionButton as Button
+import com.freechat.ui.animation.MotionTextButton as TextButton
 import androidx.compose.runtime.*
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.material.icons.filled.Edit
@@ -29,7 +32,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -52,11 +54,9 @@ import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.frostedCard
 import com.freechat.ui.theme.hazeBackground
-import com.freechat.ui.theme.pageHeaderBackground
+import com.freechat.ui.components.TopBarBackdrop
+import com.freechat.ui.components.TopBarBackdropSource
 import com.freechat.ui.theme.pageBackground
-import dev.chrisbanes.haze.HazeInputScale
-import dev.chrisbanes.haze.HazeProgressive
-import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.Dispatchers
@@ -95,13 +95,9 @@ fun AccountScreen(onBack: () -> Unit) {
     val s = LocalStrings.current
     val advancedMaterial = LocalAdvancedMaterial.current
     val hazeState = rememberHazeState()
-    val density = LocalDensity.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val titleBarAreaDp = 48.dp
-    val topFadeZoneDp = HazeSpec.TopFadeZoneDp
-    val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + topFadeZoneDp).toPx() }
 
     // 内存里的登录态（同步的启动路径上也在读同一份，别在这里做磁盘 IO）
     var auth by remember { mutableStateOf(Session.peekAuth()) }
@@ -230,6 +226,7 @@ fun AccountScreen(onBack: () -> Unit) {
     }
 
     Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
         // 整页的卡片共用同一个 HazeState，模糊的才是页面内容而不是每张卡自己的空底
         CompositionLocalProvider(LocalAccountHazeState provides hazeState) {
         Column(
@@ -240,7 +237,7 @@ fun AccountScreen(onBack: () -> Unit) {
                         .hazeBackground(colors.Background) else Modifier
                 )
                 .verticalScroll(rememberScrollState())
-                .padding(top = statusBarHeightDp + titleBarAreaDp + 24.dp, bottom = 40.dp)
+                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 24.dp), bottom = 40.dp)
                 .padding(horizontal = 16.dp)
         ) {
             if (auth == null) {
@@ -284,36 +281,8 @@ fun AccountScreen(onBack: () -> Unit) {
         }
         }
 
-        // ===== 顶部标题栏背景 =====
-        if (advancedMaterial) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp + topFadeZoneDp)
-                    .pageHeaderBackground(colors.Background)
-                    .hazeEffect(state = hazeState) {
-                        blurRadius = HazeSpec.TopBlurRadius
-                        inputScale = HazeInputScale.None
-                        backgroundColor = Color.Transparent
-                        progressive = HazeProgressive.verticalGradient(
-                            easing = LinearEasing, startY = 0f, startIntensity = 1f,
-                            endY = topBarHeightPx, endIntensity = 0f
-                        )
-                    }
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp)
-                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
-                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
-                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
-                    .pageHeaderBackground(colors.Background)
-            )
-        }
+        // 固定高度：实体标题栏与渐进模糊仅切换材质，不切换几何。
+        TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
 
         // ===== 悬浮标题栏 =====
         Row(
@@ -324,8 +293,8 @@ fun AccountScreen(onBack: () -> Unit) {
                 .padding(top = 8.8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.TextPrimary)
+            HeaderIconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
                 s.account,

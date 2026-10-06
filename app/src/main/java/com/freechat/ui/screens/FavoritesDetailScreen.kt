@@ -1,5 +1,7 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.components.HeaderIconButton
+
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
@@ -16,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.HeartBroken
 import androidx.compose.material3.*
+import com.freechat.ui.animation.MotionButton as Button
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,6 +43,9 @@ import com.freechat.model.FavoriteItem
 import com.freechat.model.Message
 import com.freechat.model.Role
 import com.freechat.ui.components.LocalImage
+import com.freechat.ui.components.GeneratedImage
+import com.freechat.ui.components.ImageDisplayPolicy
+import com.freechat.ui.components.MissingGeneratedImageNotice
 import com.freechat.ui.components.MarkdownText
 import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.components.cjkLineBreak
@@ -51,7 +57,7 @@ import com.freechat.ui.theme.frostedGlass
 import com.freechat.viewmodel.ChatViewModel
 import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeProgressive
-import dev.chrisbanes.haze.hazeEffect
+import com.freechat.ui.theme.materialHaze as hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import java.text.SimpleDateFormat
@@ -59,7 +65,8 @@ import java.util.Date
 import java.util.Locale
 import com.freechat.ui.theme.pageBackground
 import com.freechat.ui.theme.hazeBackground
-import com.freechat.ui.theme.pageHeaderBackground
+import com.freechat.ui.components.TopBarBackdrop
+import com.freechat.ui.components.TopBarBackdropSource
 import com.freechat.ui.theme.liquidSourceBackdrop
 import com.freechat.ui.theme.LocalLiquidMode
 
@@ -101,12 +108,10 @@ fun FavoritesDetailScreen(
     }
 
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val titleBarAreaDp = 48.dp
-    val topFadeZoneDp = HazeSpec.TopFadeZoneDp
-    val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + topFadeZoneDp).toPx() }
     val bottomBarHeightPx = with(density) { HazeSpec.BottomFadeHeightDp.toPx() }
 
     Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
         // ===== 底部渐隐区的「采样垫底」：垫在内容源节点下面的一小块不透明流光副本 =====
         // 炫彩下页面源是透明的 → Haze 抓到的样本只有字没有底 → 磨完盖不住下面清晰的正文，
         // 底部那条渐进模糊带就成了「墨汁晕开、但内容还读得出来」。这块让样本自己带上底。
@@ -129,7 +134,7 @@ fun FavoritesDetailScreen(
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier),
             contentPadding = PaddingValues(
                 start = 16.dp, end = 16.dp,
-                top = statusBarHeightDp + titleBarAreaDp + 8.dp,
+                top = HazeSpec.topContentPaddingDp(statusBarHeightDp),
                 bottom = 120.dp
             ),
             verticalArrangement = if (multi) Arrangement.spacedBy(12.dp) else Arrangement.Top
@@ -147,37 +152,8 @@ fun FavoritesDetailScreen(
             }
         }
 
-        // ===== 顶部标题栏背景（高级材质开=真模糊+渐变渐隐，关=纯色） =====
-        if (advancedMaterial) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp + topFadeZoneDp)
-                    .pageHeaderBackground(colors.Background)
-                    .hazeEffect(state = hazeState) {
-                        blurRadius = HazeSpec.TopBlurRadius
-                        inputScale = HazeInputScale.None
-                        backgroundColor = Color.Transparent
-                        progressive = HazeProgressive.verticalGradient(easing = LinearEasing, startY = 0f, startIntensity = 1f, endY = topBarHeightPx, endIntensity = 0f)
-                    }
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { /* 隔离点击：顶部模糊区下的内容不可点 */ }
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp)
-                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
-                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
-                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
-                    .pageHeaderBackground(colors.Background)
-            )
-        }
+        // 固定高度：实体标题栏与渐进模糊仅切换材质，不切换几何。
+        TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
 
         // ===== 悬浮标题栏（返回 + 标题 + 右侧已收藏图标） =====
         Row(
@@ -188,8 +164,8 @@ fun FavoritesDetailScreen(
                 .padding(top = 8.8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.TextPrimary)
+            HeaderIconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
                 s.favoriteDetail,
@@ -199,7 +175,7 @@ fun FavoritesDetailScreen(
             )
             Spacer(Modifier.weight(1f))
             // 已收藏图标：爱心划一道（HeartBroken），点击弹确认后取消收藏
-            IconButton(onClick = { showUnfavoriteConfirm = true }) {
+            HeaderIconButton(onClick = { showUnfavoriteConfirm = true }) {
                 Icon(
                     Icons.Filled.HeartBroken,
                     contentDescription = s.unfavorite,
@@ -285,14 +261,13 @@ fun FavoritesDetailScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState,
             confirmLabel = s.confirm,
-            // 危险操作：确认键红底，别让它长得跟普通「确定」一样
-            confirmDanger = true,
+            confirmDanger = false,
             onConfirm = { showUnfavoriteConfirm = false; onUnfavorite() }
         ) {
             // 连续段的详情页点「取消收藏」清的是整段（见 ChatViewModel.unfavoriteItems），
             // 文案必须跟着说清楚条数，否则单条口吻的提示会让用户以为只掉一条
             Text(
-                if (multi) s.confirmUnfavoriteRun(run.size) else s.confirmUnfavorite,
+                s.unfavoriteKeepsOriginal,
                 color = colors.TextSecondary
             )
         }
@@ -387,30 +362,14 @@ private fun MessageBody(
         )
     }
 
-    // 图片（AI 生图 remote URL / 本地文件 + 用户上传本地图）：本地图固定高度 Crop（与 Chat 页同款，稳定显示），remote 用 Coil FillWidth 自动等高；点击全屏预览
+    if (ImageDisplayPolicy.hasMissingResult(msg)) MissingGeneratedImageNotice()
+
+    // Generated images share the chat renderer's reserved height, loading/error feedback and real aspect ratio.
     if (msg.imageUrls.isNotEmpty() || msg.imagePaths.isNotEmpty()) {
         Spacer(Modifier.height(8.dp))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             msg.imageUrls.forEach { url ->
-                if (url.startsWith("/")) {
-                    LocalImage(
-                        path = url,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxWidth().height(220.dp).clip(RoundedCornerShape(8.dp)).clickable { onPreviewImage(url, true) },
-                        contentScale = ContentScale.Crop,
-                        targetMaxDim = 2048
-                    )
-                } else {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(url)
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onPreviewImage(url, false) },
-                        contentScale = ContentScale.FillWidth
-                    )
-                }
+                key(url) { GeneratedImage(url) { onPreviewImage(url, ImageDisplayPolicy.isLocal(url)) } }
             }
             msg.imagePaths.forEach { path ->
                 LocalImage(

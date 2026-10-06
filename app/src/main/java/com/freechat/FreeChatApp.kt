@@ -22,6 +22,9 @@ class FreeChatApp : Application() {
     override fun onCreate() {
         super.onCreate()
         LocaleManager.captureSystemLocale()
+        // 共享模块的标题兜底接上本地化文案（Conversation.healed 的罕见路径，见 AppJson 注释）
+        com.freechat.data.AppJson.newChatTitleProvider = { LocaleManager.strings().newChat }
+        com.freechat.data.LauncherIconManager(this).applyPendingOnProcessStart()
 
         // 顺序有讲究，三条都不能换：
         // 1. 存储层的唯一写入口 —— 必须早于任何读盘（各 ViewModel/Service 起来之前）

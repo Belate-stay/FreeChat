@@ -12,5 +12,8 @@
     进度，恢复到另一台设备上只会让两台机器的进度互相打架。宁可从头拉一遍。
 -->
 <full-backup-content>
+    <exclude domain="sharedpref" path="freechat_feedback_draft.xml" />
+    <exclude domain="sharedpref" path="freechat_launcher_icon.xml" />
+    <exclude domain="sharedpref" path="freechat_search_local.xml" />
     <exclude domain="sharedpref" path="freechat_session.xml" />
 </full-backup-content>

@@ -9,9 +9,15 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
+        <exclude domain="sharedpref" path="freechat_feedback_draft.xml" />
+        <exclude domain="sharedpref" path="freechat_launcher_icon.xml" />
+        <exclude domain="sharedpref" path="freechat_search_local.xml" />
         <exclude domain="sharedpref" path="freechat_session.xml" />
     </cloud-backup>
     <device-transfer>
+        <exclude domain="sharedpref" path="freechat_feedback_draft.xml" />
+        <exclude domain="sharedpref" path="freechat_launcher_icon.xml" />
+        <exclude domain="sharedpref" path="freechat_search_local.xml" />
         <exclude domain="sharedpref" path="freechat_session.xml" />
     </device-transfer>
 </data-extraction-rules>

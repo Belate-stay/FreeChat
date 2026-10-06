@@ -15,7 +15,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.EaseOutCubic
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -40,6 +39,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
+import com.freechat.ui.animation.MotionIconButton as IconButton
+import com.freechat.ui.animation.MotionTextButton as TextButton
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,8 +51,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
@@ -61,12 +64,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.freechat.BuildConfig
 import com.freechat.R
-import com.freechat.data.SerpApiPool
 import com.freechat.i18n.AppLanguage
 import com.freechat.i18n.AppStrings
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.ColorTheme
 import com.freechat.model.FontSize
+import com.freechat.model.HeaderBarStyle
+import com.freechat.model.InputBarState
+import com.freechat.model.InputStyle
 import com.freechat.model.LengthMode
 import com.freechat.model.ModelInfo
 import com.freechat.model.ModelType
@@ -75,9 +80,11 @@ import com.freechat.model.ThemeMode
 import com.freechat.model.ChatMode
 import com.freechat.sync.Session
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.PageMotion
 import com.freechat.ui.components.SheetActionRow
 import com.freechat.ui.components.SheetOption
 import com.freechat.ui.components.SheetPanel
+import com.freechat.ui.components.CustomColorPicker
 import com.freechat.ui.theme.LocalMonoFontFamily
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
@@ -86,13 +93,13 @@ import com.freechat.ui.theme.selectedSubText
 import com.freechat.ui.theme.selectedText
 import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.frostedCard
+import com.freechat.ui.components.HeaderIconButton
+import com.freechat.ui.components.HeaderTextButton
+import com.freechat.ui.components.NeumorphicSwitch as Switch
 import com.freechat.ui.theme.frostedGlass
 import dev.chrisbanes.haze.rememberHazeState
 import dev.chrisbanes.haze.hazeSource
-import dev.chrisbanes.haze.hazeEffect
-import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeProgressive
 import com.freechat.viewmodel.ChatViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
@@ -100,12 +107,13 @@ import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import com.freechat.ui.theme.pageBackground
 import com.freechat.ui.theme.hazeBackground
-import com.freechat.ui.theme.pageHeaderBackground
+import com.freechat.ui.components.TopBarBackdrop
+import com.freechat.ui.components.TopBarBackdropSource
 import com.freechat.util.saveBitmapToGallery
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
 
-private enum class SubScreen { LANGUAGE_MODEL, VISUAL_MODELS, VOICE_MODELS, AI_MEMORY, FONT, AUTHOR }
+private enum class SubScreen { LANGUAGE_MODEL, VISUAL_MODELS, VOICE_MODELS, AI_MEMORY, FONT, INPUT_BOX, AUTHOR, ICON, FEEDBACK, MY_FEEDBACK, MY_SHARES }
 
 /** 设置页磨砂玻璃的 HazeState，通过 CompositionLocal 提供给所有 SettingsRow（含二级页） */
 internal val LocalSettingsHazeState = staticCompositionLocalOf<HazeState?> { null }
@@ -119,7 +127,8 @@ fun SettingsScreen(
     onOpenVoiceDebug: () -> Unit,
     onOpenChangelog: () -> Unit,
     onOpenModelEditor: (ModelType, ModelInfo?) -> Unit = { _, _ -> },
-    onOpenAgreement: () -> Unit = {}
+    onOpenAgreement: () -> Unit = {},
+    onOpenAuthorWords: () -> Unit = {}
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
@@ -129,16 +138,22 @@ fun SettingsScreen(
     val selectedVisionModel by viewModel.selectedVisionModel.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
     val colorTheme by viewModel.colorTheme.collectAsState()
+    val customColorArgb by viewModel.customColorArgb.collectAsState()
     val tempMode by viewModel.tempMode.collectAsState()
     val lengthMode by viewModel.lengthMode.collectAsState()
     val enableWebSearch by viewModel.enableWebSearch.collectAsState()
+    val showSearchSources by viewModel.showSearchSources.collectAsState()
     val showThinking by viewModel.showThinking.collectAsState()
     val autoSummarizeMemory by viewModel.autoSummarizeMemory.collectAsState()
     val useSystemFont by viewModel.useSystemFont.collectAsState()
     val globalMemories by viewModel.globalMemories.collectAsState()
     val appLanguage by viewModel.appLanguage.collectAsState()
     val fontSize by viewModel.fontSize.collectAsState()
-    val advancedMaterial by viewModel.advancedMaterial.collectAsState()
+    val inputStyle by viewModel.inputStyle.collectAsState()
+    val inputBarState by viewModel.inputBarState.collectAsState()
+    val advancedMaterialSetting by viewModel.advancedMaterial.collectAsState()
+    val headerBarStyle by viewModel.headerBarStyle.collectAsState()
+    val advancedMaterial = LocalAdvancedMaterial.current
     val chatMode by viewModel.chatMode.collectAsState()
     val hazeState = rememberHazeState()
     val systemDarkTheme by viewModel.systemDarkTheme.collectAsState()
@@ -150,6 +165,16 @@ fun SettingsScreen(
 
     var showThemePicker by remember { mutableStateOf(false) }
     var showColorThemePicker by remember { mutableStateOf(false) }
+    var editCustomColor by remember { mutableStateOf(false) }
+    var previewCustomArgb by remember { mutableIntStateOf(0xFF346C98.toInt()) }
+    var showInputStylePicker by remember { mutableStateOf(false) }
+    var showInputBarStatePicker by remember { mutableStateOf(false) }
+    var showHeaderStylePicker by remember { mutableStateOf(false) }
+    var shareToRevoke by remember { mutableStateOf<com.freechat.sync.ShareInfo?>(null) }
+    var shareRevokeAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    LaunchedEffect(advancedMaterialSetting) {
+        if (!advancedMaterialSetting) showHeaderStylePicker = false
+    }
     var showTempPicker by remember { mutableStateOf(false) }
     var showLengthPicker by remember { mutableStateOf(false) }
     var showLanguagePicker by remember { mutableStateOf(false) }
@@ -160,9 +185,18 @@ fun SettingsScreen(
     var newMemoryText by remember { mutableStateOf("") }
     var previewFontSize by remember { mutableStateOf(FontSize.MEDIUM) }
     var showWebSearchConfirm by remember { mutableStateOf(false) }
+    var showSearchSettings by remember { mutableStateOf(false) }
+    var showLiquidBackdropConfirm by remember { mutableStateOf(false) }
+    val searchConfig by viewModel.searchConfig.collectAsState()
     /** 长按作者页二维码 → 保存弹层（同样是底部磨砂玻璃，渲染在下面根 Box 的末尾） */
     var showQrSaveSheet by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val iconManager = remember(context) { com.freechat.data.LauncherIconManager(context) }
+    var selectedIcon by remember { mutableStateOf(iconManager.requestedIcon()) }
+    val activeIcon = remember { iconManager.activeIcon() }
+    var savingIcon by remember { mutableStateOf(false) }
+    val feedbackStore = remember(context) { com.freechat.data.FeedbackDraftStore(context) }
+    var feedbackDraft by remember { mutableStateOf(feedbackStore.load()) }
 
     // 作者页二维码保存：取那张**白底原图**（author_qr.jpg）写进相册 ——
     // 透明的那张只负责在页面里好看，直接存出去在相册里背景会变黑、扫不出来。
@@ -196,14 +230,24 @@ fun SettingsScreen(
 
     var subScreen by remember { mutableStateOf<SubScreen?>(null) }
     // 主列表滚动状态提升到子页切换之外，返回时保持原滚动位置（跨页返回也保持）
-    val mainScrollState = rememberScrollState(initial = viewModel.settingsScrollPosition.value)
+    val initialScrollPosition = remember(viewModel) { viewModel.settingsScrollPosition.value }
+    val mainScrollState = rememberScrollState(initial = initialScrollPosition)
     LaunchedEffect(mainScrollState) {
         snapshotFlow { mainScrollState.value }
             .collect { viewModel.saveSettingsScrollPosition(it) }
     }
 
     // 子页返回键：优先返回设置主列表
-    BackHandler(enabled = subScreen != null) { subScreen = null }
+    // Read the actual route inside the callback: a fast Back can arrive before recomposition
+    // updates an enabled=subScreen!=null handler, otherwise it skips this level entirely.
+    BackHandler(enabled = com.freechat.ui.animation.LocalPageActive.current) {
+        // 「我的反馈」从反馈页进来：返回先回反馈页，再回设置（页级返回键同款）
+        when (subScreen) {
+            null -> onBack()
+            SubScreen.MY_FEEDBACK -> subScreen = SubScreen.FEEDBACK
+            else -> subScreen = null
+        }
+    }
 
     // 关闭联网搜索的确认 —— 也是底部磨砂玻璃弹层，渲染在下面根 Box 的末尾。
     // 确认既然只有「仍然关闭」一条路，主按钮就直接写这句话（不再是「确定/取消」那种含糊的两个键）
@@ -214,20 +258,15 @@ fun SettingsScreen(
     // 想「模糊背景」是做不到的 —— 独立窗口的 Dialog 只能把背景压暗，没有第二种选择。
 
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val titleBarAreaDp = 48.dp
-    val density = LocalDensity.current
-    val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp).toPx() }
+    val pageTravelPx = with(LocalDensity.current) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.roundToPx() }
 
     CompositionLocalProvider(LocalSettingsHazeState provides hazeState) {
     Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
-        AnimatedContent(
+        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
+        PageMotion(
             targetState = subScreen,
-            transitionSpec = {
-                (fadeIn(FreeChatAnimation.pageFadeInFast) +
-                    scaleIn(initialScale = 0.97f, animationSpec = tween(280, easing = FreeChatAnimation.iosEaseOut))) togetherWith
-                    (fadeOut(FreeChatAnimation.pageFadeOutFast) +
-                        scaleOut(targetScale = 0.97f, animationSpec = tween(200, easing = FreeChatAnimation.iosEaseIn)))
-            },
+            distancePx = pageTravelPx.toFloat(),
+            forward = { _, target -> target != null },
             label = "settings_subpage"
         ) { screen ->
         if (screen == null) {
@@ -237,7 +276,7 @@ fun SettingsScreen(
                     .fillMaxSize()
                     .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                     .verticalScroll(mainScrollState)
-                    .padding(top = statusBarHeightDp + titleBarAreaDp + 8.dp, bottom = 32.dp)
+                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
                     .padding(horizontal = 16.dp),
                 // 卡片间距。**别再用 Spacer 微调卡片之间的间隙** ——
                 // spacedBy 是「相邻两个孩子之间」都插一份，写 Spacer(2.dp) 得到的是
@@ -332,105 +371,59 @@ fun SettingsScreen(
                 // ──── AI 系统优化 ────
                 SectionLabel(Icons.Filled.AutoAwesome, s.sectionAiOptimize)
 
-                // 联网搜索
-                // 1.0.50：这一行不再显示「剩余 xxx 次（2 个账号）」的额度明细了 ——
-                // 它让这一行比同区的开关行高出一行、整列卡片对不齐（用户点名要去掉）。
-                // 额度用完时搜索本身仍会失败并给出原因（SerpApiPool 那条路没动）。
-                SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Filled.Language, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.webSearch, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(
-                                    if (enableWebSearch && !selectedModel.supportsWebSearch) s.webSearchUnsupported
-                                    else if (enableWebSearch) s.webSearchOn
-                                    else s.webSearchOff,
-                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
-                                    color = if (!selectedModel.supportsWebSearch && enableWebSearch) colors.ErrorRed else colors.TextSecondary
-                                )
-                            }
+                // Parent/child settings share one surface, divider, and disclosure motion.
+                SettingsGroup(expanded = enableWebSearch && selectedModel.supportsWebSearch,
+                    parent = {
+                        SettingsItem(Icons.Filled.Language, s.webSearch,
+                            if (enableWebSearch && !selectedModel.supportsWebSearch) s.webSearchUnsupported
+                            else if (enableWebSearch) s.webSearchOn else s.webSearchOff,
+                            colors = colors) {
+                            Switch(checked = enableWebSearch && selectedModel.supportsWebSearch,
+                                modifier = Modifier.semantics { contentDescription = s.webSearch },
+                                onCheckedChange = { checked ->
+                                    if (!checked) showWebSearchConfirm = true else viewModel.setEnableWebSearch(true)
+                                }, enabled = selectedModel.supportsWebSearch, colors = switchColors(colors))
                         }
-                        Switch(
-                            checked = enableWebSearch && selectedModel.supportsWebSearch,
-                            onCheckedChange = { checked ->
-                                if (!checked) showWebSearchConfirm = true
-                                else viewModel.setEnableWebSearch(true)
-                            },
-                            enabled = selectedModel.supportsWebSearch,
-                            colors = switchColors(colors)
-                        )
+                    }) {
+                    SettingsItem(Icons.Filled.Language, s.searchSource,
+                        if (searchConfig.provider == com.freechat.data.SearchProvider.FREE) s.searchFree else searchConfig.provider.label,
+                        colors, onClick = { showSearchSettings = true })
+                    SettingsDivider(colors)
+                    SettingsItem(Icons.Filled.Link, s.showSearchSources, s.showSearchSourcesDesc, colors) {
+                        Switch(checked = showSearchSources,
+                            modifier = Modifier.semantics { contentDescription = s.showSearchSources },
+                            onCheckedChange = { viewModel.setShowSearchSources(it) }, colors = switchColors(colors))
                     }
                 }
 
-                // 显示思考过程（当前模型不支持时整项消失）
-                if (selectedModel.supportsThinking) {
-                    SettingsRow {
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Icon(Icons.Filled.Psychology, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                                Spacer(Modifier.width(10.dp))
-                                Column {
-                                    Text(s.showThinking, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                    Text(s.showThinkingDesc, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                                }
-                            }
-                            Switch(
-                                checked = showThinking,
-                                onCheckedChange = { viewModel.setShowThinking(it) },
-                                colors = switchColors(colors)
-                            )
+                // The preference belongs to the selected model; hiding the child never erases it.
+                SettingsGroup(expanded = com.freechat.data.SettingsPresentationPolicy.deepThinkingChildren(
+                    selectedModel.deepThinkingDefault, selectedModel.supportsDeepThinking),
+                    parent = {
+                        SettingsItem(Icons.Filled.AutoAwesome, s.deepThinkingMode,
+                            if (selectedModel.supportsDeepThinking) s.deepThinkSettingDesc else s.deepThinkUnsupported,
+                            colors) {
+                            Switch(checked = selectedModel.deepThinkingDefault && selectedModel.supportsDeepThinking,
+                                modifier = Modifier.semantics { contentDescription = s.deepThinkingMode },
+                                onCheckedChange = { viewModel.setDeepThinkDefaultForModel(selectedModel.id, selectedModel.modelType, it) },
+                                enabled = selectedModel.supportsDeepThinking, colors = switchColors(colors))
                         }
+                    }) {
+                    SettingsItem(Icons.Filled.Psychology, s.showThinking, s.showThinkingDesc, colors) {
+                        Switch(checked = showThinking,
+                            modifier = Modifier.semantics { contentDescription = s.showThinking },
+                            onCheckedChange = { viewModel.setShowThinking(it) },
+                            enabled = selectedModel.supportsThinking, colors = switchColors(colors))
                     }
                 }
 
-                // 回复温度
-                SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().clickable { showTempPicker = true }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.Thermostat, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.replyTemp, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(tempLabel(tempMode, s), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                        }
-                        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
-                    }
-                }
-
-                // 回复长度
-                SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().clickable { showLengthPicker = true }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.ShortText, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.replyLength, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(lengthLabel(lengthMode, s), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                        }
-                        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
-                    }
+                // These two choices are grouped visually, not coupled logically.
+                SettingsGroup(parent = {
+                    SettingsItem(Icons.Outlined.Thermostat, s.replyTemp, tempLabel(tempMode, s),
+                        colors, onClick = { showTempPicker = true })
+                }) {
+                    SettingsItem(Icons.Outlined.ShortText, s.replyLength, lengthLabel(lengthMode, s),
+                        colors, onClick = { showLengthPicker = true })
                 }
 
                 // 语音调试
@@ -480,7 +473,11 @@ fun SettingsScreen(
                 // 色彩
                 SettingsRow {
                     Row(
-                        Modifier.fillMaxWidth().clickable { showColorThemePicker = true }
+                        Modifier.fillMaxWidth().clickable {
+                            previewCustomArgb = customColorArgb
+                            editCustomColor = colorTheme == ColorTheme.CUSTOM
+                            showColorThemePicker = true
+                        }
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
@@ -492,6 +489,19 @@ fun SettingsScreen(
                                 Text(s.colorTheme, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
                                 Text(colorThemeLabel(colorTheme, s), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
                             }
+                        }
+                        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                    }
+                }
+
+                SettingsRow {
+                    Row(Modifier.fillMaxWidth().clickable { subScreen = SubScreen.ICON }
+                        .padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Apps, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(s.appIcon, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                            Text(iconLabel(selectedIcon, s), style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
                         }
                         Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
                     }
@@ -517,27 +527,22 @@ fun SettingsScreen(
                     }
                 }
 
-                // 高级材质
                 SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Filled.BlurOn, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.advancedMaterial, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(s.advancedMaterialDesc, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                        }
-                        Switch(
-                            checked = advancedMaterial,
-                            onCheckedChange = { viewModel.setAdvancedMaterial(it) },
-                            colors = switchColors(colors)
-                        )
+                    SettingsItem(Icons.Filled.Keyboard, s.inputBox,
+                        "${inputStyleLabel(inputStyle, s)} · ${inputBarStateLabel(inputBarState, s)}",
+                        colors, onClick = { subScreen = SubScreen.INPUT_BOX })
+                }
+
+                SettingsGroup(expanded = advancedMaterialSetting, parent = {
+                    SettingsItem(Icons.Filled.BlurOn, s.advancedMaterial, s.advancedMaterialDesc, colors) {
+                        Switch(checked = advancedMaterialSetting,
+                            modifier = Modifier.semantics { contentDescription = s.advancedMaterial },
+                            onCheckedChange = { viewModel.setAdvancedMaterial(it) }, colors = switchColors(colors))
                     }
+                }) {
+                    SettingsItem(Icons.Filled.Layers, s.headerBarStyle,
+                        if (headerBarStyle == HeaderBarStyle.CARD) s.headerBarStyleCard else s.headerBarStyleCutout,
+                        colors, onClick = { showHeaderStylePicker = true })
                 }
 
                 // 流动炫彩
@@ -557,7 +562,7 @@ fun SettingsScreen(
                         }
                         Switch(
                             checked = liquidBackdrop,
-                            onCheckedChange = { viewModel.setLiquidBackdrop(it) },
+                            onCheckedChange = { if (it) showLiquidBackdropConfirm = true else viewModel.setLiquidBackdrop(false) },
                             colors = switchColors(colors)
                         )
                     }
@@ -654,6 +659,33 @@ fun SettingsScreen(
                         }
                         HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
                         Row(
+                            Modifier.fillMaxWidth().clickable { subScreen = SubScreen.FEEDBACK }
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(s.feedbackEntry, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary,
+                                modifier = Modifier.weight(1f))
+                            Spacer(Modifier.width(8.dp))
+                            Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                        }
+                        // 「我的分享」管理在线分享链接（撤销即时失效）——挂在账号下，未登录看不到入口
+                        if (com.freechat.sync.Session.isLoggedIn()) {
+                            HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
+                            Row(
+                                Modifier.fillMaxWidth().clickable { subScreen = SubScreen.MY_SHARES }
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(s.myShares, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary,
+                                    modifier = Modifier.weight(1f))
+                                Spacer(Modifier.width(8.dp))
+                                Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
+                        Row(
                             Modifier.fillMaxWidth().clickable { onOpenAgreement() }.padding(horizontal = 16.dp, vertical = 12.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
@@ -667,13 +699,14 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(32.dp))
             }
         } else {
-            // ============ 二级页面 ============
+                // ============ 二级页面 ============
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
+                    .then(if (screen == SubScreen.FEEDBACK) Modifier.imePadding().navigationBarsPadding() else Modifier)
                     .verticalScroll(rememberScrollState())
-                    .padding(top = statusBarHeightDp + titleBarAreaDp + 8.dp, bottom = 32.dp)
+                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -700,40 +733,44 @@ fun SettingsScreen(
                             showFontSizePicker = true
                         }
                     )
-                    SubScreen.AUTHOR -> AuthorPage(colors, s, isDark = isDark, onQrLongPress = { showQrSaveSheet = true })
+                    SubScreen.INPUT_BOX -> Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SettingsRow {
+                            SettingsItem(Icons.Filled.Keyboard, s.inputStyle, inputStyleLabel(inputStyle, s),
+                                colors, onClick = { showInputStylePicker = true })
+                        }
+                        SettingsRow {
+                            SettingsItem(Icons.Filled.VerticalAlignBottom, s.inputBarState, inputBarStateLabel(inputBarState, s),
+                                colors, onClick = { showInputBarStatePicker = true })
+                        }
+                    }
+                    SubScreen.AUTHOR -> AuthorPage(colors, s, isDark = isDark, onQrLongPress = { showQrSaveSheet = true }, onOpenAuthorWords = onOpenAuthorWords)
+                    SubScreen.ICON -> IconPickerPage(selectedIcon, activeIcon, savingIcon, onSelect = { icon ->
+                        if (!savingIcon && icon != selectedIcon) {
+                            savingIcon = true
+                            scope.launch {
+                                val saved = withContext(Dispatchers.IO) { iconManager.request(icon) }
+                                if (saved) selectedIcon = icon
+                                else Toast.makeText(context, s.appIconSaveFailed, Toast.LENGTH_SHORT).show()
+                                savingIcon = false
+                            }
+                        }
+                    }, s = s)
+                    SubScreen.FEEDBACK -> FeedbackPage(feedbackDraft, onTextChange = {
+                        feedbackDraft = it
+                        feedbackStore.save(it)
+                    }, clientId = feedbackStore.clientId(), s = s)
+                SubScreen.MY_FEEDBACK -> MyFeedbackScreen(s, clientId = feedbackStore.clientId())
+                SubScreen.MY_SHARES -> MySharesScreen(s) { share, action ->
+                    shareToRevoke = share; shareRevokeAction = action
+                }
                 }
                 Spacer(modifier = Modifier.height(32.dp))
             }
         }
         }
 
-        // ===== 顶部标题栏背景（高级材质开=真模糊+渐变渐隐，关=纯色） =====
-        if (advancedMaterial) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp + HazeSpec.TopFadeZoneDp)
-                    .pageHeaderBackground(colors.Background)
-                    .hazeEffect(state = hazeState) {
-                        blurRadius = HazeSpec.TopBlurRadius
-                        inputScale = HazeInputScale.None
-                        backgroundColor = Color.Transparent
-                        progressive = HazeProgressive.verticalGradient(easing = LinearEasing, startY = 0f, startIntensity = 1f, endY = topBarHeightPx, endIntensity = 0f)
-                    }
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp)
-                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
-                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
-                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
-                    .pageHeaderBackground(colors.Background)
-            )
-        }
+        // 固定高度：实体标题栏与渐进模糊仅切换材质，不切换几何。
+        TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
 
         // ===== 悬浮标题栏（返回键 + 标题），固定悬浮顶部 =====
         Row(
@@ -744,8 +781,12 @@ fun SettingsScreen(
                 .padding(top = 8.8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { if (subScreen != null) subScreen = null else onBack() }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.TextPrimary)
+            HeaderIconButton(onClick = {
+                if (subScreen == SubScreen.MY_FEEDBACK) subScreen = SubScreen.FEEDBACK
+                else if (subScreen != null) subScreen = null
+                else onBack()
+            }) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
                 when (subScreen) {
@@ -754,13 +795,25 @@ fun SettingsScreen(
                     SubScreen.VOICE_MODELS -> s.voiceModel
                     SubScreen.AI_MEMORY -> s.aiMemory
                     SubScreen.FONT -> s.font
+                    SubScreen.INPUT_BOX -> s.inputBox
                     SubScreen.AUTHOR -> s.authorAboutTitle
+                    SubScreen.ICON -> s.appIcon
+                    SubScreen.FEEDBACK -> s.feedbackTitle
+                    SubScreen.MY_FEEDBACK -> s.feedbackMy
+                    SubScreen.MY_SHARES -> s.myShares
                     null -> s.settings
                 },
                 color = colors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.titleLarge
             )
+            // 「我的反馈」入口（1.0.95）：反馈页标题栏右侧——进去只能看，不能改不能删
+            if (subScreen == SubScreen.FEEDBACK) {
+                Spacer(Modifier.weight(1f))
+                HeaderTextButton(onClick = { subScreen = SubScreen.MY_FEEDBACK }) {
+                    Text(s.feedbackMy, style = MaterialTheme.typography.bodyMedium, color = colors.Primary)
+                }
+            }
         }
 
         // ===== 六个二级选择框（底部磨砂玻璃弹层，窗口内浮层）=====
@@ -791,6 +844,33 @@ fun SettingsScreen(
             }
         }
 
+        SheetPanel(showLiquidBackdropConfirm, { showLiquidBackdropConfirm = false },
+            s.liquidBackdrop, colors, isDark, advancedMaterial, hazeState,
+            confirmLabel = s.cancel, onConfirm = { showLiquidBackdropConfirm = false }) {
+            Text(s.liquidBackdropConfirm, color = colors.TextSecondary)
+            SheetActionRow(s.stillEnable, colors, link = true) {
+                showLiquidBackdropConfirm = false
+                viewModel.setLiquidBackdrop(true)
+            }
+        }
+
+        SearchSettingsPanel(showSearchSettings, searchConfig, viewModel::saveSearchConfig,
+            { showSearchSettings = false }, colors, isDark, advancedMaterial, hazeState)
+
+        SheetPanel(showHeaderStylePicker && advancedMaterialSetting, { showHeaderStylePicker = false },
+            s.headerBarStyle, colors, isDark, advancedMaterial, hazeState) {
+            HeaderBarStyle.entries.forEach { style ->
+                SheetOption(
+                    selected = style == headerBarStyle,
+                    title = if (style == HeaderBarStyle.CARD) s.headerBarStyleCard else s.headerBarStyleCutout,
+                    subtitle = if (style == HeaderBarStyle.CARD) s.headerBarStyleCardDesc else s.headerBarStyleCutoutDesc,
+                    icon = if (style == HeaderBarStyle.CARD) Icons.Filled.RadioButtonChecked else Icons.Filled.BlurOn,
+                    colors = colors,
+                    onClick = { viewModel.setHeaderBarStyle(style); showHeaderStylePicker = false },
+                )
+            }
+        }
+
         SheetPanel(showThemePicker, { showThemePicker = false }, s.themeMode, colors, isDark, advancedMaterial, hazeState) {
             ThemeMode.entries.forEach { mode ->
                 val sel = mode == themeMode
@@ -809,7 +889,9 @@ fun SettingsScreen(
                     onClick = { viewModel.setThemeMode(mode) }
                 ) {
                     // 跟随系统时：选择暗色主题用「深色」还是「黑色」
-                    if (mode == ThemeMode.SYSTEM && sel) {
+                    AnimatedVisibility(mode == ThemeMode.SYSTEM && sel,
+                        enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
+                        Column {
                         Spacer(Modifier.height(10.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(start = 30.dp),
@@ -821,18 +903,111 @@ fun SettingsScreen(
                             Spacer(Modifier.width(6.dp))
                             DarkThemeChip(s.themeDarkOled, systemDarkTheme, colors) { viewModel.setSystemDarkTheme(true) }
                         }
+                        }
                     }
                 }
             }
         }
 
-        SheetPanel(showColorThemePicker, { showColorThemePicker = false }, s.colorTheme, colors, isDark, advancedMaterial, hazeState) {
-            ColorTheme.entries.forEach { ct ->
-                SheetOption(
-                    selected = ct == colorTheme,
-                    title = colorThemeLabel(ct, s),
+        SheetPanel(
+            showColorThemePicker,
+            { showColorThemePicker = false },
+            s.colorTheme,
+            colors,
+            isDark,
+            advancedMaterial,
+            hazeState,
+            confirmLabel = if (editCustomColor) s.customColorApply else null,
+            onConfirm = if (editCustomColor) {
+                {
+                    viewModel.setCustomColorTheme(previewCustomArgb)
+                    showColorThemePicker = false
+                }
+            } else null,
+        ) {
+            val travel = with(LocalDensity.current) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.roundToPx() }
+            AnimatedContent(editCustomColor, modifier = Modifier.fillMaxWidth(),
+                transitionSpec = { FreeChatAnimation.pageTransition(targetState, travel, animateSize = true) },
+                label = "custom_color_page") { customPage ->
+                Column(Modifier.fillMaxWidth()) {
+            if (customPage) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .clickable { editCustomColor = false }.padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.Primary, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(s.customPresetColors, style = MaterialTheme.typography.bodySmall, color = colors.Primary)
+                }
+                CustomColorPicker(
+                    argb = previewCustomArgb,
+                    isDark = isDark,
+                    isOled = themeMode == ThemeMode.DARK_OLED ||
+                        (themeMode == ThemeMode.SYSTEM && isDark && systemDarkTheme),
                     colors = colors,
-                    onClick = { viewModel.setColorTheme(ct); showColorThemePicker = false }
+                    strings = s,
+                    onChange = { previewCustomArgb = it },
+                )
+            } else {
+                SheetOption(
+                    selected = colorTheme == ColorTheme.CUSTOM,
+                    title = s.colorThemeCustom,
+                    icon = Icons.Filled.Palette,
+                    colors = colors,
+                    onClick = { editCustomColor = true }
+                )
+                ColorTheme.presetsInDisplayOrder.forEach { ct ->
+                    SheetOption(
+                        selected = ct == colorTheme,
+                        title = colorThemeLabel(ct, s),
+                        swatch = colorThemeSwatch(ct, customColorArgb),
+                        colors = colors,
+                        onClick = { viewModel.setColorTheme(ct); showColorThemePicker = false }
+                    )
+                }
+            }
+                }
+            }
+        }
+
+        SheetPanel(shareToRevoke != null, { shareToRevoke = null; shareRevokeAction = null },
+            s.shareRevoke, colors, isDark, advancedMaterial, hazeState,
+            confirmLabel = s.shareRevoke, confirmDanger = true, onConfirm = {
+                val action = shareRevokeAction
+                shareToRevoke = null; shareRevokeAction = null
+                action?.invoke()
+            }) {
+            Text(s.shareRevokeConfirm, style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary)
+            SheetActionRow(s.cancel, colors) { shareToRevoke = null; shareRevokeAction = null }
+        }
+
+        SheetPanel(showInputStylePicker, { showInputStylePicker = false }, s.inputStyle, colors, isDark, advancedMaterial, hazeState) {
+            InputStyle.entries.forEach { st ->
+                SheetOption(
+                    selected = st == inputStyle,
+                    title = inputStyleLabel(st, s),
+                    subtitle = when (st) {
+                        InputStyle.COMPACT -> s.inputStyleCompactDesc
+                        InputStyle.COMPLETE -> s.inputStyleCompleteDesc
+                    },
+                    colors = colors,
+                    onClick = { viewModel.setInputStyle(st); showInputStylePicker = false }
+                )
+            }
+        }
+
+        SheetPanel(showInputBarStatePicker, { showInputBarStatePicker = false }, s.inputBarState, colors, isDark, advancedMaterial, hazeState) {
+            InputBarState.entries.forEach { st ->
+                SheetOption(
+                    selected = st == inputBarState,
+                    title = inputBarStateLabel(st, s),
+                    subtitle = when (st) {
+                        InputBarState.PINNED -> s.inputBarStatePinnedDesc
+                        InputBarState.AUTO_HIDE -> s.inputBarStateAutoHideDesc
+                    },
+                    colors = colors,
+                    onClick = { viewModel.setInputBarState(st); showInputBarStatePicker = false }
                 )
             }
         }
@@ -1171,9 +1346,10 @@ private fun ModelItemRow(
                 Text(model.displayName, fontFamily = LocalMonoFontFamily.current, style = MaterialTheme.typography.bodyLarge, color = if (selected) colors.selectedText else colors.TextPrimary, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
                 Text(com.freechat.i18n.localizedModelDesc(model, s), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = if (selected) colors.selectedSubText else colors.TextSecondary)
             }
-            if (!model.isBuiltIn) {
-                IconButton(onClick = { onEdit(model) }, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Filled.Edit, null, tint = if (selected) colors.selectedSubText else colors.TextTertiary, modifier = Modifier.size(16.dp))
+            // Beta 1.0.96: every built-in type is selectable, never editable.
+            if (com.freechat.data.ModelAccessPolicy.canEdit(model)) {
+                IconButton(onClick = { onEdit(model) }, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Filled.Edit, s.editModel, tint = if (selected) colors.selectedSubText else colors.TextTertiary, modifier = Modifier.size(16.dp))
                 }
             }
         }
@@ -1323,7 +1499,8 @@ private fun AuthorPage(
     colors: com.freechat.ui.theme.FreeChatColors,
     s: AppStrings,
     isDark: Boolean = false,
-    onQrLongPress: () -> Unit = {}
+    onQrLongPress: () -> Unit = {},
+    onOpenAuthorWords: () -> Unit = {}
 ) {
     val context = LocalContext.current
     // 这一页里所有外链都走同一个口子，省得每处再写一遍 Intent + runCatching
@@ -1396,6 +1573,40 @@ private fun AuthorPage(
         if (idx != s.authorQa.lastIndex) Spacer(Modifier.height(30.dp))
     }
 
+    // 「作者的话」（1.1.0）：问答区第四席 —— 长文不直接铺在页里，点进二级页看全文
+    Spacer(Modifier.height(30.dp))
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.Top) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 3.dp)
+                    .width(3.dp)
+                    .height(15.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(colors.Primary.copy(alpha = 0.8f))
+            )
+            Spacer(Modifier.width(9.dp))
+            Text(
+                s.authorWordsTitle,
+                color = colors.Primary,
+                fontSize = 15.sp,
+                lineHeight = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(Modifier.height(9.dp))
+        Text(
+            s.authorWordsOpen,
+            color = colors.Primary,
+            fontSize = 18.sp,
+            lineHeight = 30.sp,
+            textDecoration = TextDecoration.Underline,
+            modifier = Modifier
+                .padding(start = 12.dp)
+                .clickable { onOpenAuthorWords() }
+        )
+    }
+
     // 问答区与「官方网页 / GitHub」两块链接之间：先空一段、再一条分割线、再空一段。
     // 这两段性质不同（正文 vs 外链），中间只隔空白时容易被读成同一段，细线把两段分开；
     // 线本身用主题色的低透明度，跟卡片描边一个路子，不抢眼。
@@ -1421,6 +1632,17 @@ private fun AuthorPage(
         label = s.authorGithubRepo,
         url = "https://github.com/Belate-stay/FreeChat",
         note = s.authorGithubNote,
+        colors = colors,
+        onOpen = open
+    )
+
+    Spacer(Modifier.height(30.dp))
+
+    // CSDN 主页（1.1.0）：官网与 GitHub 之间夹不进去、按用户口径放 GitHub 与联系区之间，同款外链样式
+    AuthorLink(
+        label = s.authorCsdn,
+        url = "https://blog.csdn.net/weixin_51354748",
+        note = s.authorCsdnNote,
         colors = colors,
         onOpen = open
     )
@@ -1615,6 +1837,18 @@ private fun colorThemeLabel(ct: ColorTheme, s: AppStrings): String = when (ct) {
     ColorTheme.BROWN -> s.colorThemeBrown
     ColorTheme.BLUE -> s.colorThemeBlue
     ColorTheme.WHITE -> s.colorThemeWhite
+    ColorTheme.CUSTOM -> s.colorThemeCustom
+    ColorTheme.PINE -> s.colorThemePine
+    ColorTheme.CORAL -> s.colorThemeCoral
+}
+
+private fun colorThemeSwatch(ct: ColorTheme, customArgb: Int): Color = when (ct) {
+    ColorTheme.BROWN -> com.freechat.ui.theme.LightColors.Primary
+    ColorTheme.BLUE -> com.freechat.ui.theme.BlueLightColors.Primary
+    ColorTheme.WHITE -> Color.White
+    ColorTheme.CUSTOM -> Color(customArgb)
+    ColorTheme.PINE -> Color(0xFF26735A)
+    ColorTheme.CORAL -> Color(0xFFA3444B)
 }
 
 private fun themeDesc(mode: ThemeMode, s: AppStrings): String = when (mode) {
@@ -1639,17 +1873,80 @@ private fun fontSizeLabel(fs: FontSize, s: AppStrings): String = when (fs) {
     FontSize.XXLARGE -> s.fontSizeXxlarge
 }
 
+private fun inputStyleLabel(style: InputStyle, s: AppStrings): String = when (style) {
+    InputStyle.COMPACT -> s.inputStyleCompact
+    InputStyle.COMPLETE -> s.inputStyleComplete
+}
+
+private fun inputBarStateLabel(state: InputBarState, s: AppStrings): String = when (state) {
+    InputBarState.AUTO_HIDE -> s.inputBarStateAutoHide
+    InputBarState.PINNED -> s.inputBarStatePinned
+}
+
 private fun fontSizePercent(fs: FontSize): String = "${(fs.scale * 100).roundToInt()}%"
+
+/** A single card grows its children with the app-wide disclosure curve. */
+@Composable
+internal fun SettingsGroup(
+    expanded: Boolean = true,
+    parent: @Composable () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val colors = LocalFreeChatColors.current
+    SettingsRow {
+        Column {
+            parent()
+            AnimatedVisibility(expanded, enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
+                Column {
+                    SettingsDivider(colors)
+                    content()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun SettingsDivider(colors: com.freechat.ui.theme.FreeChatColors) {
+    HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = colors.Divider.copy(alpha = 0.4f))
+}
+
+@Composable
+internal fun SettingsItem(
+    icon: ImageVector,
+    title: String,
+    subtitle: String?,
+    colors: com.freechat.ui.theme.FreeChatColors,
+    onClick: (() -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null,
+) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
+        .then(if (onClick != null) Modifier.clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick) else Modifier)
+        .padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+            if (!subtitle.isNullOrBlank()) Text(subtitle,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
+                color = colors.TextSecondary)
+        }
+        Spacer(Modifier.width(8.dp))
+        if (trailing != null) trailing()
+        else if (onClick != null) Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+    }
+}
 
 @Composable
 internal fun SectionLabel(icon: ImageVector, title: String) {
+    val colors = LocalFreeChatColors.current
     Row(
         modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+        Icon(icon, null, tint = colors.TextPrimary, modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(6.dp))
-        Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium, color = colors.TextPrimary)
     }
 }
 

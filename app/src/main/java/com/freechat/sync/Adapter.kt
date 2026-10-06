@@ -39,6 +39,7 @@ object Adapter {
 
     /** 待推送队列。**这是"活的那份"，只属于这里一个** */
     private val dirty = LinkedHashSet<String>()
+    private val dirtyVersions = DirtyRevisionFence()
 
     private var onDirty: (() -> Unit)? = null
 
@@ -93,14 +94,21 @@ object Adapter {
     // ============================================================
 
     private fun mark(key: String) {
-        val isNew = synchronized(this) { dirty.add(key) }
+        val isNew = synchronized(this) {
+            dirtyVersions.changed(key)
+            dirty.add(key)
+        }
         if (isNew) notifyDirty()
     }
 
     fun markDirty(key: String) = mark(key)
 
-    fun unmarkDirty(key: String) {
-        synchronized(this) { dirty.remove(key) }
+    fun dirtyVersion(key: String): Long = synchronized(this) { dirtyVersions.current(key) }
+
+    fun unmarkDirty(key: String, expectedVersion: Long? = null) {
+        synchronized(this) {
+            if (dirtyVersions.matches(key, expectedVersion)) dirty.remove(key)
+        }
         persistQueue()
     }
 
@@ -245,26 +253,52 @@ object Adapter {
     }
 
     /**
+     * 本地当前存在的**全部**可同步对象的键（含 settings:global）。
+     *
+     * 首推（[markLocalEverything]）和补缺（[markLocalMissing]）共用这一套口径 ——
+     * 两处各数一遍的话，迟早有一处漏数一样东西，而漏掉的那件正好永远上不了云。
+     *
+     * 2026-10-01 补上 settings:global：老口径只数四个文件箱，全局设置要等
+     * 用户哪天改一次设置才会被写入监听看见 —— 存量那份云里永远是空的。
+     */
+    fun localAllKeys(conversations: List<Conversation>): Set<String> {
+        val keys = LinkedHashSet<String>()
+        for (c in conversations) keys.add(objKey(SyncKind.CONV, c.id))
+        for (id in LocalStore.messageConvIds()) keys.add(objKey(SyncKind.MSGS, id))
+        for (id in LocalStore.memoryConvIds()) keys.add(objKey(SyncKind.MEMS, id))
+        // 「新规则」只算**真定制过**的那些（表里有记录才算）。表里没有的对话一个字都不用说 ——
+        // 说了就是「这条对话没定制」，跟云端本来就没有的东西一样，白跑一趟
+        for (id in PerConvStore.load().keys) keys.add(objKey(SyncKind.PCSET, id))
+        keys.add(objKey(SyncKind.SETTINGS, SyncKind.SETTINGS_ID))
+        return keys
+    }
+
+    /**
      * 把本地当前存在的一切排进待推送队列 —— 首次登录时用。
      *
      * 首次登录要把这台设备上已有的东西整个推一遍，否则云端是空的、
      * 而用户会觉得"登录之后我的聊天记录不见了"。
      */
     fun markLocalEverything(conversations: List<Conversation>) {
-        val keys = LinkedHashSet<String>()
-        for (c in conversations) keys.add(objKey(SyncKind.CONV, c.id))
-        for (id in LocalStore.messageConvIds()) keys.add(objKey(SyncKind.MSGS, id))
-        for (id in LocalStore.memoryConvIds()) keys.add(objKey(SyncKind.MEMS, id))
-        // 「新规则」只推**真定制过**的那些（表里有记录才算）。表里没有的对话一个字都不用说 ——
-        // 说了就是「这条对话没定制」，跟云端本来就没有的东西一样，白跑一趟
         val per = PerConvStore.load()
-        for (id in per.keys) keys.add(objKey(SyncKind.PCSET, id))
         synchronized(this) {
             convSnapshot = conversations
             perConvSnapshot = per
             dirty.clear()
-            dirty.addAll(keys)
+            dirty.addAll(localAllKeys(conversations))
         }
+        persistQueue()
+        notifyDirty()
+    }
+
+    /**
+     * 补推**云端缺件**：本地有、云里（连墓碑都算上）从没有过的东西才排进队列。
+     * **不清空、只追加** —— 队列里可能正躺着用户刚改的东西，冲掉就丢了。
+     */
+    fun markLocalMissing(conversations: List<Conversation>, cloudKnown: Set<String>) {
+        val missing = localAllKeys(conversations).filter { it !in cloudKnown }
+        if (missing.isEmpty()) return
+        synchronized(this) { dirty.addAll(missing) }
         persistQueue()
         notifyDirty()
     }

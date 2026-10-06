@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -28,12 +30,21 @@ fun LocalImage(
     contentDescription: String?,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
-    targetMaxDim: Int = 1024
+    targetMaxDim: Int = 1024,
+    onImageSize: ((Int, Int) -> Unit)? = null,
+    onLoadResult: ((Boolean) -> Unit)? = null
 ) {
-    val bitmap by produceState<ImageBitmap?>(initialValue = null, path, targetMaxDim) {
-        value = withContext(Dispatchers.IO) { decodeLocalImage(File(path), targetMaxDim) }
+    val result by produceState<Pair<ImageBitmap?, Boolean>>(initialValue = null to false, path, targetMaxDim) {
+        value = null to false
+        value = withContext(Dispatchers.IO) { decodeLocalImage(File(path), targetMaxDim) } to true
     }
-    val bmp = bitmap
+    val bmp = result.first
+    val latestSizeCallback by rememberUpdatedState(onImageSize)
+    val latestResultCallback by rememberUpdatedState(onLoadResult)
+    LaunchedEffect(bmp, result.second, path) {
+        if (bmp != null) latestSizeCallback?.invoke(bmp.width, bmp.height)
+        if (result.second) latestResultCallback?.invoke(bmp != null)
+    }
     if (bmp != null) {
         // 满宽显示时按图片真实宽高比撑开高度：fillMaxWidth + FillWidth 若无 aspectRatio，
         // 高度会塌成 0（或按像素固有高度渲染导致错乱），图片显示不出来。

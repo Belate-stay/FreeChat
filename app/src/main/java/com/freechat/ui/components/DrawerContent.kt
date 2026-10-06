@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.*
+import com.freechat.ui.animation.MotionIconButton as IconButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,19 +88,19 @@ import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.frostedCard
 import com.freechat.ui.theme.frostedGlass
+import com.freechat.ui.theme.floatingSurface
 import com.freechat.ui.theme.softShadow
 import com.freechat.ui.theme.seamFeather
 import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeProgressive
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
+import com.freechat.ui.theme.materialHaze as hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import com.freechat.ui.theme.pageBackground
 import com.freechat.ui.theme.hazeBackground
 import com.freechat.ui.theme.LocalLiquidPalette
-import com.freechat.ui.theme.pageHeaderBackground
 import com.freechat.ui.theme.liquidOpaqueBackground
 import com.freechat.ui.theme.liquidSourceBackdrop
 import com.freechat.ui.theme.LocalLiquidMode
@@ -321,19 +322,15 @@ fun DrawerContent(
     val headerGapTopDp = 24.dp
     val headerCardHeightDp = HeaderCardHeight
     val headerCardGapDp = 10.dp
-    val headerGapBottomDp = 12.dp
+    val headerGapBottomDp = HazeSpec.DrawerHeaderBottomGapDp
     // 多选态下头部只剩一条操作栏（搜索框/新对话被替换掉），高度必须同步收窄：
     // 顶部模糊带高度与列表 contentPadding 都由它推导，不然列表会空出一大截
     val headerTotalDp = if (selectMode)
         headerGapTopDp + headerCardHeightDp + headerGapBottomDp
     else
         headerGapTopDp + headerCardHeightDp + headerCardGapDp + headerCardHeightDp + headerGapBottomDp
-    // 顶部模糊层界限下移：覆盖固定头部到底部，保证卡片内容可读；渐隐带再往下延伸，列表靠近新对话就开始虚化。
-    // 带高 / endY 由 HazeSpec.topBandHeightDp 统一产出：Chat 页调同一函数，只有「页面自有固定内容区」
-    // 这一项不同（抽屉 = headerTotalDp，Chat = 0），标题栏 / 渐隐区 / 半径 / 曲线逐项相同。
-    val fadeExtendDp = HazeSpec.TopFadeExtendDp
-    val topBandHeight = HazeSpec.topBandHeightDp(statusBarHeightDp, contentZoneDp = headerTotalDp, fadeExtendDp = fadeExtendDp)
-    val topBlurHeightPx = with(density) { topBandHeight.toPx() }
+    // 模糊覆盖全部固定内容，终点与列表初始起点严格相同；「置顶」只有上滑才进入模糊区。
+    val topBandHeight = HazeSpec.drawerTopBandHeightDp(statusBarHeightDp, headerTotalDp)
     // 接缝羽化宽度（px）：与 Chat 页同值同曲线，缝两侧的模糊衰减完全对称
     val seamFeatherPx = with(density) { HazeSpec.SeamFeatherDp.toPx() }
 
@@ -345,6 +342,7 @@ fun DrawerContent(
                 .pageBackground(colors.Background)
         ) {
             // ===== 底部渐隐区的「采样垫底」：垫在列表源节点下面的一小块不透明流光副本 =====
+            TopBarBackdropSource(drawerHazeState, colors.Background, topBandHeight)
             // 炫彩下列表源是透明的 → Haze 抓到的样本只有字没有底 → 磨完盖不住下面清晰的正文，
             // 底部那条渐进模糊带就成了「墨汁晕开、但内容还读得出来」。这块让样本自己带上底。
             // 不叠 drawerVeil：高级材质下抽屉面板本身就没罩这层色（见 MainActivity 的 drawer 层），
@@ -389,7 +387,7 @@ fun DrawerContent(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 8.dp, end = 8.dp,
-                        top = statusBarHeightDp + titleBarAreaDp + headerTotalDp,
+                        top = topBandHeight,
                         bottom = 96.dp
                     )
                 ) {
@@ -422,28 +420,17 @@ fun DrawerContent(
                 ) { indicatorViewport.floatValue = it }
             }
 
-            // 顶部渐变模糊（界限下移到固定头部底部，保证卡片内容可读）
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(topBandHeight)
-                    .pageHeaderBackground(colors.Background, LocalLiquidPalette.current.drawerVeil)
-                    // 接缝羽化：右边缘正是与 Chat 页之间的接缝，模糊强度衰减到 0
-                    .seamFeather(seamFeatherPx, fromEnd = true)
-                    .hazeEffect(state = drawerHazeState) {
-                        blurRadius = HazeSpec.TopBlurRadius
-                        inputScale = HazeInputScale.None
-                        backgroundColor = Color.Transparent
-                        progressive = HazeProgressive.verticalGradient(easing = LinearEasing, startY = 0f, startIntensity = 1f, endY = topBlurHeightPx, endIntensity = 0f)
-                    }
-            )
+            // 搜索/新对话后方也模糊；最后 104dp 缓慢淡到零，不影响初始位置的历史分组。
+            TopBarBackdrop(drawerHazeState, colors.Background, topBandHeight,
+                seamFromEnd = true,
+                fadeHeight = HazeSpec.DrawerTopFadeZoneDp,
+                solidHeight = HazeSpec.titleBarHeightDp(statusBarHeightDp))
             // 点击隔离层：只覆盖原头部区域（延伸渐隐区内容仍可点）
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp + headerTotalDp)
+                    .height(topBandHeight)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
@@ -547,7 +534,7 @@ fun DrawerContent(
             Spacer(Modifier.height(12.dp))
             // 留出顶部空间给共享 FreeChat 标题
             Spacer(Modifier.height(36.dp))
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(headerGapTopDp))
 
             if (selectMode) {
                 DrawerSelectionBar(
@@ -563,13 +550,13 @@ fun DrawerContent(
                     onDelete = { onAskBatchDelete(selectedConversations) },
                     modifier = Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset)
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(headerGapBottomDp))
             } else {
                 // 这一支的 Column 自己已经 pad 了 start = 8dp，这里补到 HeaderCardInset，落点与高级材质一致
                 SearchBox(searchQuery, onSearchQueryChange, drawerHazeState, isDark, Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset))
                 Spacer(Modifier.height(10.dp))
                 NewChatButton(onNewChat, onNewChatRect, drawerHazeState, isDark, Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset))
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(headerGapBottomDp))
             }
 
             HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
@@ -897,10 +884,7 @@ private fun SearchBox(
         modifier = modifier
             .fillMaxWidth()
             .height(HeaderCardHeight)
-            .then(
-                if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, RoundedCornerShape(14.dp), elevation = 6.dp)
-                else Modifier.frostedCard(null, colors, false, RoundedCornerShape(14.dp), fallback = colors.SurfaceVariant)
-            )
+            .floatingSurface(hazeState, isDark, RoundedCornerShape(14.dp), fallback = colors.SurfaceVariant)
             .padding(horizontal = 14.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -945,10 +929,7 @@ private fun NewChatButton(
         modifier = modifier
             .fillMaxWidth()
             .height(HeaderCardHeight)
-            .then(
-                if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, RoundedCornerShape(14.dp), elevation = 6.dp)
-                else Modifier.frostedCard(null, colors, false, RoundedCornerShape(14.dp), fallback = colors.AccentMuted)
-            )
+            .floatingSurface(hazeState, isDark, RoundedCornerShape(14.dp), fallback = colors.AccentMuted)
             .clickable { onNewChat() }
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
@@ -1447,6 +1428,7 @@ private fun DrawerConvMenu(
     val menuHeightPx = with(density) { 168.dp.toPx() }
     val topSafePx = with(density) { 80.dp.toPx() }
     val menuWidthPx = with(density) { 180.dp.toPx() }
+    val shadowInsetPx = with(density) { 16.dp.roundToPx() }
     // 右边缘对齐到「···」键那侧（= 行右边缘，见 ConversationItem 里的说明）。
     // 入口以前是「长按整行」，菜单固定贴左边缘还说得过去；现在入口在行尾，
     // 再贴左边就会出现「点右边、菜单从最左边冒出来」并盖住头像。
@@ -1456,8 +1438,8 @@ private fun DrawerConvMenu(
     // 拦截层：点击外部关闭（淡入淡出）
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(120)),
-        exit = fadeOut(tween(120))
+            enter = fadeIn(FreeChatAnimation.overlayFadeIn),
+            exit = fadeOut(FreeChatAnimation.overlayFadeOut)
     ) {
         Box(
             modifier = Modifier
@@ -1475,13 +1457,14 @@ private fun DrawerConvMenu(
     // 放在节点上，枢轴 (1f, 0f) 就正好是菜单显示的右上角，即「···」键旁边。
     AnimatedVisibility(
         visible = visible,
-        modifier = Modifier.offset { IntOffset(menuX, clampedY) },
+        modifier = Modifier.offset { IntOffset(menuX - shadowInsetPx, clampedY - shadowInsetPx) },
         enter = FreeChatAnimation.menuEnter(TransformOrigin(1f, 0f)),
         exit = FreeChatAnimation.menuExit(TransformOrigin(1f, 0f))
     ) {
         conversation?.let { conv ->
             Box(
                 modifier = Modifier
+                    .padding(16.dp)
                     .width(180.dp)
                     .then(
                         if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, RoundedCornerShape(16.dp), elevation = 8.dp)

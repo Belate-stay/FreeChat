@@ -19,3 +19,5 @@ dependencyResolutionManagement {
 }
 rootProject.name = "FreeChat"
 include(":app")
+include(":freechat-core")
+include(":freechat-companion")

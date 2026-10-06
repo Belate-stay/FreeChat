@@ -3,9 +3,11 @@ package com.freechat.ui.theme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -13,6 +15,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.ClipOp
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
@@ -21,7 +27,7 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
+import com.freechat.ui.theme.materialHaze as hazeEffect
 
 // ============================================================================
 //  材质系统
@@ -60,10 +66,15 @@ fun Modifier.softShadow(
     dy: Dp = 4.dp,
     spread: Dp = 12.dp,
     tone: Color = Color.Black,
-    maxAlpha: Float = 0.18f
-): Modifier = this.drawBehind {
-    val corner = cornerRadiusOf(shape)
-    drawSoftShadow(corner, dx.toPx(), dy.toPx(), spread.toPx(), tone, maxAlpha)
+    maxAlpha: Float = 0.18f,
+    strength: () -> Float = { 1f },
+): Modifier = this.drawWithCache {
+    val corner = cornerRadiusOf(shape.createOutline(size, layoutDirection, this))
+    val opacity = maxAlpha * strength()
+    val face = Path().apply { addRoundRect(RoundRect(0f, 0f, size.width, size.height, corner)) }
+    onDrawBehind {
+        clipPath(face, ClipOp.Difference) { drawSoftShadow(corner, dx.toPx(), dy.toPx(), spread.toPx(), tone, opacity) }
+    }
 }
 
 /** [softShadow] 的画布实现（[drawBehind] 里只有 DrawScope，拿不到 Modifier 上下文） */
@@ -95,8 +106,8 @@ private fun DrawScope.drawSoftShadow(
 }
 
 /** 从任意 [Shape] 里取出圆角半径。方形/自定义形状一律当 0 处理，调用方不必关心。 */
-private fun DrawScope.cornerRadiusOf(shape: Shape): CornerRadius =
-    when (val o = shape.createOutline(size, layoutDirection, this)) {
+private fun cornerRadiusOf(outline: Outline): CornerRadius =
+    when (val o = outline) {
         is Outline.Rounded -> o.roundRect.topLeftCornerRadius
         else -> CornerRadius.Zero
     }
@@ -106,12 +117,8 @@ private fun DrawScope.cornerRadiusOf(shape: Shape): CornerRadius =
  *
  * 非高级材质：实色卡片 + 浅阴影，安稳、不抢戏。
  *
- * 高级材质：**新拟态（Neumorphism / Soft UI）**。四条原则一条不能少：
- *   ① 左上角受光立面 —— 左上打**亮**阴影（比背景亮、偏上偏左外投影）
- *   ② 右下角暗部立面 —— 右下打**暗**阴影（比背景暗、偏下偏右外投影）
- *   ③ 圆角过渡   —— 卡面与光影都走同一条圆角，不能有直角硬边
- *   ④ 卡面即背景 —— **卡面颜色必须等于背景颜色**，
- *      这是新拟态和「普通卡片」的唯一区别：卡片不是贴上去的，是从背景里挤出来的。
+ * 高级材质：卡面与背景同色，靠左上亮影、右下暗影自然凸起。流光开启也保留这套材质，
+ * 阴影使用缓存的单通道柔光蒙版，动画帧只复用，不重新模糊。文字对比度独立于卡面层次。
  *
  * ①②是同一件事的两半，**缺一条就散架**：只有暗影 = 普通的投影卡片（看着就是「浮」的），
  * 只有亮影 = 一圈发光。参数与画法见 [Neumorph.kt]。
@@ -149,7 +156,9 @@ fun Modifier.frostedCard(
      */
     face: Color? = null,
     /** 紧凑档：小方块（选项 chip）用，位移与模糊按比例减小，否则 6dp 的厚度会吃掉整个 chip */
-    compact: Boolean = false
+    compact: Boolean = false,
+    /** 固定输入区下方可能有滚动正文，须用不透明卡面遮住，不让正文透入输入槽。 */
+    opaque: Boolean = false,
 ): Modifier {
     val isDark = colors.TextPrimary.luminance() > 0.5f
 
@@ -161,8 +170,8 @@ fun Modifier.frostedCard(
         return this
             .softShadow(
                 shape,
-                dx = 0.dp, dy = 3.dp, spread = 9.dp,
-                tone = Color.Black, maxAlpha = if (isDark) 0.11f else 0.07f
+                dx = 0.dp, dy = 1.dp, spread = 5.dp,
+                tone = Color.Black, maxAlpha = if (isDark) 0.04f else 0.025f
             )
             .clip(shape)
             // 选中态 = 主题色实心（1.0.50 统一，见 Color.kt 的 selectedFill）；face 显式给了就听 face 的
@@ -200,25 +209,29 @@ fun Modifier.frostedCard(
     //
     // 前两稿各错一半：一稿卡面写死 `SurfaceVariant`（比背景明显白）+ 白描边 + 只有一条暗影
     // → 一张发光的白卡浮着；二稿把卡面整个拿掉（纯透明）+ 还是只有一条暗影 → 卡片没了「面」。
-    //
-    // 炫彩开着时卡面只留 25% 的纱：背景那幅光晕渐变原样穿过卡片，
-    // 两条阴影的色相也跟着画面的冷暖光晕走 —— 卡与背景才是「一块料子」而不是「两块」。
-    val liquid = if (LocalLiquidMode.current) LocalLiquidPalette.current else null
-    val tone = neumorphTone(colors, isDark, selected, compact, liquid)
+    val progress = materialProgress()
+    val tone = remember(colors, isDark, selected, compact) {
+        neumorphTone(colors, isDark, selected, compact)
+    }
+    val plainFace = face ?: if (selected) colors.selectedFill else fallback
 
     return this
         // 外阴影（凸起）：只画在卡片外面（画进卡里会从半透明的卡面里透出来，见 Neumorph.kt）
-        .then(if (recessed) Modifier else Modifier.drawBehind { drawNeumorph(shape, tone, recessed = false) })
+        .softShadow(shape, dy = 1.dp, spread = 5.dp,
+            maxAlpha = if (isDark) 0.04f else 0.025f, strength = { 1f - progress() })
+        .then(if (recessed) Modifier else Modifier.neumorphShadow(shape, tone, recessed = false, strength = progress))
         .clip(shape)
-        .background(
-            brush = Brush.linearGradient(listOf(tone.faceTop, tone.faceBottom)),
-            shape = shape,
-            alpha = tone.faceAlpha
-        )
+        .neumorphicFace(tone, plainFace, progress, inheritLiquid = face == null && !selected)
         // 覆盖色（选中态的主题色淡底）铺在这层「面」**上面**，是叠加不是替代
-        .then(if (face != null) Modifier.background(face) else Modifier)
+        .then(
+            when {
+                face != null -> Modifier.background(face)
+                selected -> Modifier.background(colors.selectedFill)
+                else -> Modifier
+            }
+        )
         // 内阴影（凹进）：必须被形状裁着画，所以放到 clip 与卡面之后
-        .then(if (recessed) Modifier.drawBehind { drawNeumorph(shape, tone, recessed = true) } else Modifier)
+        .then(if (recessed) Modifier.neumorphShadow(shape, tone, recessed = true, strength = progress) else Modifier)
 }
 
 /**
@@ -249,8 +262,13 @@ fun Modifier.frostedGlass(
      * 那块玻璃连同整个列表都会停在第一帧（本 App 里就是列表行的右键菜单，见 DrawerContent）。
      */
     underlay: Boolean = true,
+    /** 材质退出时过渡到的普通实体底色，不淡出正文/按钮本身。 */
+    fallback: Color = LocalFreeChatColors.current.Surface,
+    /** Actual content brightness, independent of the app theme (a photo can be dark in light mode). */
+    backdropDarkness: Float = if (isDark) 1f else 0f,
 ): Modifier {
     val base = LocalFreeChatColors.current.Background
+    val progress = materialProgress()
     return this
         .softShadow(
             shape,
@@ -261,13 +279,37 @@ fun Modifier.frostedGlass(
             maxAlpha = if (isDark) 0.13f else 0.07f
         )
         .clip(shape)
-        .then(if (underlay) Modifier.liquidOpaqueBackground(base) else Modifier)
+        .then(if (underlay) Modifier.liquidOpaqueBackground(base, strength = { progress() * (1f - backdropDarkness) }) else Modifier)
         .hazeEffect(state = hazeState) {
             blurRadius = blur
             inputScale = HazeInputScale.None
             // 哑光感来自「底色给足、tint 很淡」：底色太透会变成亮面玻璃，太实又丢了透光
-            backgroundColor = if (isDark) Color.Black.copy(alpha = 0.46f) else Color.White.copy(alpha = 0.66f)
-            tints = listOf(HazeTint(if (isDark) Color.White.copy(alpha = 0.07f) else Color.White.copy(alpha = 0.16f)))
+            backgroundColor = lerp(Color.White.copy(alpha = 0.66f), Color.Black.copy(alpha = 0.46f), backdropDarkness)
+            tints = listOf(HazeTint(Color.White.copy(alpha = 0.16f - 0.09f * backdropDarkness)))
         }
-        .border(1.dp, if (isDark) Color.White.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.58f), shape)
+        .drawWithCache {
+            val fallbackAlpha = 1f - progress()
+            onDrawBehind { drawRect(fallback.copy(alpha = fallbackAlpha)) }
+        }
+        // Directional reflection, not a uniformly glowing perimeter on a dark photo.
+        .border(0.8.dp, Brush.linearGradient(listOf(
+            Color.White.copy(alpha = 0.58f - 0.42f * backdropDarkness),
+            Color.White.copy(alpha = 0.30f * (1f - backdropDarkness)),
+            Color.White.copy(alpha = 0.12f * (1f - backdropDarkness)),
+            Color.White.copy(alpha = 0.28f - 0.24f * backdropDarkness)
+        )), shape)
+}
+
+/** 在正文上方悬浮的输入区与操作区一律用玻璃，不做凹槽。 */
+@Composable
+fun Modifier.floatingSurface(
+    hazeState: HazeState?, isDark: Boolean, shape: Shape,
+    fallback: Color = LocalFreeChatColors.current.inputSurface,
+    elevation: Dp = 6.dp,
+    backdropDarkness: Float = if (isDark) 1f else 0f,
+): Modifier = if (LocalAdvancedMaterial.current && hazeState != null) {
+    frostedGlass(hazeState, isDark, shape, elevation = elevation, fallback = fallback, backdropDarkness = backdropDarkness)
+} else {
+    softShadow(shape, dy = 3.dp, spread = 9.dp, maxAlpha = if (isDark) 0.11f else 0.07f)
+        .clip(shape).background(fallback)
 }

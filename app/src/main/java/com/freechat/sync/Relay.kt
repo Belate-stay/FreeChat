@@ -2,6 +2,7 @@ package com.freechat.sync
 
 import com.freechat.data.AppJson
 import com.freechat.data.LocalStore
+import com.freechat.data.MessageDeletion
 import com.freechat.data.PerConvStore
 import com.freechat.data.healed
 import com.freechat.model.Conversation
@@ -104,7 +105,7 @@ object Relay {
         AppJson.gson.fromJson<List<Conversation>>(
             LocalStore.readText(LocalStore.conversationsFile()) ?: "[]", convListType
         )
-    }.getOrNull()?.map { it.healed() } ?: emptyList()
+    }.getOrNull()?.map { it.healed().also(MessageDeletion::register) } ?: emptyList()
 
     suspend fun messages(convId: String): List<Message> =
         impl?.messages(convId) ?: messagesFromDisk(convId)
@@ -113,7 +114,7 @@ object Relay {
         LocalStore.readText(LocalStore.messagesFile(convId))?.let {
             AppJson.gson.fromJson<List<Message>>(it, msgListType)
         }
-    }.getOrNull()?.map { it.healed() } ?: emptyList()
+    }.getOrNull()?.map { it.healed() }?.let { MessageDeletion.messages(convId, it) } ?: emptyList()
 
     /**
      * 记忆一律走磁盘：`MemoryManager` 没有内存缓存，每次都是现读现写，
@@ -125,7 +126,7 @@ object Relay {
             LocalStore.readText(LocalStore.memoryFile(convId))?.let {
                 AppJson.gson.fromJson<List<MemoryEntry>>(it, memListType)
             }
-        }.getOrNull()?.map { it.healed() } ?: emptyList()
+        }.getOrNull()?.map { it.healed() }?.let { MessageDeletion.memories(convId, it) } ?: emptyList()
     }
 
     // ============================================================
@@ -144,7 +145,9 @@ object Relay {
                 for (op in ops) when (op) {
                     is ConvOp.Upsert -> {
                         val idx = list.indexOfFirst { it.id == op.conv.id }
-                        if (idx >= 0) list[idx] = op.conv else list.add(op.conv)
+                        val c = if (idx >= 0) Merge.mergeConv(list[idx], op.conv).conv else op.conv
+                        MessageDeletion.register(c)
+                        if (idx >= 0) list[idx] = c else list.add(c)
                     }
                     is ConvOp.Remove -> list.removeAll { it.id == op.id }
                 }
@@ -152,6 +155,17 @@ object Relay {
                     LocalStore.conversationsFile(),
                     AppJson.gson.toJson(list, convListType)
                 )
+                for (op in ops.filterIsInstance<ConvOp.Upsert>()) {
+                    val deleted = MessageDeletion.deletedIds(op.conv.id)
+                    if (deleted.isNotEmpty()) {
+                        LocalStore.writeText(LocalStore.messagesFile(op.conv.id), AppJson.gson.toJson(messagesFromDisk(op.conv.id)))
+                        LocalStore.writeText(LocalStore.memoryFile(op.conv.id), AppJson.gson.toJson(memories(op.conv.id)))
+                        PerConvStore.load()[op.conv.id]?.let { old ->
+                            val clean = MessageDeletion.atmosphere(op.conv.id, old)
+                            if (clean != old) PerConvStore.put(op.conv.id, clean)
+                        }
+                    }
+                }
             }
         }
     }
@@ -164,7 +178,7 @@ object Relay {
         }
         LocalStore.suspendApply {
             LocalStore.locked {
-                val merged = Merge.mergeMessages(messagesFromDisk(convId), incoming)
+                val merged = Merge.mergeMessages(messagesFromDisk(convId), incoming, MessageDeletion.deletedIds(convId))
                 LocalStore.writeText(
                     LocalStore.messagesFile(convId),
                     AppJson.gson.toJson(merged, msgListType)
@@ -187,7 +201,7 @@ object Relay {
     suspend fun applyMemories(convId: String, incoming: List<MemoryEntry>) {
         LocalStore.suspendApply {
             LocalStore.locked {
-                val merged = Merge.mergeMemories(memories(convId), incoming)
+                val merged = Merge.mergeMemories(memories(convId), incoming, MessageDeletion.memoryDeletionIds(convId))
                 LocalStore.writeText(
                     LocalStore.memoryFile(convId),
                     AppJson.gson.toJson(merged, memListType)
@@ -220,7 +234,7 @@ object Relay {
         LocalStore.suspendApply {
             LocalStore.locked {
                 val cur = PerConvStore.load()[convId] ?: PerConvSettings()
-                PerConvStore.put(convId, PerConvBridge.mergeIntoLocal(cur, incoming))
+                PerConvStore.put(convId, MessageDeletion.atmosphere(convId, PerConvBridge.mergeIntoLocal(cur, incoming)))
             }
         }
     }

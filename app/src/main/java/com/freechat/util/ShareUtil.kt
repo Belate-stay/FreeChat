@@ -292,7 +292,7 @@ object ShareImageGenerator {
         // ===== 页脚：等高带，logo / 品牌 / QR 全部带内垂直居中；QR 不再压线 =====
         val footerTop = sepY + 2 + FOOTER_GAP
         val logoY = footerTop + (FOOTER_H - LOGO_SIZE) / 2f
-        runCatching { BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher) }.getOrNull()?.let { logo ->
+        runCatching { BitmapFactory.decodeResource(context.resources, R.drawable.freechat_icon_blue_f) }.getOrNull()?.let { logo ->
             val scaled = if (logo.width == LOGO_SIZE && logo.height == LOGO_SIZE) logo
                          else Bitmap.createScaledBitmap(logo, LOGO_SIZE, LOGO_SIZE, true)
             canvas.drawBitmap(scaled, PAD.toFloat(), logoY, null)
@@ -513,54 +513,31 @@ object ShareImageGenerator {
         }
     }
 
-    /** inline Markdown → Spannable（**加粗** / *斜体* / `代码` / ~~删除线~~ / ++下划线++ / <u>下划线</u>） */
+    /** Share images use the exact same nested inline parser as the on-screen Markdown. */
     private fun buildSpannable(text: String, bodyFont: Typeface, monoFont: Typeface): SpannableStringBuilder {
-        val sb = SpannableStringBuilder()
-        var rem = text
-        while (rem.isNotEmpty()) {
-            when {
-                rem.startsWith("**") -> rem = appendSpan(rem, "**", sb) { s, e -> sb.setSpan(FakeBoldSpan(), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                rem.startsWith("__") -> rem = appendSpan(rem, "__", sb) { s, e -> sb.setSpan(FakeBoldSpan(), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                rem.startsWith("~~") -> rem = appendSpan(rem, "~~", sb) { s, e -> sb.setSpan(StrikethroughSpan(), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                rem.startsWith("++") -> rem = appendSpan(rem, "++", sb) { s, e -> sb.setSpan(UnderlineSpan(), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                rem.startsWith("<u>") -> rem = appendSpan(rem, "<u>", "</u>", sb) { s, e -> sb.setSpan(UnderlineSpan(), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                rem.startsWith("`") -> rem = appendSpan(rem, "`", sb) { s, e -> sb.setSpan(CustomTypefaceSpan(monoFont), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                rem.startsWith("*") && !rem.startsWith("**") -> rem = appendSpan(rem, "*", sb) { s, e -> sb.setSpan(StyleSpan(Typeface.ITALIC), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                rem.startsWith("_") && !rem.startsWith("__") -> rem = appendSpan(rem, "_", sb) { s, e -> sb.setSpan(StyleSpan(Typeface.ITALIC), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                else -> {
-                    val next = listOfNotNull(
-                        rem.indexOf("**").takeIf { it >= 0 },
-                        rem.indexOf("__").takeIf { it >= 0 },
-                        rem.indexOf("~~").takeIf { it >= 0 },
-                        rem.indexOf("++").takeIf { it >= 0 },
-                        rem.indexOf("<u>").takeIf { it >= 0 },
-                        rem.indexOf('`').takeIf { it >= 0 },
-                        rem.indexOf('*').takeIf { it >= 0 && !rem.startsWith("**") },
-                        rem.indexOf('_').takeIf { it >= 0 && !rem.startsWith("__") }
-                    ).minOrNull()
-                    when {
-                        next == null -> { sb.append(rem); rem = "" }
-                        next > 0 -> { sb.append(rem.substring(0, next)); rem = rem.substring(next) }
-                        else -> { sb.append(rem[0]); rem = rem.substring(1) }
-                    }
-                }
-            }
+        val parsed = shareStyledLine(text)
+        val sb = SpannableStringBuilder(parsed.text)
+        if (sb.isEmpty()) return sb
+        sb.setSpan(CustomTypefaceSpan(bodyFont), 0, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        fun span(value: Any, start: Int, end: Int) {
+            if (end > start) sb.setSpan(value, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        for (range in parsed.spanStyles) {
+            val style = range.item
+            if (style.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold) span(FakeBoldSpan(), range.start, range.end)
+            if (style.fontStyle == androidx.compose.ui.text.font.FontStyle.Italic) span(StyleSpan(Typeface.ITALIC), range.start, range.end)
+            if (style.fontFamily == androidx.compose.ui.text.font.FontFamily.Monospace) span(CustomTypefaceSpan(monoFont), range.start, range.end)
+            if (style.textDecoration?.contains(androidx.compose.ui.text.style.TextDecoration.Underline) == true)
+                span(UnderlineSpan(), range.start, range.end)
+            if (style.textDecoration?.contains(androidx.compose.ui.text.style.TextDecoration.LineThrough) == true)
+                span(StrikethroughSpan(), range.start, range.end)
+        }
+        for (link in parsed.getLinkAnnotations(0, parsed.length)) {
+            span(android.text.style.ForegroundColorSpan(0xFF0759B5.toInt()), link.start, link.end)
+            span(StyleSpan(Typeface.ITALIC), link.start, link.end)
+            span(UnderlineSpan(), link.start, link.end)
         }
         return sb
-    }
-
-    private fun appendSpan(rem: String, open: String, sb: SpannableStringBuilder, style: (Int, Int) -> Unit): String {
-        val end = rem.indexOf(open, open.length)
-        if (end < 0) { sb.append(rem[0]); return rem.substring(1) }
-        val s = sb.length; sb.append(rem.substring(open.length, end)); style(s, sb.length)
-        return rem.substring(end + open.length)
-    }
-
-    private fun appendSpan(rem: String, open: String, close: String, sb: SpannableStringBuilder, style: (Int, Int) -> Unit): String {
-        val end = rem.indexOf(close, open.length)
-        if (end < 0) { sb.append(rem[0]); return rem.substring(1) }
-        val s = sb.length; sb.append(rem.substring(open.length, end)); style(s, sb.length)
-        return rem.substring(end + close.length)
     }
 }
 
@@ -615,6 +592,16 @@ fun Context.shareMarkdown(text: String): Boolean = try {
         putExtra(Intent.EXTRA_STREAM, uri)
         putExtra(Intent.EXTRA_TEXT, text)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    startActivity(Intent.createChooser(intent, com.freechat.i18n.LocaleManager.strings().shareAction))
+    true
+} catch (_: Exception) { false }
+
+/** 把在线分享链接走系统分享面板（微信/QQ 等拿到纯文本链接即可打开），返回是否成功 */
+fun Context.shareLink(url: String): Boolean = try {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, url)
     }
     startActivity(Intent.createChooser(intent, com.freechat.i18n.LocaleManager.strings().shareAction))
     true

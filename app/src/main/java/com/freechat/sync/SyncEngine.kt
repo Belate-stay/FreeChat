@@ -49,9 +49,13 @@ import java.util.UUID
 object SyncEngine {
 
     private const val TAG = "SyncEngine"
+    private val pushingVersions = mutableMapOf<String, Long>()
 
     /** 推一轮最多来回几次。正常 1 次，409 合并后 2 次，再多说明对面在猛推，见好就收 */
     private const val MAX_PUSH_ROUNDS = 4
+
+    /** 补缺时翻云端清单的页数上限（200/页 × 50 = 一万个对象，远超真实账号；见 seedMissing） */
+    private const val MAX_SEED_PAGES = 50
 
     enum class Phase { OFF, IDLE, SYNCING, ERROR }
 
@@ -162,6 +166,8 @@ object SyncEngine {
         val ok = try {
             pull(auth, userId)
             if (accountChanged(userId)) return@withLock false
+            cleanupConflictCopies()
+            if (accountChanged(userId)) return@withLock false
             push(auth, userId)
             if (accountChanged(userId)) return@withLock false
 
@@ -240,6 +246,36 @@ object SyncEngine {
     //  拉
     // ============================================================
 
+    /**
+     * 1.0.99.3：清理存量「冲突副本」套娃（见 [ConflictCopyCleanup]）。
+     *
+     * 放在 pull 之后 push 之前 —— 云端拉回来的套娃副本当场删掉并带着墓碑推回去，
+     * **一轮收敛**：下一轮起各端都只剩「原对话 + 至多一份干净副本」。
+     * 有聊天记录的副本一律不删（[ConflictCopyCleanup.staleCopies] 的安全闸）。
+     */
+    private suspend fun cleanupConflictCopies() {
+        val convs = Relay.conversations()
+        if (convs.none { ConflictCopyCleanup.analyze(it.title).depth > 0 }) return
+        val withMessages = mutableSetOf<String>()
+        for (c in convs) {
+            if (ConflictCopyCleanup.analyze(c.title).depth > 0 &&
+                runCatching { Relay.messages(c.id).isNotEmpty() }.getOrDefault(false)
+            ) withMessages.add(c.id)
+        }
+        val stale = ConflictCopyCleanup.staleCopies(convs) { it.id in withMessages }
+        if (stale.isEmpty()) return
+        Relay.applyConversations(stale.map { Relay.ConvOp.Remove(it) })
+        // Remove 落盘后 diff 会自动标脏；这里再显式补一次 CONV 脏标记兜底（幂等），
+        // 保证墓碑这轮一定推出去 —— 副本只有推上墓碑，别的设备才不会再把它拉回来
+        for (id in stale) {
+            Adapter.markDirty(Adapter.objKey(SyncKind.CONV, id))
+            Adapter.markDirty(Adapter.objKey(SyncKind.MSGS, id))
+            Adapter.markDirty(Adapter.objKey(SyncKind.MEMS, id))
+            Adapter.markDirty(Adapter.objKey(SyncKind.PCSET, id))
+        }
+        notice(LocaleManager.strings().syncConflictCopiesCleaned(stale.size))
+    }
+
     private suspend fun pull(auth: Session.Auth, userId: String) {
         var guard = 0
         pulledConvIds.clear()
@@ -260,7 +296,17 @@ object SyncEngine {
             // 而 conv 和 msgs 在批里的先后顺序并不由我们决定，所以不能等应用到了才登记。
             for (m in res.changes) if (m.kind == SyncKind.CONV && !m.deleted) pulledConvIds.add(m.id)
 
-            for (meta in res.changes) {
+            // The ledger must be applied before its message/memory arrays, regardless of server order.
+            // 1.0.99.3：IMG 也排在 MSGS 前 —— 引用要在消息解码前落到缓存，否则引用解不到路径。
+            // 1.0.99.4b：IMG **墓碑**同样前置 —— 后置会撞「同批里消息还引用着这张图」：
+            // 消息先把引用解成路径，墓碑转头把缓存文件删了，留下悬空路径。
+            for (meta in res.changes.sortedBy {
+                when {
+                    it.kind == SyncKind.CONV && !it.deleted -> 0
+                    it.kind == SyncKind.IMG -> 1
+                    else -> 2
+                }
+            }) {
                 if (accountChanged(userId)) return
                 applyChange(meta, fetched[meta.kind to meta.id])
             }
@@ -285,6 +331,8 @@ object SyncEngine {
                 SyncKind.MSGS -> Relay.dropMessages(meta.id)
                 SyncKind.MEMS -> Relay.removeMemoryFile(meta.id)
                 SyncKind.PCSET -> Relay.removePerConv(meta.id)
+                // 图片对象墓碑：别处引用计数归零后被清 —— 缓存跟着删，引用留待消息层自行收敛
+                SyncKind.IMG -> runCatching { ImageSync.cacheFile(meta.id).delete() }
                 else -> Unit
             }
             synchronized(revs) { revs[key] = meta.rev }
@@ -292,6 +340,15 @@ object SyncEngine {
         }
 
         val data = obj?.data ?: return
+
+        // 1.0.99.3 图片对象：下载载荷落缓存（`img_<hash>.jpg`），消息层解引用就用它
+        if (meta.kind == SyncKind.IMG) {
+            val payload = data.takeIf { it.isJsonPrimitive }?.asString
+                ?.let { runCatching { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }.getOrNull() }
+            if (payload != null) ImageSync.materialize(meta.id, payload)
+            synchronized(revs) { revs[key] = meta.rev }
+            return
+        }
 
         when (meta.kind) {
             SyncKind.CONV -> applyConv(meta.id, data)
@@ -313,12 +370,20 @@ object SyncEngine {
                     meta.id !in pulledConvIds &&
                     Relay.conversations().none { it.id == meta.id }
                 if (skip) return
-                Relay.applyMessages(meta.id, Wire.msgsFromWire(data, Relay.messages(meta.id)))
+                val incoming = Wire.msgsFromWire(data, Relay.messages(meta.id))
+                Relay.applyMessages(meta.id, incoming)
+                if (incoming.any { it.id in com.freechat.data.MessageDeletion.deletedIds(meta.id) }) Adapter.markDirty(key)
             }
-            SyncKind.MEMS -> Relay.applyMemories(meta.id, Wire.memsFromWire(data) ?: return)
+            SyncKind.MEMS -> {
+                val incoming = Wire.memsFromWire(data) ?: return
+                Relay.applyMemories(meta.id, incoming)
+                if (com.freechat.data.MessageDeletion.memories(meta.id, incoming).size != incoming.size) Adapter.markDirty(key)
+            }
             SyncKind.PCSET -> {
                 val obj = data.takeIf { it.isJsonObject }?.asJsonObject ?: return
                 Relay.applyPerConv(meta.id, obj)
+                val incoming = PerConvBridge.mergeIntoLocal(com.freechat.model.PerConvSettings(), obj)
+                if (incoming != com.freechat.data.MessageDeletion.atmosphere(meta.id, incoming)) Adapter.markDirty(key)
             }
             SyncKind.SETTINGS -> {
                 val repo = settingsRepo ?: return
@@ -342,20 +407,40 @@ object SyncEngine {
             merged.alternate?.let { alt ->
                 // 两台设备各改各的角色设定，判断不了谁新谁旧 —— 两份都留。
                 // 副本**不抄消息历史**（消息已经并集进原对话了），只带那套设定，几乎不占空间。
-                val copy = Conversation(
-                    id = UUID.randomUUID().toString(),
-                    title = alt.title,
-                    mode = alt.mode,
-                    characterProfile = alt.profile
-                )
-                ops += Relay.ConvOp.Upsert(copy)
-                // 副本是新造的东西，云端还没有 —— 得排进队列推上去
-                Adapter.markDirty(Adapter.objKey(SyncKind.CONV, copy.id))
-                notice(LocaleManager.strings().syncConflictCopySaved(copy.title))
+                //
+                // 1.0.99.3 幂等闸门：等价副本（同标题 + 人设云端长相一致）已存在就不再造 ——
+                // 原来每轮同步都造一条新的并推上云，云端 seq 递增又把这条对话拉回来再判一次
+                // 冲突，副本的副本层层套娃（见 Merge.samePersona 注释）。
+                val duplicate = Relay.conversations().any { existing ->
+                    existing.id != merged.conv.id &&
+                        existing.title == alt.title &&
+                        Merge.samePersona(existing.characterProfile, alt.profile)
+                }
+                if (!duplicate) {
+                    val copy = Conversation(
+                        id = UUID.randomUUID().toString(),
+                        title = alt.title,
+                        mode = alt.mode,
+                        characterProfile = alt.profile
+                    )
+                    ops += Relay.ConvOp.Upsert(copy)
+                    // 副本是新造的东西，云端还没有 —— 得排进队列推上去
+                    Adapter.markDirty(Adapter.objKey(SyncKind.CONV, copy.id))
+                    notice(LocaleManager.strings().syncConflictCopySaved(copy.title))
+                }
             }
         }
 
         Relay.applyConversations(ops)
+        val deleted = com.freechat.data.MessageDeletion.deletedIds(id)
+        if (deleted.isNotEmpty()) {
+            if (!remote.deletedMessageIds.containsAll(deleted) ||
+                !remote.deletedVisualMessageIds.containsAll(com.freechat.data.MessageDeletion.deletedVisualIds(id)))
+                Adapter.markDirty(Adapter.objKey(SyncKind.CONV, id))
+            Adapter.markDirty(Adapter.objKey(SyncKind.MSGS, id))
+            Adapter.markDirty(Adapter.objKey(SyncKind.MEMS, id))
+            if (Relay.perConv(id) != null) Adapter.markDirty(Adapter.objKey(SyncKind.PCSET, id))
+        }
     }
 
     // ============================================================
@@ -385,20 +470,40 @@ object SyncEngine {
 
     /** 返回 true 表示"有进展"（推上去了 / 合并过了），false 表示这一条这轮没得救 */
     private suspend fun pushOne(auth: Session.Auth, kind: String, id: String, key: String): Boolean {
+        pushingVersions[key] = Adapter.dirtyVersion(key)
         val rev = synchronized(revs) { revs[key] } ?: 0L
         return try {
             when (kind) {
                 SyncKind.CONV -> {
                     val conv = Relay.conversations().find { it.id == id }
                     if (conv == null) deleteRemote(auth, kind, id, rev, key)
-                    else putRemote(auth, kind, id, rev, Wire.convToWire(conv), Wire.convUpdatedAt(conv), key)
+                    else {
+                        val wire = Wire.convToWire(conv)
+                        ensureImagesPushed(wire)
+                        putRemote(auth, kind, id, rev, wire, Wire.convUpdatedAt(conv), key)
+                    }
                 }
                 SyncKind.MSGS -> {
                     if (!LocalStore.messagesFile(id).exists()) deleteRemote(auth, kind, id, rev, key)
                     else {
                         val msgs = Relay.messages(id)
-                        putRemote(auth, kind, id, rev, Wire.msgsToWire(msgs), Wire.msgsUpdatedAt(msgs), key)
+                        val wire = Wire.msgsToWire(msgs)
+                        // 1.0.99.3 图片上云：把引用的图片对象排进队列（本轮下一段推，
+                        // 收端乱序到达由 ImageSync.healReferences 自愈）
+                        ensureImagesPushed(wire)
+                        putRemote(auth, kind, id, rev, wire, Wire.msgsUpdatedAt(msgs), key)
                     }
+                }
+                // 1.0.99.3 图片对象：缓存还在就推载荷，缓存没了（引用归零被清）就立墓碑
+                SyncKind.IMG -> {
+                    val cache = ImageSync.cacheFile(id)
+                    if (cache.isFile && cache.length() > 0) {
+                        val payload = runCatching {
+                            android.util.Base64.encodeToString(cache.readBytes(), android.util.Base64.NO_WRAP)
+                        }.getOrNull()
+                        if (payload == null) { Adapter.unmarkDirty(key); false }
+                        else putRemote(auth, kind, id, rev, com.google.gson.JsonPrimitive(payload), cache.lastModified(), key)
+                    } else deleteRemote(auth, kind, id, rev, key)
                 }
                 SyncKind.MEMS -> {
                     if (!LocalStore.memoryFile(id).exists()) deleteRemote(auth, kind, id, rev, key)
@@ -434,9 +539,32 @@ object SyncEngine {
      * 本地这份**整条没了**就是删（对话被删了，它的新规则在云端也该立墓碑）——
      * 跟 msgs/mems 那边"文件没了就删"同一条规矩。
      */
+    /**
+     * 1.0.99.3 图片上云：把 wire 里引用到、还没上过云的图片对象排进待推队列。
+     *
+     * 只「记一笔」不直接推 —— 推送走统一的 push 循环（IMG 分支），409/413/网络
+     * 都有既定处置。消息本轮先推上去、图片下一轮跟上，收端乱序由
+     * [ImageSync.healReferences] 自愈（引用就地解成缓存路径）。
+     */
+    private fun ensureImagesPushed(wire: com.google.gson.JsonElement) {
+        val refs = mutableListOf<String>()
+        collectRefs(wire, refs)
+        for (hash in ImageSync.hashesIn(refs)) {
+            if (ImageSync.cacheFile(hash).isFile) Adapter.markDirty(Adapter.objKey(SyncKind.IMG, hash))
+        }
+    }
+
+    private fun collectRefs(el: com.google.gson.JsonElement, out: MutableList<String>) {
+        when {
+            el.isJsonPrimitive -> if (el.asString.startsWith(ImageSync.REF_PREFIX)) out += el.asString
+            el.isJsonArray -> el.asJsonArray.forEach { collectRefs(it, out) }
+            el.isJsonObject -> el.asJsonObject.entrySet().forEach { collectRefs(it.value, out) }
+        }
+    }
+
     private suspend fun pushPerConv(auth: Session.Auth, id: String, rev: Long, key: String): Boolean {
         val local = Relay.perConv(id) ?: return deleteRemote(auth, SyncKind.PCSET, id, rev, key)
-        val ours = PerConvBridge.toWire(local)
+        val ours = PerConvBridge.toWire(com.freechat.data.MessageDeletion.atmosphere(id, local))
         // 云端可能还有我们不认识的键（网页端以后加的）。PUT 是整对象替换，
         // 只推自己这几个键就会把它们抹掉，然后两端来回抹 —— 跟设置那边同一个坑（见 pushSettings）
         val payload = if (rev == 0L) ours else {
@@ -476,14 +604,14 @@ object SyncEngine {
         val r = ApiClient.putObject(auth.token, kind, id, rev, updatedAt, payload)
         synchronized(revs) { revs[key] = r.rev }
         // 推成功了才算数。内容没变的话服务端原样返回、不顶版本号，一样是成功
-        if (!r.deleted) Adapter.unmarkDirty(key)
+        if (!r.deleted) Adapter.unmarkDirty(key, pushingVersions[key])
         return true
     }
 
     private suspend fun deleteRemote(auth: Session.Auth, kind: String, id: String, rev: Long, key: String): Boolean {
         if (rev == 0L) {
             // 云端压根没有过这一条 —— 没什么可删的，销账走人
-            Adapter.unmarkDirty(key)
+            Adapter.unmarkDirty(key, pushingVersions[key])
             return true
         }
         val r = try {
@@ -493,13 +621,13 @@ object SyncEngine {
             // 不能让它冒出去：一轮同步里任何一个对象抛错都会让整轮变成「同步错误」，
             // 而这里其实什么都没出错（可能只是之前那一列的墓碑被清过、或者本地那份从没上传成功过）
             if (e.status == 404 && e.code == "not_found") {
-                Adapter.unmarkDirty(key)
+                Adapter.unmarkDirty(key, pushingVersions[key])
                 return true
             }
             throw e
         }
         synchronized(revs) { revs[key] = r.rev }
-        Adapter.unmarkDirty(key)
+        Adapter.unmarkDirty(key, pushingVersions[key])
         return true
     }
 
@@ -616,6 +744,51 @@ object SyncEngine {
     suspend fun seedExtras() {
         Adapter.markExtras(Relay.conversations())
         Session.update({ it.copy(seededExtras = true) })
+    }
+
+    /**
+     * 补齐**云端缺件**（2026-10-01 加）：本地有、云里从没有过的东西才推。
+     *
+     * 背景（用户报「云端内容少了好多」查出来的洞）：队列只记**改动**，不记存量 ——
+     * 老账号（游标不是 0）登录只走 [seedExtras]（头像+新规则），**从没推过的
+     * 聊天记录/记忆会一直留在本地**，要等用户哪天恰好再动那条对话才轮得到。
+     * 线上实测：有账号 51 条对话只有 3 个记录箱在云里，缺的就是这些「从没动过的」。
+     *
+     * 口径：拿云端**全部**对象清单做差（含墓碑 —— `changes` since=0 翻页拉全）：
+     *  · 云里活着的 —— 不碰（以后的改动走正常队列）
+     *  · 云里是**墓碑**的 —— **绝不补推**（别的设备删过的东西就该被拉回来删掉，
+     *    推上去就成了「删除复活」，破坏跨设备删除）
+     *  · 云里压根没有的 —— 排进队列补推（只追加，不清空用户正攒着的改动）
+     *
+     * 每个账号每台设备做一次（[Session.SyncState.seededMissing]）；**失败不立标记**，
+     * 下次登录接着试。清单翻不完（超大账号撞上页数上限）也不立 —— 宁可重来，
+     * 也不能拿半份清单当「云里没有」去推（那是给云端制造无谓的 409）。
+     */
+    suspend fun seedMissing() {
+        val auth = Session.loadAuth() ?: return
+        try {
+            val known = mutableSetOf<String>()
+            var since = 0L
+            var pages = 0
+            while (pages < MAX_SEED_PAGES) {
+                val r = ApiClient.changes(auth.token, since, 200)
+                for (c in r.changes) known.add(Adapter.objKey(c.kind, c.id)) // 墓碑也算「云里有过」
+                if (!r.hasMore) break
+                since = r.nextSeq
+                pages++
+            }
+            if (pages >= MAX_SEED_PAGES) {
+                Log.w(TAG, "seedMissing: cloud list too long, skip this round")
+                return
+            }
+            Adapter.markLocalMissing(Relay.conversations(), known)
+            Session.update({ it.copy(seededMissing = true) })
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // 补缺是「下次还能再来」的锦上添花，绝不能把登录流程带崩 —— 不立标记，下回接着试
+            Log.w(TAG, "seedMissing failed, will retry next login", e)
+        }
     }
 
     /**

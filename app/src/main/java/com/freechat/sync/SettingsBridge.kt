@@ -8,8 +8,11 @@ import com.freechat.data.SettingsRepository.Companion.KEY_CHAT_MODE
 import com.freechat.data.SettingsRepository.Companion.KEY_CLAUDE_DELETED
 import com.freechat.data.SettingsRepository.Companion.KEY_CLAUDE_SEEDED
 import com.freechat.data.SettingsRepository.Companion.KEY_COLOR_THEME
+import com.freechat.data.SettingsRepository.Companion.KEY_CUSTOM_COLOR_ARGB
 import com.freechat.data.SettingsRepository.Companion.KEY_ENABLE_WEB_SEARCH
 import com.freechat.data.SettingsRepository.Companion.KEY_FONT_SIZE
+import com.freechat.data.SettingsRepository.Companion.KEY_INPUT_BAR_STATE
+import com.freechat.data.SettingsRepository.Companion.KEY_INPUT_STYLE
 import com.freechat.data.SettingsRepository.Companion.KEY_GLOBAL_MEMORIES
 import com.freechat.data.SettingsRepository.Companion.KEY_LANGUAGE_CODE
 import com.freechat.data.SettingsRepository.Companion.KEY_LENGTH_MODE
@@ -88,6 +91,8 @@ object SettingsBridge {
      */
     private val WIRE_NAME: Map<Enum<*>, String> = mapOf(
         ColorTheme.BROWN to "WARM", ColorTheme.BLUE to "BLUE", ColorTheme.WHITE to "WHITE",
+        // 网页端尚无自定义主题，向它呈现纯白；安卓专属颜色保存在 androidPrefs。
+        ColorTheme.CUSTOM to "WHITE", ColorTheme.PINE to "WHITE", ColorTheme.CORAL to "WHITE",
         ThemeMode.SYSTEM to "SYSTEM", ThemeMode.LIGHT to "LIGHT",
         ThemeMode.DARK to "DARK", ThemeMode.DARK_OLED to "OLED",
         TempMode.AUTO to "AUTO", TempMode.WARM to "WARM", TempMode.OBJECTIVE to "OBJECTIVE",
@@ -210,6 +215,8 @@ object SettingsBridge {
     private fun androidPrefs(p: Preferences): JsonObject? {
         val o = JsonObject()
         p[KEY_FONT_SIZE]?.let { o.addProperty("fontSize", it) }
+        p[KEY_INPUT_STYLE]?.let { o.addProperty("inputStyle", it) }
+        p[KEY_INPUT_BAR_STATE]?.let { o.addProperty("inputBarState", it) }
         p[KEY_CHAT_MODE]?.let { o.addProperty("chatMode", it) }
         p[KEY_VOICE_MODEL]?.let { o.addProperty("voiceModel", it) }
         p[KEY_TTS_VOICE]?.let { o.addProperty("ttsVoice", it) }
@@ -219,6 +226,12 @@ object SettingsBridge {
         p[KEY_LIQUID_BACKDROP]?.let { o.addProperty("liquidBackdrop", it) }
         p[KEY_ADVANCED_MATERIAL]?.let { o.addProperty("advancedMaterial", it) }
         p[KEY_SYSTEM_DARK_THEME]?.let { o.addProperty("systemDarkTheme", it) }
+        p[KEY_CUSTOM_COLOR_ARGB]?.let { o.addProperty("customColorArgb", it) }
+        p[KEY_COLOR_THEME]?.let { ColorTheme.entries.getOrNull(it) }?.let { selected ->
+            if (selected == ColorTheme.CUSTOM || selected == ColorTheme.PINE || selected == ColorTheme.CORAL) {
+                o.addProperty("androidColorTheme", selected.name)
+            }
+        }
         // 内置助理生成过没有。它必须同步：否则换一台设备登录，那台看到的是 false，
         // 会再生成一条同名的对话出来，用户侧栏里就有两个「Claude风格助理」了。
         p[KEY_CLAUDE_SEEDED]?.let { o.addProperty("claudeSeeded", it) }
@@ -280,11 +293,15 @@ object SettingsBridge {
 
         // 用 subObject 而不是 getAsJsonObject：后者碰上 `"androidPrefs": null` 会抛
         // JsonNull 强转异常（同 [Wire.subObject] 那段注释，1.0.64 的「同步出错」）
-        remote.subObject(ANDROID_PREFS)?.let { applyAndroidPrefs(repo, it) }
+        remote.subObject(ANDROID_PREFS)?.let {
+            applyAndroidPrefs(repo, it, remote.str("themeFamily") == "WHITE")
+        }
     }
 
-    private suspend fun applyAndroidPrefs(repo: SettingsRepository, o: JsonObject) {
+    private suspend fun applyAndroidPrefs(repo: SettingsRepository, o: JsonObject, allowAndroidTheme: Boolean) {
         o.int("fontSize")?.let { repo.saveFontSize(it) }
+        o.int("inputStyle")?.let { repo.saveInputStyle(it) }
+        o.int("inputBarState")?.let { repo.saveInputBarState(it) }
         o.int("chatMode")?.let { repo.saveChatMode(it) }
         o.str("voiceModel")?.let { repo.saveVoiceModel(it) }
         o.str("ttsVoice")?.let { repo.saveTtsVoice(it) }
@@ -294,6 +311,14 @@ object SettingsBridge {
         o.boolean("liquidBackdrop")?.let { repo.saveLiquidBackdrop(it) }
         o.boolean("advancedMaterial")?.let { repo.saveAdvancedMaterial(it) }
         o.boolean("systemDarkTheme")?.let { repo.saveSystemDarkTheme(it) }
+        o.int("customColorArgb")?.let { repo.saveCustomColorArgb(it) }
+        if (allowAndroidTheme) {
+            when (o.str("androidColorTheme")) {
+                ColorTheme.CUSTOM.name -> o.int("customColorArgb")?.let { repo.saveCustomTheme(it) }
+                ColorTheme.PINE.name -> repo.saveColorTheme(ColorTheme.PINE.ordinal)
+                ColorTheme.CORAL.name -> repo.saveColorTheme(ColorTheme.CORAL.ordinal)
+            }
+        }
         // **只能单向置真**：这是「已经生成过」的闩，不是用户偏好。
         // 云端的 false 不能把本地的 true 抹掉 —— 抹掉就意味着用户删过的内置助理
         // 会在下次冷启动时长回来，而"删了就没了"是这个功能的承诺。

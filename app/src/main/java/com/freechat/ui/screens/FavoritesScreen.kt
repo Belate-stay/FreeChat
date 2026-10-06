@@ -1,11 +1,13 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.components.HeaderIconButton
+import com.freechat.ui.components.HeaderTextButton
+
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -32,13 +34,14 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
+import androidx.compose.ui.platform.LocalDensity
+import com.freechat.ui.animation.MotionTextButton as TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -53,15 +56,13 @@ import com.freechat.model.FavoriteItem
 import com.freechat.model.Role
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.components.markdownToPlainText
+import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.frostedGlass
 import com.freechat.viewmodel.ChatViewModel
-import dev.chrisbanes.haze.HazeInputScale
-import dev.chrisbanes.haze.HazeProgressive
-import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.rememberHazeState
@@ -70,7 +71,8 @@ import java.util.Date
 import java.util.Locale
 import com.freechat.ui.theme.pageBackground
 import com.freechat.ui.theme.hazeBackground
-import com.freechat.ui.theme.pageHeaderBackground
+import com.freechat.ui.components.TopBarBackdrop
+import com.freechat.ui.components.TopBarBackdropSource
 
 /** 收藏夹排序方式：收藏时间（消息发送时间倒序）/ 最近一次对话时间（对话 updatedAt 倒序） */
 private enum class FavSort { FAVORITE_TIME, CONV_TIME }
@@ -97,11 +99,8 @@ fun FavoritesScreen(
     // 进入收藏页时刷新一次，保证「最近一次对话时间」用的是最新对话状态
     LaunchedEffect(Unit) { viewModel.refreshFavorites() }
     val hazeState = rememberHazeState()
-    val density = LocalDensity.current
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val titleBarAreaDp = 48.dp
-    val topFadeZoneDp = HazeSpec.TopFadeZoneDp
-    val topBarHeightPx = with(density) { (statusBarHeightDp + titleBarAreaDp + topFadeZoneDp).toPx() }
+    val titleBarAreaDp = HazeSpec.TitleBarAreaDp
 
     // 筛选/排序状态
     var filterConvId by remember { mutableStateOf<String?>(null) }
@@ -113,6 +112,7 @@ fun FavoritesScreen(
     // ===== 多选：长按任一条进入，可批量取消收藏（整段取消，见 ChatViewModel.unfavoriteItems） =====
     var selectMode by remember { mutableStateOf(false) }
     var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showDeleteFavoriteConfirm by remember { mutableStateOf(false) }
     fun exitSelect() {
         selectMode = false
         selectedKeys = emptySet()
@@ -149,6 +149,7 @@ fun FavoritesScreen(
     }
 
     Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
         // ──── 模糊源：整页一格，空态也在内 ────
         // 原来源挂在 LazyColumn 上 —— 收藏为空时那个列表根本不存在，于是右上角那张磨砂菜单卡片
         // 采不到任何东西，直接退化成半透明灰片（1.0.49 报的「菜单卡片整体灰黑」就是这个）。
@@ -175,7 +176,7 @@ fun FavoritesScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 16.dp, end = 16.dp,
-                        top = statusBarHeightDp + titleBarAreaDp + 20.dp,
+                        top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 20.dp),
                         bottom = 40.dp
                     )
                 ) {
@@ -206,33 +207,8 @@ fun FavoritesScreen(
             }
         }
 
-        // ===== 顶部标题栏背景（高级材质开=真模糊+渐变渐隐，关=纯色） =====
-        if (advancedMaterial) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp + topFadeZoneDp)
-                    .pageHeaderBackground(colors.Background)
-                    .hazeEffect(state = hazeState) {
-                        blurRadius = HazeSpec.TopBlurRadius
-                        inputScale = HazeInputScale.None
-                        backgroundColor = Color.Transparent
-                        progressive = HazeProgressive.verticalGradient(easing = LinearEasing, startY = 0f, startIntensity = 1f, endY = topBarHeightPx, endIntensity = 0f)
-                    }
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(statusBarHeightDp + titleBarAreaDp)
-                    // 标题栏必须**不透明**（正文滚上来要被挡住）。炫彩开着时 pageBackground 是空操作
-                    // —— 整页都透明，标题区就跟着透了。改用 pageHeaderBackground：炫彩关=这块底色本身，
-                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
-                    .pageHeaderBackground(colors.Background)
-            )
-        }
+        // 固定高度：实体标题栏与渐进模糊仅切换材质，不切换几何。
+        TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
 
         // ===== 悬浮标题栏（返回键 + 标题 + 右侧调节按钮） =====
         Row(
@@ -245,7 +221,7 @@ fun FavoritesScreen(
         ) {
             if (selectMode) {
                 // 多选态：返回键换成「取消」（退出多选，不离开收藏夹）
-                IconButton(onClick = { exitSelect() }) {
+                HeaderIconButton(onClick = { exitSelect() }) {
                     Icon(Icons.Filled.Close, s.cancel, tint = colors.TextPrimary)
                 }
                 Text(
@@ -258,18 +234,17 @@ fun FavoritesScreen(
                 )
                 Spacer(Modifier.weight(1f))
                 // 批量取消收藏：一次整段取消，不需要二次确认（随时可以再从聊天页收藏回来）
-                TextButton(
+                HeaderTextButton(
                     onClick = {
-                        viewModel.unfavoriteItems(selectedItems)
-                        exitSelect()
+                        showDeleteFavoriteConfirm = true
                     },
                     enabled = selectedItems.isNotEmpty()
                 ) {
                     Text(s.unfavorite, color = if (selectedItems.isEmpty()) colors.TextTertiary else colors.Primary)
                 }
             } else {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.TextPrimary)
+                HeaderIconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
                 }
                 Text(
                     s.favorites,
@@ -279,7 +254,7 @@ fun FavoritesScreen(
                 )
                 Spacer(Modifier.weight(1f))
                 // 调节按钮：点击开/关二级菜单
-                IconButton(onClick = {
+                HeaderIconButton(onClick = {
                     showTuneMenu = !showTuneMenu
                     if (showTuneMenu) tuneLevel = TuneLevel.MAIN
                 }) {
@@ -289,10 +264,19 @@ fun FavoritesScreen(
         }
 
         // ===== 调节菜单（窗口内悬浮，高级材质下真磨砂玻璃糊住背后列表；从右上角缩放淡入） =====
+        SheetPanel(visible = showDeleteFavoriteConfirm,
+            onDismiss = { showDeleteFavoriteConfirm = false }, title = s.unfavorite,
+            colors = colors, isDark = isDark, advancedMaterial = advancedMaterial, hazeState = hazeState,
+            confirmLabel = s.confirm, confirmDanger = false,
+            onConfirm = {
+                showDeleteFavoriteConfirm = false
+                viewModel.unfavoriteItems(selectedItems)
+                exitSelect()
+            }) { Text(s.unfavoriteKeepsOriginal, color = colors.TextSecondary) }
         AnimatedVisibility(
             visible = showTuneMenu && !selectMode,
-            enter = fadeIn(tween(120)),
-            exit = fadeOut(tween(120))
+            enter = fadeIn(FreeChatAnimation.overlayFadeIn),
+            exit = fadeOut(FreeChatAnimation.overlayFadeOut)
         ) {
             // 全屏透明拦截层：点击菜单外部关闭
             Box(
@@ -347,9 +331,10 @@ private fun TuneMenu(
     advancedMaterial: Boolean,
     topPadding: Dp
 ) {
+    val travel = with(LocalDensity.current) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.roundToPx() }
     Box(
         modifier = modifier
-            .padding(top = topPadding, end = 12.dp)
+            .padding(top = topPadding, end = 12.dp, start = 16.dp, bottom = 16.dp)
             .width(220.dp)
             .then(
                 if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, RoundedCornerShape(20.dp), elevation = 6.dp)
@@ -360,9 +345,7 @@ private fun TuneMenu(
             targetState = level,
             transitionSpec = {
                 val forward = targetState != TuneLevel.MAIN
-                val enter = if (forward) slideInHorizontally { it / 2 } + fadeIn() else slideInHorizontally { -it / 3 } + fadeIn()
-                val exit = if (forward) slideOutHorizontally { -it / 3 } + fadeOut() else slideOutHorizontally { it / 2 } + fadeOut()
-                (enter togetherWith exit).using(SizeTransform(clip = false))
+                FreeChatAnimation.pageTransition(forward, travel, animateSize = true)
             },
             label = "tune_menu"
         ) { lvl ->

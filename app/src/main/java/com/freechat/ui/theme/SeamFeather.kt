@@ -30,7 +30,20 @@ import androidx.compose.ui.graphics.graphicsLayer
  * @param fromEnd true = 在右端淡出（侧滑页，缝在它右边缘）；false = 在左端淡出（Chat 页，缝在它左边缘）
  */
 fun Modifier.seamFeather(featherPx: Float, fromEnd: Boolean): Modifier {
-    if (featherPx <= 0.5f) return this
+    return hazeEdgeFeather(seamFeatherPx = featherPx, fromEnd = fromEnd)
+}
+
+/**
+ * 在模糊结果上做最终合成羽化，而非仅减小采样半径。最下缘的噪点、色差和微小模糊核
+ * 都一起退回原始清晰内容，避免半径接近零时仍出现一条整宽的可见边界。
+ * 水平接缝和纵向下缘共用一个限于模糊带的离屏层；缓存蒙版，不增加高斯采样或逐帧分配。
+ */
+internal fun Modifier.hazeEdgeFeather(
+    bottomFeatherPx: Float = 0f,
+    seamFeatherPx: Float = 0f,
+    fromEnd: Boolean = false,
+): Modifier {
+    if (bottomFeatherPx <= 0.5f && seamFeatherPx <= 0.5f) return this
     return this
         .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
         // 用 drawWithCache 而不是 drawWithContent（1.0.49 性能）：停点表与 Brush 原来是在**每一帧的
@@ -39,12 +52,21 @@ fun Modifier.seamFeather(featherPx: Float, fromEnd: Boolean): Modifier {
         // 缓存块只在**尺寸变化**时重跑一次（这里不读任何 State），绘制块里只剩一句 drawRect。
         .drawWithCache {
             val w = size.width
-            val f = if (w <= 0f) 0f else (featherPx / w).coerceIn(0f, 1f)
-            val brush = if (f <= 0f) null else buildSeamBrush(f, w, fromEnd)
+            val f = if (w <= 0f || seamFeatherPx <= 0.5f) 0f else (seamFeatherPx / w).coerceIn(0f, 1f)
+            val seamBrush = if (f <= 0f) null else buildSeamBrush(f, w, fromEnd)
+            val bottomSpan = bottomFeatherPx.coerceIn(0f, size.height)
+            val bottomBrush = if (bottomSpan <= 0.5f) null else Brush.verticalGradient(
+                colors = List(33) { index ->
+                    Color.Black.copy(alpha = HazeSpec.topOutputAlpha((32 - index) / 32f))
+                },
+                startY = size.height - bottomSpan,
+                endY = size.height,
+            )
             onDrawWithContent {
                 drawContent()
-                // 只保留 alpha 通道参与合成（DstIn）：模糊带内容按水平斜坡淡出
-                if (brush != null) drawRect(brush = brush, blendMode = BlendMode.DstIn)
+                // 分别乘上两轴的 alpha；不得把蒙版作用到正文或标题前景。
+                if (seamBrush != null) drawRect(brush = seamBrush, blendMode = BlendMode.DstIn)
+                if (bottomBrush != null) drawRect(brush = bottomBrush, blendMode = BlendMode.DstIn)
             }
         }
 }

@@ -21,7 +21,7 @@ object PerConvStore {
     fun load(): Map<String, PerConvSettings> = runCatching {
         LocalStore.readText(LocalStore.perConvFile())
             ?.let { AppJson.gson.fromJson<Map<String, PerConvSettings>>(it, type) }
-    }.getOrNull() ?: emptyMap()
+    }.getOrNull()?.mapValues { (_, value) -> value.healed() } ?: emptyMap()
 
     /** 整份覆盖写。`ChatViewModel` 用它 —— 它内存里那份就是当前完整状态 */
     fun save(map: Map<String, PerConvSettings>) {

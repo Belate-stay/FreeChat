@@ -21,18 +21,12 @@ android {
         applicationId = "com.freechat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 165
-        versionName = "1.0.65"
+        versionCode = 201
+        versionName = "1.1.0"
 
         buildConfigField("String", "XIAOMI_API_KEY", "\"${secretKey("XIAOMI_API_KEY")}\"")
         buildConfigField("String", "DOUBAO_API_KEY", "\"${secretKey("DOUBAO_API_KEY")}\"")
         buildConfigField("String", "MIMO_TTS_KEY", "\"${secretKey("MIMO_TTS_KEY")}\"")
-        // SerpAPI 支持多 key：免费版 250 次/月/账号，串起来当一个池子用
-        // （见 data/SerpApiPool.kt —— 哪个有额度用哪个，429 自动换下一个）。
-        // 以后再加账号：secrets.properties 加一行 SERPAPI_API_KEY_3 + 这里加一行 buildConfigField
-        // + SerpApiPool.KEYS 里加一个 BuildConfig 引用即可，三处，别漏。
-        buildConfigField("String", "SERPAPI_API_KEY", "\"${secretKey("SERPAPI_API_KEY")}\"")
-        buildConfigField("String", "SERPAPI_API_KEY_2", "\"${secretKey("SERPAPI_API_KEY_2")}\"")
     }
 
     buildTypes {
@@ -63,6 +57,8 @@ android {
 }
 
 dependencies {
+    // 共享纯逻辑模块（model 数据类 + 拟人机制纯函数）——包名不变，跨模块拆包是刻意的
+    implementation(project(":freechat-core"))
     val composeBom = platform("androidx.compose:compose-bom:2025.06.00")
     implementation(composeBom)
 
@@ -90,6 +86,8 @@ dependencies {
 
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")
+    // 本地二维码编码（微信 ClawBot 绑定：iLink 返回的是要编码的内容，不是图片）
+    implementation("com.google.zxing:core:3.5.3")
 
     // Coil — 图片加载
     implementation("io.coil-kt:coil-compose:2.6.0")
@@ -100,4 +98,6 @@ dependencies {
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

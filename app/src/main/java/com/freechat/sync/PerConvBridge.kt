@@ -17,6 +17,7 @@ import com.google.gson.JsonPrimitive
  * |---|---|
  * | `enableWebSearch` / `showThinking` / `autoSummarizeMemory` / `tempMode` / `lengthMode` | **同步** —— 它们是这条对话「怎么回话」的规矩，换台设备该照旧生效 |
  * | `languageModelId` / `visualModelId` / `visionModelId` / `ttsModelId` / `asrModelId` | **不同步** —— 存的是**本机**自定义模型的 id，另一台上没有这个模型，同步过去只会选中一个点不通的项 |
+ * | `deepThinkByModel`（1.0.75 双键覆盖） | **不同步** —— key 就是本机模型 id，跟上一行同一个理由。老的 `deepThinking` 布尔照旧同步（遗留兜底） |
  *
  * 这跟 `SettingsBridge` 里「模型选择不同步」是同一条理由，只是这里还多一层：
  * 同一个账号下网页端和安卓端**各自的模型库根本不一样**，传过去连"点不通"都算不上，
@@ -36,13 +37,19 @@ object PerConvBridge {
     // 名字跟全局设置那张表（[SettingsBridge]）**故意用同一套** —— 同一件事在两端、
     // 在两个同步对象里都该叫同一个名字，否则以后加字段时两处对不上没人看得出来。
     const val K_WEB_SEARCH = "enableWebSearch"
+    const val K_DEEP_THINK = "deepThinking"
     const val K_SHOW_THINKING = "showThinking"
     const val K_AUTO_MEM = "autoSummarizeMemory"
     const val K_TEMP = "tempMode"
     const val K_LENGTH = "lengthMode"
+    const val K_MOOD = "lastMood"
+    const val K_MOOD_AT = "moodAtMs"
+    const val K_ATMOSPHERE = "atmosphere"
+    const val K_WARMTH = "warmth"
+    const val K_ATMO_SOURCES = "atmosphereSourceMessageIds"
 
     /** 参与同步的键。**这里就是白名单** —— 不在表里的字段（那几个模型 id）连读都不会去读 */
-    private val SYNCED = listOf(K_WEB_SEARCH, K_SHOW_THINKING, K_AUTO_MEM, K_TEMP, K_LENGTH)
+    private val SYNCED = listOf(K_WEB_SEARCH, K_DEEP_THINK, K_SHOW_THINKING, K_AUTO_MEM, K_TEMP, K_LENGTH, K_MOOD, K_MOOD_AT, K_ATMOSPHERE, K_WARMTH, K_ATMO_SOURCES)
 
     // ============================================================
     //  本地 → 线上
@@ -52,12 +59,18 @@ object PerConvBridge {
     fun toWire(s: PerConvSettings): JsonObject {
         val o = JsonObject()
         s.enableWebSearch?.let { o.add(K_WEB_SEARCH, JsonPrimitive(it)) }
+        s.deepThinking?.let { o.add(K_DEEP_THINK, JsonPrimitive(it)) }
         s.showThinking?.let { o.add(K_SHOW_THINKING, JsonPrimitive(it)) }
         s.autoSummarizeMemory?.let { o.add(K_AUTO_MEM, JsonPrimitive(it)) }
         s.tempModeOrdinal?.let { i -> TempMode.entries.getOrNull(i) }
             ?.let { o.add(K_TEMP, JsonPrimitive(SettingsBridge.tempModeWire(it))) }
         s.lengthModeOrdinal?.let { i -> LengthMode.entries.getOrNull(i) }
             ?.let { o.add(K_LENGTH, JsonPrimitive(SettingsBridge.lengthModeWire(it))) }
+        if (s.lastMood.isNotBlank()) o.add(K_MOOD, JsonPrimitive(s.lastMood))
+        if (s.moodAtMs > 0) o.add(K_MOOD_AT, JsonPrimitive(s.moodAtMs))
+        if (s.atmosphere.isNotBlank()) o.add(K_ATMOSPHERE, JsonPrimitive(s.atmosphere))
+        if (s.warmth != 0) o.add(K_WARMTH, JsonPrimitive(s.warmth))
+        if (s.atmosphereSourceMessageIds.isNotEmpty()) o.add(K_ATMO_SOURCES, com.freechat.data.AppJson.gson.toJsonTree(s.atmosphereSourceMessageIds))
         return o
     }
 
@@ -77,10 +90,17 @@ object PerConvBridge {
      */
     fun mergeIntoLocal(local: PerConvSettings, remote: JsonObject): PerConvSettings = local.copy(
         enableWebSearch = remote.bool(K_WEB_SEARCH),
+        deepThinking = remote.bool(K_DEEP_THINK),
         showThinking = remote.bool(K_SHOW_THINKING),
         autoSummarizeMemory = remote.bool(K_AUTO_MEM),
         tempModeOrdinal = remote.str(K_TEMP)?.let { SettingsBridge.tempModeFromWire(it) }?.ordinal,
-        lengthModeOrdinal = remote.str(K_LENGTH)?.let { SettingsBridge.lengthModeFromWire(it) }?.ordinal
+        lengthModeOrdinal = remote.str(K_LENGTH)?.let { SettingsBridge.lengthModeFromWire(it) }?.ordinal,
+        lastMood = remote.str(K_MOOD) ?: "",
+        moodAtMs = remote.get(K_MOOD_AT)?.takeIf { it.isJsonPrimitive }?.asJsonPrimitive?.let { runCatching { it.asLong }.getOrNull() } ?: 0L,
+        atmosphere = remote.str(K_ATMOSPHERE) ?: "",
+        warmth = remote.get(K_WARMTH)?.takeIf { it.isJsonPrimitive }?.asJsonPrimitive?.let { runCatching { it.asInt }.getOrNull() } ?: 0,
+        atmosphereSourceMessageIds = remote.get(K_ATMO_SOURCES)?.takeIf { it.isJsonArray }?.asJsonArray
+            ?.mapNotNull { it.takeIf { v -> v.isJsonPrimitive && v.asJsonPrimitive.isString }?.asString }.orEmpty()
     )
 
     /** 推之前先并上云端那份：PUT 是整对象替换，丢掉不认识的键就会和别的端来回抹（同 [SettingsBridge.unionForPush]） */

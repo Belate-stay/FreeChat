@@ -15,6 +15,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.freechat.model.ModelInfo
+import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.theme.*
 
 @Composable
@@ -55,7 +56,7 @@ fun ModelChip(
     val s = com.freechat.i18n.LocalStrings.current
     val borderColor by animateColorAsState(
         targetValue = if (isSelected) colors.Primary else colors.ChipBorder,
-        animationSpec = tween(200),
+        animationSpec = FreeChatAnimation.controlSpec(),
         label = "chip_border"
     )
 

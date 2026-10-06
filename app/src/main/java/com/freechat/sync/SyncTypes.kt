@@ -25,6 +25,12 @@ object SyncKind {
      */
     const val PCSET = "pcset"
 
+    /**
+     * 1.0.99.3 图片对象（内容寻址）：id = 原图内容指纹（[ImageSync]），data = base64 压缩载荷。
+     * 引用它的消息/角色卡写 `img:<hash>` 占位；同一张图全端只存一份，重复上传幂等。
+     */
+    const val IMG = "img"
+
     /** 设置只有一条，id 写死 —— 两端约定 */
     const val SETTINGS_ID = "global"
 }
@@ -91,6 +97,26 @@ data class TokenInfo(
     val createdAt: Long = 0,
     val lastUsed: Long = 0,
     val expiresAt: Long = 0
+)
+
+/** 分享在线网页：创建结果。[url] 直接复制/转发给微信等媒介，对方免装 App 免登录即可看 */
+data class ShareLinkResult(
+    val id: String = "",
+    val url: String = "",
+    val createdAt: Long = 0
+)
+
+/** 「我的分享」列表行（撤销后 revoked=true，链接随即 404） */
+data class ShareInfo(
+    val id: String = "",
+    val title: String = "",
+    val createdAt: Long = 0,
+    val messageCount: Int = 0,
+    val revoked: Boolean = false
+)
+
+data class ShareListResult(
+    val shares: List<ShareInfo> = emptyList()
 )
 
 /**

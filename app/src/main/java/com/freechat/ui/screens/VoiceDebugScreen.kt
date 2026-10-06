@@ -1,5 +1,9 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.components.HeaderIconButton
+import com.freechat.ui.components.TopBarBackdrop
+import com.freechat.ui.components.TopBarBackdropSource
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -11,6 +15,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import com.freechat.ui.components.NeumorphicSwitch as Switch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,9 +29,9 @@ import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.viewmodel.ChatViewModel
-import com.freechat.ui.theme.LocalLiquidMode
-import com.freechat.ui.theme.pageHeaderBackground
-import androidx.compose.ui.graphics.Color
+import com.freechat.ui.theme.HazeSpec
+import com.freechat.ui.theme.pageBackground
+import com.freechat.ui.theme.hazeBackground
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 
@@ -49,40 +54,20 @@ fun VoiceDebugScreen(
 
     val advancedMaterial = LocalAdvancedMaterial.current
     val hazeState = rememberHazeState()
+    val statusBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val topBandHeight = HazeSpec.topBandHeightDp(statusBarHeight)
 
-    // 外层套一个 Box：音色选择弹层要挂在它最后一个子节点上（SheetPanel 靠 align 贴底、
-    // 铺满整屏，挂进 Scaffold 的 Column 里会被约束住）
-    Box(Modifier.fillMaxSize()) {
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(s.voiceDebug, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 13.6.dp)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack, modifier = Modifier.padding(top = 13.6.dp)) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.TextPrimary)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-                modifier = Modifier
-                    .height(96.dp)
-                    // 高级材质：顶栏真·透明（沉浸，内容从标题下穿过去）。
-                    // 关掉高级材质后顶栏必须**挡住**内容（跟其它页面同一条规矩）——
-                    // 所以这里不能用颜色，得用 pageHeaderBackground：炫彩关=这块底色本身，
-                    // 炫彩开=钉在屏幕上的一份流光副本，两种情况下都与页面自身上下同色。
-                    .then(if (advancedMaterial) Modifier else Modifier.pageHeaderBackground(colors.Background))
-            )
-        },
-        containerColor = if (LocalLiquidMode.current) Color.Transparent else colors.Background
-    ) { padding ->
+    // 与主设置页共用标题栏位置、渐进模糊、按钮材质和内容留白。
+    CompositionLocalProvider(LocalSettingsHazeState provides hazeState) {
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        TopBarBackdropSource(hazeState, colors.Background, topBandHeight)
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp)
+                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                 .verticalScroll(rememberScrollState())
-                // 弹层要糊的是这一页的内容，所以这一页得先当一次模糊源
-                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState) else Modifier),
+                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeight), bottom = 32.dp)
+                .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // 自动朗读
@@ -195,6 +180,15 @@ fun VoiceDebugScreen(
 
             Spacer(modifier = Modifier.height(32.dp))
         }
+
+    TopBarBackdrop(hazeState, colors.Background, topBandHeight)
+    Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(top = 8.8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        HeaderIconButton(onClick = onBack) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
+        }
+        Text(s.voiceDebug, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.titleLarge)
     }
 
     // 音色选择 —— 窗口内的底部磨砂哑光玻璃弹层。
@@ -221,6 +215,7 @@ fun VoiceDebugScreen(
                 }
             )
         }
+    }
     }
     }
 }

@@ -6,12 +6,22 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.*
 import androidx.compose.animation.core.Spring.DampingRatioNoBouncy
 import androidx.compose.animation.core.Spring.StiffnessMedium
 import androidx.compose.animation.core.Spring.StiffnessMediumLow
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.ui.Alignment
 
 /**
  * 统一动画系统
@@ -32,14 +42,21 @@ object FreeChatAnimation {
     // ==================== 时长标记 (ms) ====================
     const val DURATION_INSTANT = 100   // 瞬时反馈
     const val DURATION_FAST = 180      // 微交互：按钮按压、图标切换
-    const val DURATION_NORMAL = 280    // 常规：气泡入场、卡片显隐
-    const val DURATION_SLOW = 360      // 强调：页面过渡
-    const val DURATION_PAGE = 350      // 页面切换
+    const val DURATION_NORMAL = 320    // 常规卡片与材质，保留可感知的收尾
+    const val DURATION_SLOW = 400      // 强调：页面过渡
+    const val DURATION_PAGE = 380      // 页面切换
+    const val DURATION_PRESS = 90      // 按下立即反馈，松手保留速度自然回位
+    const val DURATION_MESSAGE = 460
+    const val DURATION_REPLACE = 300
+    const val DURATION_DISMISS = 240
+    const val DURATION_DISCLOSURE = 380
+    const val DURATION_COLLAPSE = 280
 
     // ==================== 缓动曲线 ====================
     val easeOut = FastOutSlowInEasing
     val easeEnter = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1.0f)    // 弹性入场
     val easeExit = CubicBezierEasing(0.3f, 0.0f, 0.8f, 0.15f)      // 加速退场
+    val arrivalEase = CubicBezierEasing(0.20f, 0.48f, 0.25f, 1f)
 
     // ==================== iOS 手感曲线（1.0.49） ====================
     // 参考 UIKit / Core Animation 的默认缓动。人眼对「匀速」和「收尾撞墙」最敏感：
@@ -51,6 +68,72 @@ object FreeChatAnimation {
     val iosEaseOut = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1.0f)
     /** 加速离场（对应 `CAMediaTimingFunction(0.4, 0, 1, 1)`）：淡出/收起/滑出用它 */
     val iosEaseIn = CubicBezierEasing(0.4f, 0.0f, 1.0f, 1.0f)
+
+    // 材质、开关和浮层共享同一套节奏；不随流光开关改变。
+    val materialTween = tween<Float>(DURATION_NORMAL, easing = iosEaseOut)
+    val controlTween = tween<Float>(DURATION_FAST, easing = iosEaseOut)
+    val controlPositionTween = tween<Dp>(DURATION_FAST, easing = iosEaseOut)
+    val controlPositionSpring = spring<Dp>(dampingRatio = 0.92f, stiffness = 650f)
+    val pressDown = tween<Float>(DURATION_PRESS, easing = iosEaseOut)
+    val pressRelease = spring<Float>(dampingRatio = 0.82f, stiffness = 850f, visibilityThreshold = 0.001f)
+    val thumbSpring = spring<Float>(dampingRatio = 0.82f, stiffness = 550f, visibilityThreshold = 0.001f)
+    val imageGradientCycle = tween<Float>(7_200, easing = LinearEasing)
+    fun <T> controlSpec(): TweenSpec<T> = tween(DURATION_FAST, easing = iosEaseOut)
+    val overlayFadeIn = tween<Float>(200, easing = iosEaseOut)
+    val overlayFadeOut = tween<Float>(160, easing = iosEaseIn)
+    val revealEnter = tween<Float>(DURATION_REPLACE, easing = arrivalEase)
+    val revealExit = tween<Float>(DURATION_DISMISS, easing = iosEaseIn)
+    val highlightOut = tween<Float>(520, easing = iosEaseOut)
+    val streamFollowTween = tween<Float>(120, easing = iosEaseOut)
+    val disclosureFollowTween = tween<Float>(DURATION_DISCLOSURE, easing = iosEaseOut)
+    val inputShowTween = tween<Float>(360, easing = arrivalEase)
+    val inputHideTween = tween<Float>(280, easing = iosEaseInOut)
+    fun sheetEnter(): EnterTransition =
+        slideInVertically(tween(DURATION_SLOW, easing = arrivalEase)) { it } + fadeIn(overlayFadeIn)
+    fun sheetExit(): ExitTransition =
+        slideOutVertically(tween(240, easing = iosEaseIn)) { it } + fadeOut(overlayFadeOut)
+    fun expandEnter(): EnterTransition =
+        expandVertically(tween(DURATION_DISCLOSURE, easing = iosEaseOut), expandFrom = Alignment.Top) +
+            fadeIn(tween(DURATION_DISCLOSURE, easing = iosEaseOut))
+    fun expandExit(): ExitTransition =
+        shrinkVertically(tween(DURATION_COLLAPSE, easing = iosEaseInOut), shrinkTowards = Alignment.Top) +
+            fadeOut(tween(DURATION_COLLAPSE, easing = iosEaseInOut))
+
+    /** 不改变卡片样式；展开高度与贴底定位使用同一时间线，避免两个弹簧争抢视口。 */
+    fun disclosureEnter(): EnterTransition = expandEnter()
+    fun disclosureExit(): ExitTransition = expandExit()
+
+    fun quickLocateEnter(distancePx: Int): EnterTransition =
+        slideInHorizontally(spring(dampingRatio = 0.86f, stiffness = 520f)) { distancePx } +
+            scaleIn(initialScale = 0.94f, transformOrigin = TransformOrigin(1f, 0.5f),
+                animationSpec = spring(dampingRatio = 0.86f, stiffness = 520f)) + fadeIn(overlayFadeIn)
+    fun quickLocateExit(distancePx: Int): ExitTransition =
+        slideOutHorizontally(tween(DURATION_DISMISS, easing = iosEaseIn)) { distancePx } +
+            scaleOut(targetScale = 0.96f, transformOrigin = TransformOrigin(1f, 0.5f),
+                animationSpec = tween(DURATION_DISMISS, easing = iosEaseIn)) + fadeOut(overlayFadeOut)
+
+    /** 短距离表达前进/返回，不缩放整页文字，也不逐帧重测整张页面。 */
+    fun pageTransition(forward: Boolean, distancePx: Int, animateSize: Boolean = false): ContentTransform {
+        val direction = if (forward) 1 else -1
+        return ContentTransform(
+            slideInHorizontally(pageSlide) { distancePx * direction } + fadeIn(overlayFadeIn),
+            slideOutHorizontally(pageSlideOut) { -distancePx * direction / 3 } + fadeOut(pageFadeOutFast),
+            sizeTransform = SizeTransform(clip = false) { _, _ ->
+                if (animateSize) tween(DURATION_NORMAL, easing = iosEaseOut) else snap()
+            })
+    }
+
+    fun contentReplacement(): ContentTransform =
+        ContentTransform(fadeIn(tween(DURATION_REPLACE, easing = iosEaseOut)), fadeOut(overlayFadeOut),
+            sizeTransform = SizeTransform(clip = false) { _, _ -> snap() })
+
+    fun bodyEnter(distancePx: Int): EnterTransition =
+        slideInVertically(tween(DURATION_NORMAL, easing = arrivalEase)) { distancePx } + fadeIn(overlayFadeIn)
+
+    fun horizontalExpandEnter(): EnterTransition =
+        androidx.compose.animation.expandHorizontally(tween(DURATION_REPLACE, easing = iosEaseOut)) + fadeIn(overlayFadeIn)
+    fun horizontalExpandExit(): ExitTransition =
+        androidx.compose.animation.shrinkHorizontally(tween(DURATION_DISMISS, easing = iosEaseIn)) + fadeOut(overlayFadeOut)
 
     // ==================== 侧滑页「当前对话」竖条 ====================
     /**
@@ -80,24 +163,20 @@ object FreeChatAnimation {
 
     // ==================== 菜单 / 浮层卡片（全 App 一套） ====================
     /**
-     * 菜单卡片入场：88% 放大到 100% + 淡入，200ms 减速入位。
-     *
-     * 三个参数都是「手感最贵」的位置，别在各处再各写一套：
-     * - 起始缩放 0.88：比 0.9 更有「从锚点长出来」的感觉，但不会糊成一团；
-     * - 200ms：再快像闪现，再慢像卡顿（人眼对 150–250ms 的缩放最不敏感于时长、最敏感于曲线）；
-     * - 减速曲线：起步就快、收尾稳稳停住；用 Material 那条中段发飘的曲线，收尾会有一下「顿住」。
+     * 从触发点以 94% 轻轻长出；接近临界阻尼的弹簧支持连续打断和反向。
+     * 卡面、内容和阴影在同一父图层内同步变换，不单独延迟阴影。
      */
     fun menuEnter(origin: TransformOrigin): EnterTransition =
-        scaleIn(initialScale = 0.88f, transformOrigin = origin, animationSpec = tween(200, easing = iosEaseOut)) +
-            fadeIn(tween(200, easing = iosEaseOut))
+        scaleIn(initialScale = 0.94f, transformOrigin = origin,
+            animationSpec = spring(dampingRatio = 0.9f, stiffness = 600f)) + fadeIn(overlayFadeIn)
 
     /**
-     * 菜单卡片退场：缩到 92% + 淡出，150ms 加速离场。
+     * 菜单卡片退场：缩到 96% + 淡出，180ms 加速离场。
      * 退场一定要比入场快 —— 用户已经做完了决定，多留一毫秒都是拖沓。
      */
     fun menuExit(origin: TransformOrigin): ExitTransition =
-        scaleOut(targetScale = 0.92f, transformOrigin = origin, animationSpec = tween(150, easing = iosEaseIn)) +
-            fadeOut(tween(150, easing = iosEaseIn))
+        scaleOut(targetScale = 0.96f, transformOrigin = origin,
+            animationSpec = tween(DURATION_DISMISS, easing = iosEaseIn)) + fadeOut(overlayFadeOut)
 
     // ==================== Tween 规格 ====================
     val fastTween = tween<Float>(DURATION_FAST, easing = easeOut)
@@ -107,8 +186,8 @@ object FreeChatAnimation {
 
     /** 消息气泡入场：垂直滑入 + 淡入 — iOS 风格从容入位 */
     val messageEnterTween = tween<Float>(
-        durationMillis = 420,
-        easing = CubicBezierEasing(0.17f, 0.84f, 0.22f, 1.0f)  // iOS style: quick start, gentle settle
+        durationMillis = DURATION_MESSAGE,
+        easing = arrivalEase
     )
     /** 消息淡入 — 与滑动同步 */
     val messageFadeTween = tween<Float>(
@@ -134,6 +213,9 @@ object FreeChatAnimation {
     val pageSlide = tween<IntOffset>(DURATION_PAGE, easing = easeOut)
     /** 页面快速滑出 */
     val pageSlideOut = tween<IntOffset>(DURATION_FAST, easing = easeExit)
+    /** Full-screen navigation uses float render-layer translation, not layout offsets. */
+    val pageLayerSlide = tween<Float>(DURATION_PAGE, easing = easeOut)
+    val pageLayerSlideOut = tween<Float>(DURATION_FAST, easing = easeExit)
     /** 消息垂直入场 */
     val messageSlideIn = tween<IntOffset>(
         durationMillis = 260,
@@ -165,8 +247,8 @@ object FreeChatAnimation {
     )
     /** 发送按钮 — 干脆的按压反馈 */
     val sendPressSpring = spring<Float>(
-        dampingRatio = DampingRatioNoBouncy,
-        stiffness = StiffnessMedium
+        dampingRatio = 0.82f,
+        stiffness = 850f
     )
     /** 组件弹性入场（建议配合 scale/offset 使用） */
     val bounceIn = spring<Float>(
@@ -175,14 +257,12 @@ object FreeChatAnimation {
     )
 
     // ==================== 常用动画常量 ====================
-    /** 气泡初始上浮偏移比例（相对自身高度） */
-    const val BUBBLE_RISE_FRACTION = 0.5f
     /** 抽屉手势触发阈值比例 */
     const val DRAWER_SWIPE_THRESHOLD = 0.2f
     /** 遮罩最大不透明度 */
     const val SCRIM_MAX_ALPHA = 0.4f
     /** 发送按钮按压缩放 */
-    const val SEND_SCALE_PRESSED = 0.88f
+    const val SEND_SCALE_PRESSED = 0.94f
 
     // ==================== 悬浮输入框动画 ====================
     /** 输入框滑出屏幕（向下隐藏） */
@@ -299,7 +379,7 @@ object FreeChatAnimation {
     /** 按住录音时输入框向右收起 — 非线性"灵动"曲线，参考 Gemini/DeepSeek 语音交互 */
     val voiceCollapseTween = tween<Float>(
         durationMillis = 280,
-        easing = CubicBezierEasing(0.32f, 0.0f, 0.67f, 0.0f)
+        easing = iosEaseInOut
     )
     /** 波形条电平采样后的平滑过渡（消除电平跳变的毛刺） */
     val voiceLevelTween = tween<Float>(

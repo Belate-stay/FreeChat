@@ -16,8 +16,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,47 +25,53 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.freechat.data.TtsController
+import com.freechat.data.SearchPresentation
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.Message
 import com.freechat.model.MultiSelectAction
 import com.freechat.model.Role
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.MotionPolicy
 import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.LocalChatFontFamily
 import com.freechat.ui.theme.LocalLatinFontFamily
 import com.freechat.ui.theme.LocalFontScale
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
+import com.freechat.ui.theme.LocalLiquidMode
+import com.freechat.ui.theme.LocalColorTheme
+import com.freechat.model.ColorTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.roundToInt
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URL
@@ -79,9 +83,13 @@ fun ChatBubble(
     isDark: Boolean,
     modifier: Modifier = Modifier,
     liveThinkingMs: Long = 0L,
+    generationLabel: String? = null,
     isThinking: Boolean = false,
     showThinking: Boolean = true,
+    showSearchSources: Boolean = false,
+    disclosureCallbacks: DisclosureCallbacks = DisclosureCallbacks.None,
     onRegenerate: (() -> Unit)? = null,
+    onDeleteScene: (() -> Unit)? = null,
     onSpeak: (() -> Unit)? = null,
     onQuote: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
@@ -94,18 +102,34 @@ fun ChatBubble(
     onToggleSelect: (() -> Unit)? = null,
     // 剧情补足：AI 回复不套气泡框，像小说正文一样以纯文本流直接铺开（左对齐满宽、不解析 Markdown）。
     // 只影响 AI 侧；用户消息仍带气泡，方便区分「谁说的」和「谁写的」。
-    textFlow: Boolean = false
+    textFlow: Boolean = false,
+    emphasizeDialogue: Boolean = false
 ) {
     val colors = LocalFreeChatColors.current
+    val companionFill = lerp(colors.Background, colors.SurfaceVariant,
+        if (LocalLiquidMode.current) 1f else 0.6f).copy(alpha = 1f)
     val s = LocalStrings.current
     val isUser = message.role == Role.USER
     val isCompanion = message.mode == com.freechat.model.ChatMode.COMPANION
+    val display = remember(message.content, message.searchSources, message.answerLinksRequested) {
+        SearchPresentation.forDisplay(message.content, message.searchSources, message.answerLinksRequested)
+    }
+    val monochrome = LocalColorTheme.current == ColorTheme.WHITE
+    val companionText = remember(display.answer, emphasizeDialogue, colors.Primary, monochrome,
+        isDark, message.isStreaming, highlightKeyword, highlightColor) {
+        val base = if (emphasizeDialogue) NarrativeDialogueText.emphasize(
+            AnnotatedString(display.answer), colors.Primary, monochrome, isDark, message.isStreaming
+        ) else AnnotatedString(display.answer)
+        buildHighlightedText(display.answer, highlightKeyword, highlightColor, base)
+    }
     // 纯图片消息（只有图、没有正文）：操作栏照常显示（复制/引用/收藏/删除…都还有意义），
     // 唯独隐藏「分享」——单张图片直接长按下载保存即可，做成美化长图分享没有意义。
     val imageOnly: Boolean = (
         message.imagePaths.orEmpty().isNotEmpty() || message.imageUrls.orEmpty().isNotEmpty()
         ) && message.content.isBlank()
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val sourceLinkColor = readableLinkBlue()
     val scale = LocalFontScale.current  // 字号联动：气泡宽度随字号缩放
     var fullscreenImage by remember { mutableStateOf<String?>(null) }
     var fullscreenIsLocal by remember { mutableStateOf(false) }
@@ -116,7 +140,7 @@ fun ChatBubble(
     // 复制消息到剪贴板：AI 回复先去掉 Markdown 标识符再复制（纯文本，排列与显示一致）
     val copyMessage = {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val text = if (isUser) message.content else markdownToPlainText(message.content)
+        val text = if (isUser) message.content else markdownToPlainText(display.answer)
         clipboard.setPrimaryClip(ClipData.newPlainText("message", text))
         Toast.makeText(context, s.copied, Toast.LENGTH_SHORT).show()
     }
@@ -145,18 +169,8 @@ fun ChatBubble(
         )
     }
 
-    AnimatedVisibility(
-        visible = true,
-        enter = slideInVertically(
-            animationSpec = FreeChatAnimation.messageSlideIn,
-            initialOffsetY = { (it * FreeChatAnimation.BUBBLE_RISE_FRACTION).toInt() }
-        ) + fadeIn(FreeChatAnimation.messageFadeTween),
-        exit = fadeOut(tween(260)) + shrinkVertically(
-            animationSpec = tween(260, easing = FastOutSlowInEasing),
-            shrinkTowards = Alignment.Top
-        ),
-        modifier = modifier
-    ) {
+    // 入场归聊天列表统一处理；visible=true 的 AnimatedVisibility 本来不会播放入场。
+    Box(modifier) {
       Box {
         if (isUser) {
             // ========== 用户消息 — 图片网格（若有）+ 文本气泡 + 长按 ==========
@@ -243,7 +257,7 @@ fun ChatBubble(
                                             else -> Modifier
                                         }
                                     )
-                                    .background(if (isCompanion) colors.SurfaceVariant.copy(alpha = 0.6f) else colors.UserBubble)
+                                    .background(if (isCompanion) companionFill else colors.UserBubble)
                                     .padding(horizontal = 14.dp, vertical = 10.dp)
                             ) {
                                 SelectionBox(!multiSelectEnabled) {
@@ -320,15 +334,30 @@ fun ChatBubble(
                 }
 
                 // 推理过程显示：与正文同列上下排列（修复思考卡与正文重叠），受「显示思考过程」开关控制
-                if (showThinking && message.reasoningContent.orEmpty().isNotEmpty()) {
-                    ReasoningBubble(message.reasoningContent.orEmpty(), colors)
+                AnimatedVisibility(visible = showThinking && message.reasoningContent.orEmpty().isNotEmpty(),
+                    enter = FreeChatAnimation.bodyEnter(with(LocalDensity.current) { MotionPolicy.BodyRiseDp.dp.roundToPx() }),
+                    exit = fadeOut(FreeChatAnimation.overlayFadeOut)) {
+                  Column {
+                    ReasoningBubble(message.id, message.reasoningContent.orEmpty(), colors, disclosureCallbacks)
                     Spacer(Modifier.height(8.dp))
+                  }
                 }
 
                 // AI 正文
-                if (isCompanion) {
+                val answerTransition = remember(message.id) {
+                    MutableTransitionState(!message.isStreaming && display.answer.isNotBlank())
+                }
+                answerTransition.targetState = display.answer.isNotBlank()
+                AnimatedVisibility(visibleState = answerTransition,
+                    enter = FreeChatAnimation.bodyEnter(with(LocalDensity.current) { MotionPolicy.BodyRiseDp.dp.roundToPx() }),
+                    exit = fadeOut(FreeChatAnimation.overlayFadeOut)) {
+                if (message.sceneVisualization) {
+                    // A visual-only row is a system annotation, not spoken dialogue.
+                    Text(display.answer, style = MaterialTheme.typography.bodySmall,
+                        color = colors.TextSecondary, modifier = Modifier.fillMaxWidth())
+                } else if (isCompanion && display.answer.isNotBlank()) {
                     Text(
-                        buildHighlightedText(message.content, highlightKeyword, highlightColor),
+                        companionText,
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontFamily = LocalChatFontFamily.current,
                             lineBreak = cjkLineBreak
@@ -344,13 +373,13 @@ fun ChatBubble(
                             Modifier
                                 .clip(RoundedCornerShape(16.dp))
                                 .combinedClickable(onClick = {}, onLongClick = { onQuote?.invoke() })
-                                .background(colors.SurfaceVariant.copy(alpha = 0.6f))
+                                .background(companionFill)
                                 .padding(horizontal = 14.dp, vertical = 10.dp)
                         }
                     )
                 } else {
                     MarkdownText(
-                        content = message.content,
+                        content = display.answer,
                         textColor = colors.AiBubbleText,
                         codeBgColor = colors.SurfaceVariant,
                         quoteBarColor = colors.Primary.copy(alpha = 0.5f),
@@ -359,6 +388,7 @@ fun ChatBubble(
                         highlightColor = highlightColor ?: Color.Unspecified,
                         selectionEnabled = !multiSelectEnabled
                     )
+                }
                 }
 
                 // 生成的文档（可点击打开编辑）
@@ -371,64 +401,100 @@ fun ChatBubble(
                     )
                 }
 
+                if (ImageDisplayPolicy.hasMissingResult(message)) MissingGeneratedImageNotice()
+
                 // 生图结果 — 点击可全屏预览
                 if (message.imageUrls.orEmpty().isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     message.imageUrls.forEach { url ->
-                        val isLocalFile = url.startsWith("/")
-                        if (isLocalFile) {
-                            LocalImage(
-                                path = url,
-                                contentDescription = s.imagePreview,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .onGloballyPositioned { coords ->
-                                        val pos = coords.positionInWindow()
-                                        val size = coords.size
-                                        thumbnailRects[url] = androidx.compose.ui.geometry.Rect(
-                                            pos.x, pos.y, pos.x + size.width, pos.y + size.height
-                                        )
-                                    }
-                                    .clickable {
-                                        thumbnailRect = thumbnailRects[url]
-                                        fullscreenImage = url
-                                        fullscreenIsLocal = true
-                                    },
-                                contentScale = ContentScale.FillWidth,
-                                targetMaxDim = 2048
-                            )
-                        } else {
-                            AsyncImage(
-                                model = ImageRequest.Builder(LocalContext.current)
-                                    .data(url)
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = s.imagePreview,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .onGloballyPositioned { coords ->
-                                        val pos = coords.positionInWindow()
-                                        val size = coords.size
-                                        thumbnailRects[url] = androidx.compose.ui.geometry.Rect(
-                                            pos.x, pos.y, pos.x + size.width, pos.y + size.height
-                                        )
-                                    }
-                                    .clickable {
-                                        thumbnailRect = thumbnailRects[url]
-                                        fullscreenImage = url
-                                    },
-                                contentScale = ContentScale.FillWidth
-                            )
+                        key(url) {
+                            GeneratedImage(url, Modifier.padding(vertical = 4.dp)
+                                .onGloballyPositioned { coords ->
+                                    val pos = coords.positionInWindow()
+                                    val size = coords.size
+                                    thumbnailRects[url] = androidx.compose.ui.geometry.Rect(pos.x, pos.y, pos.x + size.width, pos.y + size.height)
+                                }) {
+                                thumbnailRect = thumbnailRects[url]
+                                fullscreenImage = url
+                                fullscreenIsLocal = ImageDisplayPolicy.isLocal(url)
+                            }
                         }
                     }
                 }
 
+                AnimatedVisibility(visible = showSearchSources && display.sources.isNotEmpty(),
+                    enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
+                    Column(Modifier.padding(top = 8.dp)) {
+                        MessageDisclosure("sources:${message.id}", "${s.informationSources} (${display.sources.size})",
+                            initiallyExpanded = false, callbacks = disclosureCallbacks) {
+                            display.sources.forEach { source ->
+                                SelectionBox(!multiSelectEnabled) {
+                                    Column(Modifier.fillMaxWidth().clickable(
+                                        role = androidx.compose.ui.semantics.Role.Button,
+                                        onClickLabel = source.title,
+                                    ) {
+                                        runCatching { uriHandler.openUri(source.url) }.onFailure {
+                                            Toast.makeText(context, it.localizedMessage ?: source.url, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }.heightIn(min = 48.dp).padding(vertical = 6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        Text(source.title, color = sourceLinkColor,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic,
+                                                textDecoration = TextDecoration.Underline))
+                                        Text(source.url, color = colors.TextSecondary, style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (isCompanion && !multiSelectEnabled && (onRegenerate != null || onDeleteScene != null ||
+                    (message.sceneVisualization && !message.modelName.isNullOrBlank()))) {
+                  Row(Modifier.fillMaxWidth().padding(top = 4.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                   if (onRegenerate != null) Row(Modifier.heightIn(min = 48.dp)
+                        .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onRegenerate)
+                        .padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Refresh, s.regenerate, tint = colors.TextTertiary, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(s.regenerate, style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
+                    }
+                   if (onDeleteScene != null) Row(Modifier.heightIn(min = 48.dp)
+                        .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onDeleteScene)
+                        .padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.DeleteOutline, s.deleteMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(s.deleteMessage, style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
+                   }
+                   if (message.sceneVisualization && !message.modelName.isNullOrBlank()) {
+                       Text(message.modelName.orEmpty(), modifier = Modifier.weight(1f), textAlign = TextAlign.End,
+                           style = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalLatinFontFamily.current),
+                           color = colors.TextTertiary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                   }
+                  }
+                }
+
                 // 操作栏 + 模型名（拟人模式不显示，模拟真实气泡对话；多选态整体隐藏）
-                if (!isCompanion && !multiSelectEnabled) {
+                if (message.isStreaming && generationLabel != null) {
+                    // Keep status BELOW readable content so stage changes cannot move the reader.
+                    Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (message.content.isBlank()) SiriOrb(Modifier.size(30.dp), isDark = isDark)
+                        Column {
+                            AnimatedContent(generationLabel, transitionSpec = { FreeChatAnimation.contentReplacement() },
+                                label = "generation_stage") { label ->
+                                Text(label, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                                    color = colors.TextSecondary)
+                            }
+                            Text(formatThinkingTime(liveThinkingMs), style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                                color = colors.TextTertiary)
+                        }
+                    }
+                }
+                if (!message.isStreaming && !isCompanion && !multiSelectEnabled) {
                     Row(
                         modifier = Modifier.padding(top = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -498,16 +564,8 @@ fun ChatBubble(
 
                     // 模型名 + 思考时间
                     if (message.modelName != null) {
-                        Row(
-                            modifier = Modifier.padding(top = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(message.modelName, style = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalLatinFontFamily.current), color = colors.TextTertiary)
-                            val timeMs = if (isThinking && liveThinkingMs > 0) liveThinkingMs else message.thinkingTimeMs
-                            if (timeMs > 0) {
-                                Text(formatThinkingTime(timeMs), style = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalLatinFontFamily.current), color = colors.TextTertiary)
-                            }
-                        }
+                        val timeMs = if (isThinking && liveThinkingMs > 0) liveThinkingMs else message.thinkingTimeMs
+                        MessageAttribution(message.modelName.orEmpty(), timeMs, colors)
                     }
                 }
             }
@@ -530,6 +588,17 @@ fun ChatBubble(
     }
 }
 
+@Composable
+private fun MessageAttribution(model: String, timeMs: Long, colors: FreeChatColors) {
+    val latin = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalLatinFontFamily.current)
+    Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text(model, modifier = Modifier.weight(1f, fill = false), style = latin,
+            color = colors.TextTertiary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (timeMs > 0) Text(formatThinkingTime(timeMs), style = latin, color = colors.TextTertiary)
+    }
+}
+
 // ========== 全屏图片预览 — 从缩略图展开/缩回 + 手势缩放 ==========
 @Composable
 private fun ImagePreviewDialog(
@@ -540,181 +609,14 @@ private fun ImagePreviewDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val s = LocalStrings.current
     val scope = rememberCoroutineScope()
-
-    // 手势状态
-    var gestureScale by remember { mutableStateOf(1f) }
-    var offsetX by remember { mutableStateOf(0f) }
-    var offsetY by remember { mutableStateOf(0f) }
-
-    // 展开/缩回动画进度: 0f=缩略图, 1f=全屏
-    var isClosing by remember { mutableStateOf(false) }
-    val animProgress = remember { Animatable(0f) }
-
-    // 屏幕尺寸
-    val config = LocalConfiguration.current
-    val screenW = config.screenWidthDp.dp
-    val screenH = config.screenHeightDp.dp
-    val screenWPx = with(LocalDensity.current) { screenW.toPx() }
-    val screenHPx = with(LocalDensity.current) { screenH.toPx() }
-
-    // 缩略图/起始位置
-    val origin = originRect ?: androidx.compose.ui.geometry.Rect(
-        screenWPx / 2f - 60f, screenHPx / 2f - 60f,
-        screenWPx / 2f + 60f, screenHPx / 2f + 60f
-    )
-    val originW = origin.width.coerceAtLeast(1f)
-    val originH = origin.height.coerceAtLeast(1f)
-    val originCX = origin.left + originW / 2f
-    val originCY = origin.top + originH / 2f
-    val targetCX = screenWPx / 2f
-    val targetCY = screenHPx / 2f
-
-    // 启动展开动画
-    LaunchedEffect(Unit) {
-        animProgress.animateTo(1f, FreeChatAnimation.imageExpandSpring)
-    }
-
-    // 缩回动画
-    fun startClose() {
-        if (!isClosing) {
-            isClosing = true
+    FullScreenImagePreview(imageSource, isLocal, downloadRef, originRect,
+        onDownload = {
             scope.launch {
-                animProgress.animateTo(0f, FreeChatAnimation.imageShrinkTween)
-                onDismiss()
+                if (isLocal) saveLocalImage(context, downloadRef)
+                else downloadImage(context, downloadRef)
             }
-        }
-    }
-
-    Dialog(
-        onDismissRequest = { startClose() },
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            dismissOnBackPress = true,
-            dismissOnClickOutside = false
-        )
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        gestureScale = (gestureScale * zoom).coerceIn(
-                            FreeChatAnimation.IMAGE_MIN_SCALE,
-                            FreeChatAnimation.IMAGE_MAX_SCALE
-                        )
-                        offsetX += pan.x
-                        offsetY += pan.y
-                    }
-                }
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onDoubleTap = {
-                            gestureScale = if (gestureScale > 1.5f) 1f else FreeChatAnimation.IMAGE_DOUBLE_TAP_SCALE
-                        },
-                        onTap = {
-                            if (gestureScale <= 1.05f) startClose()
-                        }
-                    )
-                }
-        ) {
-            val p = animProgress.value
-            val pEased = CubicBezierEasing(0.32f, 0.0f, 0.67f, 0.0f).transform(p)
-
-            // 图片: 从缩略图位置/尺寸插值到全屏
-            val imgW = (originW + (screenWPx - originW) * pEased).coerceAtLeast(1f)
-            val imgH = (originH + (screenHPx - originH) * pEased).coerceAtLeast(1f)
-            val imgX = originCX + (targetCX - originCX) * pEased - imgW / 2f
-            val imgY = originCY + (targetCY - originCY) * pEased - imgH / 2f
-            val cornerRadius = 12.dp * (1f - pEased)
-
-            val density = LocalDensity.current
-            val imgModifier = Modifier
-                .offset { IntOffset(imgX.roundToInt(), imgY.roundToInt()) }
-                .size(with(density) { imgW.toDp() }, with(density) { imgH.toDp() })
-                .clip(RoundedCornerShape(cornerRadius))
-                .graphicsLayer {
-                    scaleX = gestureScale
-                    scaleY = gestureScale
-                    translationX = offsetX
-                    translationY = offsetY
-                }
-
-            if (isLocal) {
-                LocalImage(
-                    path = downloadRef,
-                    contentDescription = s.imagePreview,
-                    modifier = imgModifier,
-                    contentScale = ContentScale.Fit,
-                    targetMaxDim = 2048
-                )
-            } else {
-                AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(imageSource)
-                        .crossfade(true)
-                        .build(),
-                    contentDescription = s.imagePreview,
-                    modifier = imgModifier,
-                    contentScale = ContentScale.Fit
-                )
-            }
-
-            // 顶层按钮（动画完成后显示）
-            if (p > 0.6f) {
-                val btnAlpha = ((p - 0.6f) / 0.4f).coerceIn(0f, 1f)
-
-                // 右上角下载按钮（无灰色背景）
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .statusBarsPadding()
-                        .padding(top = 8.dp, end = 16.dp)
-                        .graphicsLayer { alpha = btnAlpha }
-                ) {
-                    IconButton(
-                        onClick = {
-                            scope.launch {
-                                if (isLocal) saveLocalImage(context, downloadRef)
-                                else downloadImage(context, downloadRef)
-                            }
-                        },
-                        modifier = Modifier.size(44.dp)
-                    ) {
-                        Icon(
-                            Icons.Filled.Download,
-                            contentDescription = s.downloadImage,
-                            tint = Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-                }
-
-                // 左上角关闭按钮
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .statusBarsPadding()
-                        .padding(top = 8.dp, start = 16.dp)
-                        .graphicsLayer { alpha = btnAlpha }
-                ) {
-                    IconButton(
-                        onClick = { startClose() },
-                        modifier = Modifier.size(44.dp)
-                    ) {
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = s.close,
-                            tint = Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
+        }, onDismiss = onDismiss)
 }
 
 /** 保存图片字节到 Pictures/FreeChat（API 29+ 用 MediaStore，否则直接写文件） */
@@ -805,54 +707,10 @@ private suspend fun saveLocalImage(context: Context, path: String) {
 
 /** 推理过程折叠卡片 — 折叠时只显示标题+箭头，不显示任何思考内容 */
 @Composable
-private fun ReasoningBubble(reasoning: String, colors: FreeChatColors) {
+private fun ReasoningBubble(messageId: String, reasoning: String, colors: FreeChatColors, callbacks: DisclosureCallbacks) {
     val s = LocalStrings.current
-    val scale = LocalFontScale.current
-    val advancedMaterial = LocalAdvancedMaterial.current
-    var expanded by remember { mutableStateOf(true) }
-
-    // 卡片整体居中、左右对称（限制最大宽度并水平居中）；高级材质下磨砂哑光玻璃，去脑图标
-    Box(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = (340 * scale).dp)
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(if (advancedMaterial) colors.Surface.copy(alpha = 0.7f) else colors.SurfaceVariant.copy(alpha = 0.6f))
-                .then(if (advancedMaterial) Modifier.border(1.dp, colors.Divider.copy(alpha = 0.3f), RoundedCornerShape(10.dp)) else Modifier)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded }
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(s.thinkingProcess, style = MaterialTheme.typography.labelSmall, color = colors.Primary, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.weight(1f))
-                Icon(
-                    if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                    null,
-                    tint = colors.TextTertiary,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-            AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                Text(
-                    reasoning,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.TextSecondary,
-                    modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp)
-                )
-            }
-        }
+    MessageDisclosure("reasoning:$messageId", s.thinkingProcess, initiallyExpanded = true, callbacks = callbacks) {
+        SelectionBox(true) { Text(reasoning, style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary) }
     }
 }
 
@@ -910,22 +768,20 @@ private fun openFile(context: Context, path: String) {
 }
 
 /** 把消息正文里的搜索关键词用高亮色标红（大小写不敏感），其余文字保持原色 */
-private fun buildHighlightedText(text: String, keyword: String?, color: Color?): AnnotatedString {
-    if (keyword.isNullOrBlank() || color == null) return AnnotatedString(text)
-    return buildAnnotatedString {
+private fun buildHighlightedText(text: String, keyword: String?, color: Color?,
+    base: AnnotatedString = AnnotatedString(text)): AnnotatedString {
+    if (keyword.isNullOrBlank() || color == null) return base
+    return AnnotatedString.Builder(base).apply {
         val lower = text.lowercase()
         val kw = keyword.lowercase()
         var from = 0
         while (from < text.length) {
             val idx = lower.indexOf(kw, from)
-            if (idx < 0) { append(text.substring(from)); break }
-            if (idx > from) append(text.substring(from, idx))
-            withStyle(SpanStyle(color = color, fontWeight = FontWeight.SemiBold)) {
-                append(text.substring(idx, idx + keyword.length))
-            }
+            if (idx < 0) break
+            addStyle(SpanStyle(color = color, fontWeight = FontWeight.SemiBold), idx, idx + keyword.length)
             from = idx + keyword.length
         }
-    }
+    }.toAnnotatedString()
 }
 
 /** 文件附件卡片（用户上传 / AI 生成的原生文档） */
@@ -1046,10 +902,8 @@ private fun SpeechProgressBar(
 ) {
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(200, easing = FreeChatAnimation.iosEaseOut)) +
-            expandHorizontally(tween(240, easing = FreeChatAnimation.iosEaseOut)),
-        exit = fadeOut(tween(180, easing = FreeChatAnimation.iosEaseIn)) +
-            shrinkHorizontally(tween(200, easing = FreeChatAnimation.iosEaseIn))
+        enter = FreeChatAnimation.horizontalExpandEnter(),
+        exit = FreeChatAnimation.horizontalExpandExit()
     ) {
         // 朗读进度**只在这一格订阅**（1.0.49 性能）：playFraction 播放期间每 100ms 写一次，
         // 原来这三个 flow 是在气泡顶层 collect 的，于是「说话的那条气泡」整棵子树

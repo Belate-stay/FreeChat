@@ -9,11 +9,12 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.res.ResourcesCompat
-import androidx.compose.animation.AnimatedContent
+import com.freechat.ui.animation.PageMotion
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -75,6 +77,7 @@ import com.freechat.i18n.LocalStrings
 import com.freechat.i18n.LocaleManager
 import com.freechat.i18n.buildStrings
 import com.freechat.model.ThemeMode
+import com.freechat.model.HeaderBarStyle
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.components.DrawerContent
 import kotlin.math.roundToInt
@@ -92,6 +95,7 @@ import com.freechat.model.CharacterProfile
 import com.freechat.model.Conversation
 import com.freechat.model.ModelInfo
 import com.freechat.model.ModelType
+import com.freechat.ui.screens.AuthorWordsScreen
 import com.freechat.ui.screens.ChatScreen
 import com.freechat.ui.screens.SettingsScreen
 import com.freechat.ui.screens.VoiceDebugScreen
@@ -103,11 +107,14 @@ import com.freechat.ui.theme.FreeChatTheme
 import com.freechat.ui.theme.Aurora
 import com.freechat.ui.theme.LiquidBackdrop
 import com.freechat.ui.theme.LocalAdvancedMaterial
+import com.freechat.ui.theme.LocalMaterialProgress
+import com.freechat.ui.theme.LocalHeaderCardProgress
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.LocalGlobalFontFamily
 import com.freechat.ui.theme.LocalLiquidClock
 import com.freechat.ui.theme.LocalLiquidFrame
 import com.freechat.ui.theme.LocalLiquidMode
+import com.freechat.ui.theme.LocalLiquidProgress
 import com.freechat.ui.theme.LocalLiquidPageShift
 import com.freechat.ui.theme.LiquidPageShift
 import com.freechat.ui.theme.LocalLiquidPalette
@@ -127,7 +134,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
-private enum class Screen { CHAT, SETTINGS, VOICE_DEBUG, CHANGELOG, NEW_RULES, NEW_CHAT_MODE, CHARACTER_SETUP, LEARNING, MODEL_EDITOR, AGREEMENT, FAVORITES, FAVORITE_DETAIL, ACCOUNT }
+private enum class Screen(val motionDepth: Int) {
+    CHAT(0), SETTINGS(1), VOICE_DEBUG(2), CHANGELOG(2), NEW_RULES(1), NEW_CHAT_MODE(1),
+    CHARACTER_SETUP(2), LEARNING(2), MODEL_EDITOR(2), AGREEMENT(2), FAVORITES(1), FAVORITE_DETAIL(2), ACCOUNT(1),
+    AUTHOR_WORDS(2)
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -184,10 +195,25 @@ class MainActivity : ComponentActivity() {
             }
             val themeMode by chatViewModel.themeMode.collectAsState()
             val colorTheme by chatViewModel.colorTheme.collectAsState()
+            val customColorArgb by chatViewModel.customColorArgb.collectAsState()
             val fontSize by chatViewModel.fontSize.collectAsState()
             val useSystemFont by chatViewModel.useSystemFont.collectAsState()
             val systemDarkTheme by chatViewModel.systemDarkTheme.collectAsState()
-            val advancedMaterial by chatViewModel.advancedMaterial.collectAsState()
+            val advancedMaterialEnabled by chatViewModel.advancedMaterial.collectAsState()
+            val headerBarStyle by chatViewModel.headerBarStyle.collectAsState()
+            val headerCardProgress = animateFloatAsState(
+                if (headerBarStyle == HeaderBarStyle.CARD) 1f else 0f,
+                FreeChatAnimation.materialTween, label = "global_header_card"
+            )
+            val materialProgress = animateFloatAsState(
+                if (advancedMaterialEnabled) 1f else 0f,
+                FreeChatAnimation.materialTween, label = "global_material"
+            )
+            val materialTarget = rememberUpdatedState(advancedMaterialEnabled)
+            // 退出动画结束才移除模糊源/效果，避免按开关时材质瞬间消失。
+            val advancedMaterial by remember {
+                derivedStateOf { materialTarget.value || materialProgress.value > 0f }
+            }
             val liquidBackdrop by chatViewModel.liquidBackdrop.collectAsState()
             val currentMode by chatViewModel.currentMode.collectAsState()
             val currentCharacter by chatViewModel.currentCharacter.collectAsState()
@@ -207,7 +233,15 @@ class MainActivity : ComponentActivity() {
                 ThemeMode.DARK_OLED -> true
                 ThemeMode.LIGHT -> false
             }
-            val colors = resolveColors(themeMode, colorTheme, systemDarkTheme)
+            val colors = resolveColors(themeMode, colorTheme, systemDarkTheme, customColorArgb)
+
+            // enableEdgeToEdge 默认只跟随系统明暗；应用手动切换主题时也要同步系统栏前景。
+            LaunchedEffect(isDark) {
+                androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !isDark
+                    isAppearanceLightNavigationBars = !isDark
+                }
+            }
 
             // 流动炫彩配色：与 resolveColors 用同一套「纯黑」判定
             // （DARK_OLED 恒纯黑；SYSTEM 时只有「系统当前是深色」且用户选了「黑色」才算纯黑）
@@ -225,7 +259,13 @@ class MainActivity : ComponentActivity() {
             //           开着它等于把这个特性整个抹掉。
             // 开关本身保留、状态也不改（回到浅色主题立刻恢复），只是这里不给它生效：
             // 于是各页面照旧铺原来的深色/黑色底，整条链路退化成加这个功能之前的样子。
-            val liquidActive = liquidBackdrop && !isDark && !isOled
+            val liquidEnabled = liquidBackdrop && !isDark && !isOled
+            val liquidProgress = animateFloatAsState(if (liquidEnabled) 1f else 0f,
+                FreeChatAnimation.materialTween, label = "global_liquid")
+            val liquidTarget = rememberUpdatedState(liquidEnabled)
+            val liquidActive by remember {
+                derivedStateOf { liquidTarget.value || liquidProgress.value > 0f }
+            }
             // 全 App 共用的动画时钟：整个流动炫彩只有这一个帧回调。
             // 关着的时候连时钟都不建 —— 不给关闭状态留一帧的额外开销
             val liquidClock: State<Long>? = if (liquidActive) rememberLiquidClock() else null
@@ -317,6 +357,8 @@ class MainActivity : ComponentActivity() {
             var modelEditorType by remember { mutableStateOf<ModelType?>(null) }
             var modelEditorEditing by remember { mutableStateOf<ModelInfo?>(null) }
             var modelEditorFromChat by remember { mutableStateOf(false) }
+            // 账号页从哪进（1.0.94）：侧滑进→返回带开侧滑；「连接微信」登录引导进→返回直接回聊天
+            var accountFromChat by remember { mutableStateOf(false) }
             var favoriteDetailItem by remember { mutableStateOf<FavoriteItem?>(null) }
 
             // ──── 侧滑页那三个对话弹层（重命名 / 删除 / 批量删除）────
@@ -364,7 +406,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 返回键导航栈
-            BackHandler(enabled = currentScreen == Screen.SETTINGS || currentScreen == Screen.VOICE_DEBUG || currentScreen == Screen.CHANGELOG || currentScreen == Screen.NEW_RULES || currentScreen == Screen.NEW_CHAT_MODE || currentScreen == Screen.CHARACTER_SETUP || currentScreen == Screen.MODEL_EDITOR || currentScreen == Screen.AGREEMENT || currentScreen == Screen.FAVORITES || currentScreen == Screen.FAVORITE_DETAIL || currentScreen == Screen.ACCOUNT || drawerOpen || (currentScreen == Screen.CHAT && multiSelect.active)) {
+            BackHandler(enabled = currentScreen == Screen.SETTINGS || currentScreen == Screen.VOICE_DEBUG || currentScreen == Screen.CHANGELOG || currentScreen == Screen.NEW_RULES || currentScreen == Screen.NEW_CHAT_MODE || currentScreen == Screen.CHARACTER_SETUP || currentScreen == Screen.MODEL_EDITOR || currentScreen == Screen.AGREEMENT || currentScreen == Screen.AUTHOR_WORDS || currentScreen == Screen.FAVORITES || currentScreen == Screen.FAVORITE_DETAIL || currentScreen == Screen.ACCOUNT || drawerOpen || (currentScreen == Screen.CHAT && multiSelect.active)) {
                 when {
                     currentScreen == Screen.VOICE_DEBUG -> {
                         currentScreen = Screen.SETTINGS
@@ -390,9 +432,12 @@ class MainActivity : ComponentActivity() {
                     currentScreen == Screen.AGREEMENT -> {
                         currentScreen = Screen.SETTINGS
                     }
+                    currentScreen == Screen.AUTHOR_WORDS -> {
+                        currentScreen = Screen.SETTINGS
+                    }
                     currentScreen == Screen.ACCOUNT -> {
                         currentScreen = Screen.CHAT
-                        drawerOpen = true
+                        drawerOpen = !accountFromChat
                     }
                     currentScreen == Screen.FAVORITE_DETAIL -> {
                         currentScreen = Screen.FAVORITES
@@ -416,8 +461,8 @@ class MainActivity : ComponentActivity() {
                 LocaleManager.applyLocale(this@MainActivity, appLanguage)
             }
 
-            androidx.compose.runtime.CompositionLocalProvider(LocalStrings provides currentStrings, LocalAdvancedMaterial provides advancedMaterial, LocalLiquidMode provides liquidActive, LocalLiquidPalette provides liquidColors, LocalLiquidClock provides liquidClock, LocalLiquidFrame provides liquidFrame) {
-            FreeChatTheme(themeMode = themeMode, colorTheme = colorTheme, fontSize = fontSize, useSystemFont = useSystemFont, systemDarkTheme = systemDarkTheme) {
+            androidx.compose.runtime.CompositionLocalProvider(LocalStrings provides currentStrings, LocalAdvancedMaterial provides advancedMaterial, LocalMaterialProgress provides materialProgress, LocalHeaderCardProgress provides headerCardProgress, LocalLiquidMode provides liquidActive, LocalLiquidProgress provides liquidProgress, LocalLiquidPalette provides liquidColors, LocalLiquidClock provides liquidClock, LocalLiquidFrame provides liquidFrame) {
+            FreeChatTheme(themeMode = themeMode, colorTheme = colorTheme, fontSize = fontSize, useSystemFont = useSystemFont, systemDarkTheme = systemDarkTheme, customColorArgb = customColorArgb) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -473,7 +518,7 @@ class MainActivity : ComponentActivity() {
                                     if (advancedMaterial) {
                                         // 量化到 33 档再取缓存实例（见上面 blurEffectCache 的说明）：
                                         // 半径不变时拿到的是**同一个** BlurEffect，图层不必重建。
-                                        val blurProgress = (drawerOffset.value / drawerWidthPx).coerceIn(0f, 1f)
+                                        val blurProgress = (drawerOffset.value / drawerWidthPx).coerceIn(0f, 1f) * materialProgress.value
                                         renderEffect = blurEffectCache[(blurProgress * blurSteps + 0.5f).toInt()]
                                     }
                                 }
@@ -506,15 +551,10 @@ class MainActivity : ComponentActivity() {
                             // 当 pendingRevealScreen != null 时，先播圆形展开动画，再真正切换 screen
                             val effectiveScreen = pendingRevealScreen ?: currentScreen
     
-    AnimatedContent(
+    PageMotion(
         targetState = effectiveScreen,
-        transitionSpec = {
-            // Bug 5：统一过渡规格，避免分支导致首帧额外计算
-            (fadeIn(FreeChatAnimation.pageFadeInFast) +
-             scaleIn(initialScale = 0.97f, animationSpec = tween(280, easing = FreeChatAnimation.iosEaseOut))) togetherWith
-            (fadeOut(FreeChatAnimation.pageFadeOutFast) +
-             scaleOut(targetScale = 0.97f, animationSpec = tween(200, easing = FreeChatAnimation.iosEaseIn)))
-        },
+        distancePx = with(density) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.toPx() },
+        forward = { initial, target -> target.motionDepth >= initial.motionDepth },
         label = "screen_reveal"
     ) { screen ->
         when (screen) {
@@ -522,6 +562,15 @@ class MainActivity : ComponentActivity() {
                 viewModel = chatViewModel, isDark = isDark,
                 onOpenDrawer = { drawerOpen = true },
                 onOpenNewRules = { currentScreen = Screen.NEW_RULES },
+                onOpenModelEditor = { type, editing ->
+                    if (com.freechat.data.ModelAccessPolicy.canEdit(editing)) {
+                        // Custom model shortcut returns to chat; built-ins have no editor route.
+                        modelEditorType = type
+                        modelEditorEditing = editing
+                        modelEditorFromChat = true
+                        currentScreen = Screen.MODEL_EDITOR
+                    }
+                },
                 revealTrigger = newChatRevealTrigger,
                 onRevealComplete = { newChatRevealTrigger = 0 },
                 onNewChatReveal = { _ ->
@@ -539,6 +588,10 @@ class MainActivity : ComponentActivity() {
                     modelEditorEditing = null
                     modelEditorFromChat = true
                     currentScreen = Screen.MODEL_EDITOR
+                },
+                onOpenAccount = {
+                    accountFromChat = true
+                    currentScreen = Screen.ACCOUNT
                 }
             )
             Screen.SETTINGS -> SettingsScreen(
@@ -555,20 +608,26 @@ class MainActivity : ComponentActivity() {
                     currentScreen = Screen.CHANGELOG
                 },
                 onOpenModelEditor = { type, editing ->
-                    modelEditorType = type
-                    modelEditorEditing = editing
-                    modelEditorFromChat = false
-                    currentScreen = Screen.MODEL_EDITOR
+                    if (com.freechat.data.ModelAccessPolicy.canEdit(editing)) {
+                        modelEditorType = type
+                        modelEditorEditing = editing
+                        modelEditorFromChat = false
+                        currentScreen = Screen.MODEL_EDITOR
+                    }
                 },
                 onOpenAgreement = {
                     currentScreen = Screen.AGREEMENT
+                },
+                onOpenAuthorWords = {
+                    currentScreen = Screen.AUTHOR_WORDS
                 }
             )
-            // 返回回侧栏（跟收藏一致）—— 账号入口在抽屉里，不在了设置页
+            // 返回回侧栏（跟收藏一致）—— 账号入口在抽屉里，不在了设置页；
+            // 「连接微信」登录引导进来的返回直接回聊天（accountFromChat，1.0.94）
             Screen.ACCOUNT -> AccountScreen(
                 onBack = {
                     currentScreen = Screen.CHAT
-                    drawerOpen = true
+                    drawerOpen = !accountFromChat
                 }
             )
             Screen.VOICE_DEBUG -> VoiceDebugScreen(
@@ -588,6 +647,9 @@ class MainActivity : ComponentActivity() {
                 onBack = { currentScreen = if (modelEditorFromChat) Screen.CHAT else Screen.SETTINGS }
             )
             Screen.AGREEMENT -> AgreementScreen(
+                onBack = { currentScreen = Screen.SETTINGS }
+            )
+            Screen.AUTHOR_WORDS -> AuthorWordsScreen(
                 onBack = { currentScreen = Screen.SETTINGS }
             )
             Screen.FAVORITES -> FavoritesScreen(
@@ -745,10 +807,8 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier
                                 .fillMaxSize()
                                 .graphicsLayer {
-                                    alpha = if (!advancedMaterial) {
-                                        (drawerOffset.value / drawerWidthPx)
-                                            .coerceIn(0f, 1f) * FreeChatAnimation.SCRIM_MAX_ALPHA
-                                    } else 0f
+                                    alpha = (drawerOffset.value / drawerWidthPx).coerceIn(0f, 1f) *
+                                        FreeChatAnimation.SCRIM_MAX_ALPHA * (1f - materialProgress.value)
                                     // 抽屉右边缘 R = -W + offset - overlap + W = offset - overlap
                                     translationX = drawerOffset.value - overlapPx
                                 }
@@ -897,6 +957,7 @@ class MainActivity : ComponentActivity() {
         },
         onOpenAccount = {
             drawerOpen = false
+            accountFromChat = false
             pendingRevealScreen = Screen.ACCOUNT
         },
         onSettingsRowPositioned = { rect -> settingsRowBounds = rect },
@@ -943,17 +1004,16 @@ class MainActivity : ComponentActivity() {
                         // 老用户不会闪协议，新用户也不会先闪一下主界面再弹协议。
                         null -> Box(Modifier.fillMaxSize().pageBackground(colors.Background))
                         false -> {
-                            var showAgreement by remember { mutableStateOf(false) }
-                            Box(Modifier.fillMaxSize()) {
-                                if (showAgreement) {
-                                    AgreementScreen(onBack = { showAgreement = false })
-                                } else {
-                                    AgreementGateDialog(
-                                        onAgree = { chatViewModel.agreeTerms() },
-                                        onOpenAgreement = { showAgreement = true },
-                                        colors = colors
-                                    )
-                                }
+                            // 主界面正常渲染（已在上方），协议以悬浮窗形式叠加
+                            var showFullAgreement by remember { mutableStateOf(false) }
+                            if (showFullAgreement) {
+                                AgreementScreen(onBack = { showFullAgreement = false })
+                            } else {
+                                AgreementGateDialog(
+                                    onAgree = { chatViewModel.agreeTerms() },
+                                    onOpenAgreement = { showFullAgreement = true },
+                                    colors = colors
+                                )
                             }
                         }
                         true -> Unit
@@ -1108,7 +1168,10 @@ private fun ChatDrawerTitle(
             fontWeight = FontWeight.SemiBold,
             fontFamily = titleFont,
             color = titleColor,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             modifier = Modifier
+                .widthIn(max = (LocalConfiguration.current.screenWidthDp - titleXDp - 144f * (1f - titleProgress) - 8f).coerceAtLeast(64f).dp)
                 .graphicsLayer {
                     translationX = with(density) { titleXDp.dp.toPx() }
                     translationY = with(density) { 18.dp.toPx() }

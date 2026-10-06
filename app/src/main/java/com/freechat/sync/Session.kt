@@ -116,7 +116,16 @@ object Session {
          * 就存在的角色头像和定制，云端压根没见过，要等用户哪天恰好再动一下那条对话
          * 才轮得到。头像尤其一眼看得出：换台设备打开就少张脸。
          */
-        val seededExtras: Boolean = false
+        val seededExtras: Boolean = false,
+        /**
+         * 「云端缺件补齐」做过了没有（2026-10-01 加）。
+         *
+         * 同一个洞的更严重版本：老账号从没推过的**聊天记录/记忆**会一直留在本地
+         * （实测线上有账号 51 条对话只有 3 条对话的记录箱在云里）。[SyncEngine.seedMissing]
+         * 拿云端清单做差、只补云里从没有过的那部分，每个账号每台设备做一次。
+         * 做失败不立标记，下次登录接着试。
+         */
+        val seededMissing: Boolean = false
     )
 
     private fun emptyState(userId: String) = SyncState(userId = userId)
@@ -136,7 +145,8 @@ object Session {
                 revs = parsed.revs ?: emptyMap(),
                 dirty = parsed.dirty ?: emptyList(),
                 lastSyncAt = parsed.lastSyncAt,
-                seededExtras = parsed.seededExtras
+                seededExtras = parsed.seededExtras,
+                seededMissing = parsed.seededMissing
             )
         } else emptyState(userId)
         return syncCache!!

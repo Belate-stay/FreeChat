@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -39,10 +40,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
@@ -57,12 +61,15 @@ import com.freechat.ui.theme.LocalMonoFontFamily
 import com.freechat.ui.theme.frostedGlass
 import com.freechat.ui.theme.linkInk
 import com.freechat.ui.theme.liquidOpaqueBackground
+import com.freechat.ui.theme.LocalLiquidMode
+import com.freechat.ui.theme.materialProgress
 import com.freechat.ui.theme.selectedFill
 import com.freechat.ui.theme.selectedSubText
 import com.freechat.ui.theme.selectedText
+import com.freechat.ui.theme.readableForeground
 import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeEffect
+import com.freechat.ui.theme.materialHaze as hazeEffect
 
 /**
  * 底部磨砂玻璃弹层 —— 全 App 二级选择框 / 操作菜单的**唯一**外壳。
@@ -103,12 +110,15 @@ fun BoxScope.SheetPanel(
     BackHandler(enabled = visible) { onDismiss() }
 
     val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    val progress = materialProgress()
+    val lastConfirmLabel = remember { mutableStateOf(confirmLabel.orEmpty()) }
+    SideEffect { if (confirmLabel != null) lastConfirmLabel.value = confirmLabel }
 
     AnimatedVisibility(
         visible = visible,
         // 遮罩比卡片早一点点起、晚一点点收：模糊先铺满，卡片再落上去，收的时候反过来
-        enter = fadeIn(tween(200, easing = FreeChatAnimation.iosEaseOut)),
-        exit = fadeOut(tween(160, easing = FreeChatAnimation.iosEaseIn))
+        enter = fadeIn(FreeChatAnimation.overlayFadeIn),
+        exit = fadeOut(FreeChatAnimation.overlayFadeOut)
     ) {
         Box(
             modifier = Modifier
@@ -117,14 +127,15 @@ fun BoxScope.SheetPanel(
                     if (advancedMaterial) Modifier
                         // 衬底：流动炫彩下补不透明底 —— 整屏遮罩同理，源是透明的那层样本就磨不出东西，
                         // 遮罩只剩一点点罩色，背后正文依旧清清楚楚（见 liquidOpaqueBackground）
-                        .liquidOpaqueBackground(colors.Background)
+                        .liquidOpaqueBackground(colors.Background, strength = progress)
                         .hazeEffect(state = hazeState) {
                         blurRadius = 22.dp
                         inputScale = HazeInputScale.None
                         // 背景模糊而不是变暗：底色留空，只加一点点白/黑把对比拉开
                         backgroundColor = if (isDark) Color.Black.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.16f)
-                    } else Modifier.background(Color.Black.copy(alpha = 0.32f))
+                    } else Modifier
                 )
+                .drawBehind { drawRect(Color.Black.copy(alpha = 0.32f * (1f - progress()))) }
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
@@ -137,14 +148,14 @@ fun BoxScope.SheetPanel(
         modifier = Modifier.align(Alignment.BottomCenter),
         // 弹层上滑：320ms 减速入位（稳稳停住，收尾不「撞墙」），
         // 收起 240ms 加速 —— 2026-09 用户点名「参考 iOS」的那一套节奏
-        enter = slideInVertically(animationSpec = tween(320, easing = FreeChatAnimation.iosEaseOut)) { it } +
-            fadeIn(tween(200, easing = FreeChatAnimation.iosEaseOut)),
-        exit = slideOutVertically(animationSpec = tween(240, easing = FreeChatAnimation.iosEaseIn)) { it } +
-            fadeOut(tween(160, easing = FreeChatAnimation.iosEaseIn))
+        enter = FreeChatAnimation.sheetEnter(),
+        exit = FreeChatAnimation.sheetExit()
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // Keep the entire shadow inside AnimatedVisibility's composited layer.
+                .padding(top = 18.dp)
                 .then(
                     if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, shape, blur = 30.dp, elevation = 10.dp)
                     else Modifier.background(colors.Surface, shape)
@@ -183,21 +194,26 @@ fun BoxScope.SheetPanel(
             ) {
                 content()
             }
-            if (confirmLabel != null && onConfirm != null) {
+            AnimatedVisibility(confirmLabel != null && onConfirm != null,
+                enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
+                Column {
                 Spacer(Modifier.height(12.dp))
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(46.dp)
+                        .heightIn(min = 48.dp)
                         .clip(RoundedCornerShape(14.dp))
                         .background(
                             (if (confirmDanger) colors.ErrorRed else colors.Primary)
                                 .copy(alpha = if (confirmEnabled) 1f else 0.38f)
                         )
-                        .clickable(enabled = confirmEnabled) { onConfirm() },
+                        .clickable(enabled = confirmEnabled && onConfirm != null) { onConfirm?.invoke() },
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(confirmLabel, color = Color.White, fontWeight = FontWeight.SemiBold)
+                    Text(confirmLabel ?: lastConfirmLabel.value,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        color = if (confirmDanger) readableForeground(colors.ErrorRed) else colors.OnPrimary, fontWeight = FontWeight.SemiBold)
+                }
                 }
             }
         }
@@ -225,6 +241,7 @@ fun SheetOption(
     icon: ImageVector? = null,
     /** 标题走等宽字体（模型名、MBTI 类型码这类"代码感"的字符串就用它） */
     monoTitle: Boolean = false,
+    swatch: Color? = null,
     extra: @Composable ColumnScope.() -> Unit = {}
 ) {
     Column(
@@ -236,6 +253,14 @@ fun SheetOption(
             .padding(horizontal = 12.dp, vertical = 12.dp)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (swatch != null) {
+                Box(
+                    Modifier.size(20.dp)
+                        .background(swatch, RoundedCornerShape(6.dp))
+                        .border(1.dp, if (selected) colors.OnPrimary.copy(alpha = 0.65f) else colors.InputBorder, RoundedCornerShape(6.dp))
+                )
+                Spacer(Modifier.width(10.dp))
+            }
             if (icon != null) {
                 Icon(icon, null, tint = if (selected) colors.selectedText else colors.TextSecondary, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(10.dp))

@@ -10,6 +10,10 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.LocalMotionEnabled
+import androidx.compose.runtime.State
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableFloatStateOf
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
@@ -23,8 +27,9 @@ import kotlin.math.sin
  */
 @Composable
 fun FluidOrb(modifier: Modifier = Modifier, dotCount: Int = 6) {
-    val transition = rememberInfiniteTransition(label = "fluid_orb")
-    val phase by transition.animateFloat(
+    val phaseState: State<Float> = if (LocalMotionEnabled.current) {
+      val transition = rememberInfiniteTransition(label = "fluid_orb")
+      transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -32,7 +37,8 @@ fun FluidOrb(modifier: Modifier = Modifier, dotCount: Int = 6) {
             repeatMode = RepeatMode.Restart
         ),
         label = "fluid_orb_phase"
-    )
+      )
+    } else remember { mutableFloatStateOf(0f) }
 
     Canvas(modifier) {
         val center = Offset(size.width / 2f, size.height / 2f)
@@ -40,6 +46,7 @@ fun FluidOrb(modifier: Modifier = Modifier, dotCount: Int = 6) {
         val radius = minDim * 0.16f
         val orbitBase = minDim * 0.19f
         val tau = 2f * PI.toFloat()
+        val phase = phaseState.value
 
         for (i in 0 until dotCount) {
             val fi = i.toFloat()

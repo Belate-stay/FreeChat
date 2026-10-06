@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -63,186 +64,6 @@ internal val cjkLineBreak = LineBreak(
 private val BulletGutterDp = 22.dp
 private val BulletGapDp = 4.dp
 
-// ========== 块结构 ==========
-internal sealed class MdBlock {
-    data class Heading(val text: String, val level: Int) : MdBlock()
-    data class Paragraph(val text: String) : MdBlock()
-    data class ListItem(val text: String, val bullet: String, val indent: Int, val body: MutableList<String> = mutableListOf()) : MdBlock()
-    data class Quote(val text: String) : MdBlock()
-    data class CodeBlock(val code: String, val lang: String) : MdBlock()
-    data class Table(val headers: List<String>, val rows: List<List<String>>) : MdBlock()
-    object Divider : MdBlock()
-}
-
-// ========== 解析器 ==========
-internal fun parseMarkdown(text: String): List<MdBlock> {
-    val lines = text.split("\n")
-    val blocks = mutableListOf<MdBlock>()
-    var inCode = false
-    val codeBuf = mutableListOf<String>()
-    var codeLang = ""
-    var tableLines = mutableListOf<String>()
-
-    fun flushTable() {
-        if (tableLines.size >= 2) {
-            val headers = parseTableRow(tableLines[0])
-            val rows = tableLines.drop(2).mapNotNull { line ->
-                val row = parseTableRow(line)
-                if (row.isNotEmpty()) row else null
-            }
-            if (headers.isNotEmpty()) {
-                blocks.add(MdBlock.Table(headers, rows))
-            }
-        }
-        tableLines.clear()
-    }
-
-    // 收集连续段落行，用于识别行内标题
-    var pendingParagraphLines = mutableListOf<String>()
-    fun flushParagraph() {
-        if (pendingParagraphLines.isNotEmpty()) {
-            blocks.add(MdBlock.Paragraph(softJoin(pendingParagraphLines).trim()))
-            pendingParagraphLines.clear()
-        }
-    }
-
-    for (line in lines) {
-        val trimmed = line.trim()
-
-        // 代码块
-        if (trimmed.startsWith("```")) {
-            flushTable()
-            flushParagraph()
-            if (inCode) {
-                if (codeBuf.isNotEmpty()) {
-                    blocks.add(MdBlock.CodeBlock(codeBuf.joinToString("\n"), codeLang))
-                    codeBuf.clear()
-                    codeLang = ""
-                }
-                inCode = false
-            } else {
-                inCode = true
-                codeLang = trimmed.removePrefix("```").trim()
-            }
-            continue
-        }
-        if (inCode) { codeBuf.add(line); continue }
-
-        // 表格积累
-        if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
-            flushParagraph()
-            tableLines.add(trimmed)
-            continue
-        } else if (tableLines.isNotEmpty()) {
-            flushTable()
-        }
-
-        if (trimmed.isBlank()) {
-            flushTable()
-            flushParagraph()
-            continue
-        }
-
-        // 分割线
-        if (trimmed.matches(Regex("""^-{3,}$""")) || trimmed.matches(Regex("""^\*{3,}$"""))) {
-            flushParagraph()
-            blocks.add(MdBlock.Divider); continue
-        }
-
-        // 标题 — 支持 # 后有无空格均可
-        val headingMatch = Regex("""^(#{1,5})\s*(.*)""").find(trimmed)
-        if (headingMatch != null) {
-            val content = headingMatch.groupValues[2].trim()
-            if (content.isNotEmpty()) {
-                flushParagraph()
-                val level = headingMatch.groupValues[1].length
-                blocks.add(MdBlock.Heading(content, level)); continue
-            }
-        }
-
-        // 无序列表 — 支持 - * + 三种符号
-        val ulMatch = Regex("""^(\s*)([-*+])\s+(.*)""").find(line)
-        if (ulMatch != null) {
-            flushParagraph()
-            val indent = ulMatch.groupValues[1].length / 2
-            val marker = ulMatch.groupValues[2]
-            val bullet = when (marker) {
-                "-" -> "•"
-                "+" -> "▪"
-                else -> "•"
-            }
-            blocks.add(MdBlock.ListItem(ulMatch.groupValues[3], bullet, indent)); continue
-        }
-
-        // 有序列表
-        val olMatch = Regex("""^(\s*)(\d+)[.)]\s+(.*)""").find(line)
-        if (olMatch != null) {
-            flushParagraph()
-            val indent = olMatch.groupValues[1].length / 2
-            blocks.add(MdBlock.ListItem(olMatch.groupValues[3], "${olMatch.groupValues[2]}.", indent)); continue
-        }
-
-        // 引用
-        if (trimmed.startsWith("> ")) {
-            flushParagraph()
-            blocks.add(MdBlock.Quote(trimmed.removePrefix("> "))); continue
-        }
-        if (trimmed.startsWith(">")) {
-            flushParagraph()
-            blocks.add(MdBlock.Quote(trimmed.removePrefix(">").trim())); continue
-        }
-
-        // 列表项下方的缩进续行 → 作为该要点的解释正文（缩进 + 加大行距）
-        val lastBlock = blocks.lastOrNull()
-        if (lastBlock is MdBlock.ListItem && trimmed.isNotEmpty() &&
-            (line.startsWith(" ") || line.startsWith("\t"))
-        ) {
-            lastBlock.body.add(trimmed)
-            continue
-        }
-
-        // 段落行 — 累积
-        pendingParagraphLines.add(line)
-    }
-
-    flushTable()
-    flushParagraph()
-    if (codeBuf.isNotEmpty()) blocks.add(MdBlock.CodeBlock(codeBuf.joinToString("\n"), codeLang))
-    return mergeParagraphs(blocks)
-}
-
-/**
- * 段落里的单换行按 Markdown 的规矩当**软换行** —— 合成一行，交给排版按屏幕宽度重新折。
- *
- * 原先的做法是保留 "\n"、渲染时再换成 `"  \n"`（Markdown 的硬换行），于是
- * **模型自己在哪折的行，屏幕上就在哪断**。模型是按它那边的宽度折的，到手机上
- * 经常一句话走到一半、后面空半行再接着写 —— 用户点名要的就是这个别再来。
- *
- * 接缝处要不要补空格看两侧是不是 CJK：中文之间补空格会凭空多出一道缝，
- * 英文之间不补又会把两个词粘成一个。
- */
-private fun softJoin(lines: List<String>): String {
-    if (lines.size <= 1) return lines.firstOrNull().orEmpty()
-    val sb = StringBuilder()
-    for (line in lines) {
-        if (sb.isEmpty()) { sb.append(line); continue }
-        val prev = sb.last()
-        val next = line.firstOrNull()
-        val glue = if (isCjk(prev) && (next == null || isCjk(next))) "" else " "
-        sb.append(glue).append(line)
-    }
-    return sb.toString()
-}
-
-private fun isCjk(ch: Char): Boolean {
-    val c = ch.code
-    return c in 0x2E80..0x9FFF || c in 0x3000..0x303F || c in 0xFF00..0xFFEF || c in 0xAC00..0xD7AF
-}
-
-private fun parseTableRow(line: String): List<String> {
-    return line.trim('|').split("|").map { it.trim() }
-}
-
 /** 估算单元格文本显示宽度（dp）：CJK/全角字符按 13、半角按 7，用于表格定列宽，保证横平竖直对齐 */
 private fun tableTextWidthDp(text: String): Float {
     var w = 0f
@@ -251,13 +72,6 @@ private fun tableTextWidthDp(text: String): Float {
         w += if (c in 0x2E80..0x9FFF || c in 0x3000..0x303F || c in 0xFF00..0xFFEF || c in 0xAC00..0xD7AF) 13f else 7f
     }
     return w
-}
-
-private fun mergeParagraphs(blocks: List<MdBlock>): List<MdBlock> {
-    // 段落保持独立成块：空行在渲染时体现为段间距，修复「空行被吞」导致排版拥挤
-    return blocks
-        .map { b -> if (b is MdBlock.Paragraph) MdBlock.Paragraph(b.text.trim()) else b }
-        .filter { it !is MdBlock.Paragraph || it.text.isNotEmpty() }
 }
 
 // ========== 主组件 ==========
@@ -279,7 +93,7 @@ internal fun SelectionBox(enabled: Boolean, content: @Composable () -> Unit) {
  * 免得和系统那句「已复制到剪贴板」打架）。
  */
 @Composable
-private fun CodeCardHeader(lang: String, code: String, textColor: Color) {
+private fun CodeCardHeader(lang: String, code: String, textColor: Color, prose: Boolean = false, enabled: Boolean = true) {
     val s = LocalStrings.current
     val context = LocalContext.current
     var copied by remember(code) { mutableStateOf(false) }
@@ -302,7 +116,7 @@ private fun CodeCardHeader(lang: String, code: String, textColor: Color) {
                     fontFamily = FontFamily.Monospace,
                     letterSpacing = 0.6.sp
                 ),
-                color = textColor.copy(alpha = 0.45f),
+                color = textColor.copy(alpha = 0.85f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
@@ -313,26 +127,27 @@ private fun CodeCardHeader(lang: String, code: String, textColor: Color) {
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(7.dp))
-                .clickable {
+                .clickable(enabled = enabled) {
                     val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
                         as? android.content.ClipboardManager
                     cm?.setPrimaryClip(android.content.ClipData.newPlainText("FreeChat", code))
                     copied = true
                 }
-                .padding(horizontal = 8.dp, vertical = 5.dp),
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 if (copied) Icons.Filled.Check else Icons.Filled.ContentCopy,
-                contentDescription = s.copyMessage,
-                tint = if (copied) textColor.copy(alpha = 0.75f) else textColor.copy(alpha = 0.5f),
-                modifier = Modifier.size(13.dp)
+                contentDescription = null,
+                tint = textColor,
+                modifier = Modifier.size(16.dp)
             )
             Spacer(Modifier.width(5.dp))
             Text(
-                if (copied) s.copied else s.copyMessage,
+                if (copied) s.copied else if (prose) s.copyOriginal else s.copyMessage,
                 style = MaterialTheme.typography.labelSmall,
-                color = if (copied) textColor.copy(alpha = 0.75f) else textColor.copy(alpha = 0.5f)
+                color = textColor
             )
         }
     }
@@ -380,7 +195,7 @@ fun MarkdownText(
                         Text(
                             buildStyledLine(
                                 block.text, textColor, FontWeight.Bold, fs, chatFont,
-                                highlightKeyword, highlightColor, LocalFreeChatColors.current.Primary
+                                highlightKeyword, highlightColor, readableLinkBlue()
                             ),
                             modifier = Modifier.fillMaxWidth(),
                             lineHeight = fs * 1.4f
@@ -390,6 +205,7 @@ fun MarkdownText(
                 }
 
                 is MdBlock.CodeBlock -> {
+                    val prose = isProseBlock(block.lang)
                     Spacer(modifier = Modifier.height(6.dp))
                     // 代码卡：上面一条「语言标签 + 一键复制」的标题栏，下面才是代码，代码区自己横向滚动。
                     // 标题栏必须**放在滚动区之外** —— 放进去的话代码一横向滑动，标签和复制按钮就跟着跑了。
@@ -400,24 +216,29 @@ fun MarkdownText(
                             .background(codeBgColor)
                     ) {
                         CodeCardHeader(
-                            lang = block.lang,
+                            lang = if (prose) block.lang.substringAfter(' ', "").ifBlank { LocalStrings.current.originalText } else block.lang,
                             code = block.code,
-                            textColor = textColor
+                            textColor = textColor,
+                            prose = prose,
+                            enabled = selectionEnabled
                         )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(dividerColor.copy(alpha = 0.45f)))
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
+                                .then(if (prose) Modifier else Modifier.horizontalScroll(rememberScrollState()))
                                 .padding(12.dp)
                         ) {
                             SelectionBox(selectionEnabled) {
                                 Text(
                                     block.code,
                                     style = MaterialTheme.typography.bodySmall.copy(
-                                        fontFamily = FontFamily.Monospace, fontSize = 13.sp
+                                        fontFamily = if (prose) chatFont else FontFamily.Monospace,
+                                        fontSize = if (prose) 15.sp else 13.sp,
+                                        lineHeight = if (prose) 26.sp else 20.sp
                                     ),
-                                    color = textColor
+                                    color = textColor,
+                                    softWrap = prose
                                 )
                             }
                         }
@@ -535,7 +356,7 @@ fun MarkdownText(
                                     }
                                 }
                                 // 补齐缺少的列
-                                repeat(colCount - row.size) {
+                                repeat((colCount - row.size).coerceAtLeast(0)) {
                                     Spacer(Modifier.width(colWidths.getOrElse(row.size) { 60f }.dp))
                                 }
                             }
@@ -583,7 +404,7 @@ private fun RichText(
 ) {
     // 正文里的网址要能直接点开（标准模式的需求）。用一个跟主题走的链接色，
     // 而不是写死的蓝色 —— 六套主题各自有主色，蓝色在暖棕主题里会像一块补丁。
-    val linkColor = LocalFreeChatColors.current.Primary
+    val linkColor = readableLinkBlue()
     SelectionBox(selectionEnabled) {
         Text(
             buildStyledLineCJK(stripInlineMarkers(text), baseColor, FontWeight.Normal, fs, fontFamily, highlightKeyword, highlightColor, linkColor),
@@ -615,22 +436,36 @@ private fun buildStyledLineCJK(
     linkColor: Color = Color.Unspecified
 ) = buildStyledLine(text, baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor, linkColor)
 
-private fun buildStyledLine(
+internal fun buildStyledLine(
     text: String, baseColor: Color, baseWeight: FontWeight,
     fs: androidx.compose.ui.unit.TextUnit,
     fontFamily: FontFamily = FontFamily.Default,
     highlightKeyword: String? = null,
     highlightColor: Color = Color.Unspecified,
-    linkColor: Color = Color.Unspecified
-) = buildAnnotatedString {
+    linkColor: Color = Color.Unspecified,
+    depth: Int = 0
+): androidx.compose.ui.text.AnnotatedString = buildAnnotatedString {
+    if (depth >= 12) { append(text); return@buildAnnotatedString }
     pushStyle(SpanStyle(color = baseColor, fontWeight = baseWeight, fontSize = fs, fontFamily = fontFamily))
     var rem = text
     while (rem.isNotEmpty()) {
+        // Protect complete URLs before treating underscores/stars as Markdown tokens.
+        val bare = UrlRegex.find(rem)?.takeIf { it.range.first == 0 }
+        if (bare != null) {
+            val raw = trimUrlTail(bare.value)
+            val href = normalizeUrl(raw)
+            if (href != null) {
+                withLink(LinkAnnotation.Url(href, TextLinkStyles(SpanStyle(color = linkColor,
+                    fontStyle = FontStyle.Italic, textDecoration = TextDecoration.Underline)))) { append(raw) }
+                rem = rem.drop(raw.length)
+                continue
+            }
+        }
         // [文字](链接) —— markdown 链接语法。必须排在所有行内标记之前：
         // 「[」不是任何别的规则的起点，但里面的文字常常带 * 和 `，先切出来整段当成链接最干净
         if (rem.startsWith("[")) {
             val labelEnd = rem.indexOf("](")
-            val hrefEnd = if (labelEnd > 0) rem.indexOf(')', labelEnd + 2) else -1
+            val hrefEnd = if (labelEnd > 0) markdownLinkEnd(rem, labelEnd + 2) else -1
             if (labelEnd > 0 && hrefEnd > labelEnd + 2) {
                 val label = rem.substring(1, labelEnd)
                 val href = rem.substring(labelEnd + 2, hrefEnd).trim()
@@ -639,9 +474,9 @@ private fun buildStyledLine(
                     withLink(
                         LinkAnnotation.Url(
                             href2,
-                            TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
+                            TextLinkStyles(SpanStyle(color = linkColor, fontStyle = FontStyle.Italic, textDecoration = TextDecoration.Underline))
                         )
-                    ) { append(label) }
+                    ) { append(buildStyledLine(label, linkColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor, linkColor, depth + 1)) }
                     rem = rem.substring(hrefEnd + 1); continue
                 }
             }
@@ -651,7 +486,7 @@ private fun buildStyledLine(
             val end = rem.indexOf("~~", 2)
             if (end > 0) {
                 withStyle(SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)) {
-                    append(rem.substring(2, end))
+                    append(buildStyledLine(rem.substring(2, end), baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor, linkColor, depth + 1))
                 }
                 rem = rem.substring(end + 2); continue
             }
@@ -660,7 +495,7 @@ private fun buildStyledLine(
         if (rem.startsWith("**")) {
             val end = rem.indexOf("**", 2)
             if (end > 0) {
-                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(rem.substring(2, end)) }
+                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(buildStyledLine(rem.substring(2, end), baseColor, FontWeight.Bold, fs, fontFamily, highlightKeyword, highlightColor, linkColor, depth + 1)) }
                 rem = rem.substring(end + 2); continue
             }
         }
@@ -668,7 +503,7 @@ private fun buildStyledLine(
         if (rem.startsWith("__")) {
             val end = rem.indexOf("__", 2)
             if (end > 0) {
-                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(rem.substring(2, end)) }
+                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(buildStyledLine(rem.substring(2, end), baseColor, FontWeight.Bold, fs, fontFamily, highlightKeyword, highlightColor, linkColor, depth + 1)) }
                 rem = rem.substring(end + 2); continue
             }
         }
@@ -686,7 +521,7 @@ private fun buildStyledLine(
         if (rem.startsWith("*") && !rem.startsWith("**")) {
             val end = rem.indexOf("*", 1)
             if (end > 1) {
-                withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(rem.substring(1, end)) }
+                withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(buildStyledLine(rem.substring(1, end), baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor, linkColor, depth + 1)) }
                 rem = rem.substring(end + 1); continue
             }
         }
@@ -694,7 +529,7 @@ private fun buildStyledLine(
         if (rem.startsWith("_") && !rem.startsWith("__")) {
             val end = rem.indexOf("_", 1)
             if (end > 1) {
-                withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(rem.substring(1, end)) }
+                withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(buildStyledLine(rem.substring(1, end), baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor, linkColor, depth + 1)) }
                 rem = rem.substring(end + 1); continue
             }
         }
@@ -702,7 +537,7 @@ private fun buildStyledLine(
         if (rem.startsWith("++")) {
             val end = rem.indexOf("++", 2)
             if (end > 0) {
-                withStyle(SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)) { append(rem.substring(2, end)) }
+                withStyle(SpanStyle(textDecoration = TextDecoration.Underline)) { append(buildStyledLine(rem.substring(2, end), baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor, linkColor, depth + 1)) }
                 rem = rem.substring(end + 2); continue
             }
         }
@@ -710,13 +545,14 @@ private fun buildStyledLine(
         if (rem.startsWith("<u>")) {
             val end = rem.indexOf("</u>", 3)
             if (end > 0) {
-                withStyle(SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)) { append(rem.substring(3, end)) }
+                withStyle(SpanStyle(textDecoration = TextDecoration.Underline)) { append(buildStyledLine(rem.substring(3, end), baseColor, baseWeight, fs, fontFamily, highlightKeyword, highlightColor, linkColor, depth + 1)) }
                 rem = rem.substring(end + 4); continue
             }
         }
 
         // 找下一个特殊 token
         val next = listOfNotNull(
+            UrlRegex.find(rem)?.range?.first,
             nextLinkStart(rem).takeIf { it >= 0 },
             rem.indexOf("**").takeIf { it >= 0 },
             rem.indexOf("__").takeIf { it >= 0 },
@@ -742,7 +578,24 @@ private fun buildStyledLine(
 }
 
 /** 裸链接：`http(s)://` 开头，或者 `www.` 开头。停在中英文的空白与引号上。 */
-private val UrlRegex = Regex("""(?:https?://|www\.)[^\s<>"'“”‘’]+""")
+private val UrlRegex = Regex("""(?:https?://|www\.)[^\s<>"'“”‘’，。；！？、《》]+""")
+
+/** Match balanced parentheses in URLs such as /wiki/Work_(film). */
+internal fun markdownLinkEnd(text: String, from: Int): Int {
+    var nesting = 0
+    for (i in from until text.length) {
+        when (text[i]) {
+            '(' -> nesting++
+            ')' -> if (nesting == 0) return i else nesting--
+            '\n' -> return -1
+        }
+    }
+    return -1
+}
+
+@Composable
+internal fun readableLinkBlue(): Color =
+    if (LocalFreeChatColors.current.Background.luminance() < .3f) Color(0xFF8ABEFF) else Color(0xFF0759B5)
 
 /**
  * 下一个 markdown 链接 `[文字](href)` 的起始下标，没有就 -1。
@@ -806,6 +659,7 @@ private fun androidx.compose.ui.text.AnnotatedString.Builder.appendPlainWithLink
                 TextLinkStyles(
                     SpanStyle(
                         color = if (linkColor == Color.Unspecified) highlightColor else linkColor,
+                        fontStyle = FontStyle.Italic,
                         textDecoration = TextDecoration.Underline
                     )
                 )
@@ -821,6 +675,22 @@ private fun androidx.compose.ui.text.AnnotatedString.Builder.appendHighlighted(
     text: String, keyword: String?, color: Color
 ) {
     if (text.isEmpty()) return
+    // Book/work titles are explicit delimiters; do not guess Chinese names from arbitrary prose.
+    val titles = Regex("《[^《》\\n]{1,120}》").findAll(text).toList()
+    if (titles.isNotEmpty()) {
+        var at = 0
+        for (m in titles) {
+            appendKeywordHighlight(text.substring(at, m.range.first), keyword, color)
+            withStyle(SpanStyle(fontStyle = FontStyle.Italic, textDecoration = TextDecoration.Underline)) {
+                appendKeywordHighlight(m.value, keyword, color)
+            }
+            at = m.range.last + 1
+        }
+        appendKeywordHighlight(text.substring(at), keyword, color)
+    } else appendKeywordHighlight(text, keyword, color)
+}
+
+private fun androidx.compose.ui.text.AnnotatedString.Builder.appendKeywordHighlight(text: String, keyword: String?, color: Color) {
     if (keyword.isNullOrBlank() || color == Color.Unspecified) { append(text); return }
     val lower = text.lowercase()
     val kw = keyword.lowercase()

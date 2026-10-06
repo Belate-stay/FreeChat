@@ -89,9 +89,13 @@ object AccountManager {
         val fresh = state.cursor == 0L && state.revs.isEmpty()
         if (fresh) {
             SyncEngine.seedEverything()
-        } else if (!state.seededExtras) {
-            // 老账号：把这次新加的两样（角色头像、每对话新规则）的存量补一遍
-            SyncEngine.seedExtras()
+        } else {
+            // 老账号（游标不是 0，seedEverything 那条路不会再走）两样补推：
+            //  · seedExtras  —— 本次更新新加的两样（角色头像、每对话新规则），每账号一次
+            //  · seedMissing —— 云端缺件补齐（2026-10-01）：从没推过的聊天记录/记忆
+            //    会一直留在本地（用户报「云端内容少了好多」的根因），拿云端清单做差补上
+            if (!state.seededExtras) SyncEngine.seedExtras()
+            if (!state.seededMissing) SyncEngine.seedMissing()
         }
 
         SyncEngine.syncSoon(0)

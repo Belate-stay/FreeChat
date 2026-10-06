@@ -70,11 +70,19 @@ object Wire {
             avatar == null && !conv.characterProfile?.avatarHash.isNullOrEmpty()
         )
         profile.addProperty("avatarPath", "")
+        // 1.0.99.3 外貌参考图上云（用户拍板「全部图片」）：路径写成 img:<hash> 引用，
+        // 描述文字（识图结果）随行 —— 两者按下标配对（CharacterSetup 用 filterIndexed
+        // 一起删/取），**必须同进同出**。旧版本拉到不认识引用会当坏路径忽略，无害。
         profile.addProperty("appearanceImagePath", "")
-        profile.add("appearanceImagePaths", JsonArray())
-        profile.add("appearanceImageDescs", JsonArray())
+        profile.add("appearanceImagePaths", JsonArray().apply {
+            conv.characterProfile?.appearanceImagePaths?.forEach { ImageSync.ensureCached(it)?.let { r -> add(r) } }
+        })
+        profile.add("appearanceImageDescs", JsonArray().apply {
+            conv.characterProfile?.appearanceImageDescs?.forEach { add(it) }
+        })
         profile.addProperty("languageModelId", "")
         profile.addProperty("visionModelId", "")
+        profile.addProperty("visualModelId", "")
         return obj
     }
 
@@ -93,15 +101,22 @@ object Wire {
         val healed = remote.healed()
         val lp = local?.characterProfile
         val avatar = adoptAvatar(el, lp)
+        // 1.0.99.3 外貌参考图：远端引用解成缓存路径；本机已有同名槽位的路径优先
+        //（首发设备继续看自己的原图）。描述按下标随行 —— 与 CharacterSetup 的配对一致。
+        val remotePaths = healed.characterProfile?.appearanceImagePaths.orEmpty()
+            .map { if (ImageSync.isRef(it)) ImageSync.resolveToPath(it) else it }
+        val remoteDescs = healed.characterProfile?.appearanceImageDescs.orEmpty()
+        val useRemoteImages = remotePaths.isNotEmpty() || remoteDescs.isNotEmpty()
         return healed.copy(
             characterProfile = healed.characterProfile?.copy(
                 avatarPath = avatar.path,
                 avatarHash = avatar.hash,
                 appearanceImagePath = lp?.appearanceImagePath ?: "",
-                appearanceImagePaths = lp?.appearanceImagePaths ?: emptyList(),
-                appearanceImageDescs = lp?.appearanceImageDescs ?: emptyList(),
+                appearanceImagePaths = if (useRemoteImages) remotePaths else lp?.appearanceImagePaths ?: emptyList(),
+                appearanceImageDescs = if (useRemoteImages) remoteDescs else lp?.appearanceImageDescs ?: emptyList(),
                 languageModelId = lp?.languageModelId ?: "",
-                visionModelId = lp?.visionModelId ?: ""
+                visionModelId = lp?.visionModelId ?: "",
+                visualModelId = lp?.visualModelId ?: ""
             )
         )
     }
@@ -211,10 +226,19 @@ object Wire {
         val arr = JsonArray()
         for (m in msgs) {
             val obj = AppJson.gson.toJsonTree(m).asJsonObject
-            obj.add("imagePaths", JsonArray())
+            // 1.0.99.3 图片上云：本地图不丢格子，写成 `img:<hash>` 内容寻址引用
+            // （ImageSync 顺手把压缩载荷落缓存，SyncEngine 的 IMG 推送按 hash 去重上传）。
+            // 路径出不了设备，但「是哪张图」出得去 —— 与头像 avatarHash 同一哲学。
+            obj.add("imagePaths", JsonArray().apply {
+                m.imagePaths.forEach { ImageSync.ensureCached(it)?.let { r -> add(r) } }
+            })
             obj.add("imageUrls", JsonArray().apply {
-                // 只留真正的网络地址：生图走 base64 时这里存的是本机文件路径，传上去是死链
-                m.imageUrls.filter { it.startsWith("http://") || it.startsWith("https://") }.forEach { add(it) }
+                m.imageUrls.forEach { u ->
+                    when {
+                        u.startsWith("http://") || u.startsWith("https://") -> add(u)
+                        else -> ImageSync.ensureCached(u)?.let { add(it) }   // 本机路径/data: 图 → 引用
+                    }
+                }
             })
             obj.addProperty("attachmentPath", null as String?)
             obj.addProperty("quotedImagePath", null as String?)
@@ -236,20 +260,26 @@ object Wire {
         val type = object : TypeToken<List<Message>>() {}.type
         val remote = runCatching { AppJson.gson.fromJson<List<Message>>(el, type) }.getOrNull() ?: return local
         val localById = local.associateBy { it.id }
+        // 1.0.99.3 图片上云：`img:<hash>` 引用就地解成缓存路径（收端下载已在 SyncEngine
+        // 的 IMG 分支落过缓存；缓存缺失时引用原样透传，UI 当坏图占位，下次同步自动补）。
+        fun resolveRefs(list: List<String>): List<String> =
+            list.map { if (ImageSync.isRef(it)) ImageSync.resolveToPath(it) else it }
         return remote.map { m ->
             val heal = m.healed()
             val mine = localById[heal.id]
             if (mine == null) heal.copy(
-                imagePaths = emptyList(),
+                imagePaths = resolveRefs(heal.imagePaths),
                 attachmentPath = null,
                 quotedImagePath = null,
-                imageUrls = heal.imageUrls.filter { it.startsWith("http://") || it.startsWith("https://") }
+                imageUrls = resolveRefs(heal.imageUrls.filter {
+                    it.startsWith("http://") || it.startsWith("https://") || ImageSync.isRef(it)
+                })
             ) else heal.copy(
                 imagePaths = mine.imagePaths,
                 attachmentPath = mine.attachmentPath,
                 quotedImagePath = mine.quotedImagePath,
                 // 网络地址两边都留着；本机路径原本就在 mine.imageUrls 里，取并集不丢
-                imageUrls = (heal.imageUrls + mine.imageUrls).distinct()
+                imageUrls = (resolveRefs(heal.imageUrls) + mine.imageUrls).distinct()
             )
         }
     }

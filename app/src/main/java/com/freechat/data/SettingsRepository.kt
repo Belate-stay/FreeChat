@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.freechat.model.ModelInfo
+import com.freechat.model.HeaderBarStyle
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -25,13 +26,19 @@ class SettingsRepository(private val context: Context) {
         internal val KEY_SELECTED_VISION_MODEL = stringPreferencesKey("selected_vision_model")
         internal val KEY_THEME_MODE = intPreferencesKey("theme_mode")
         internal val KEY_COLOR_THEME = intPreferencesKey("color_theme")
+        internal val KEY_CUSTOM_COLOR_ARGB = intPreferencesKey("custom_color_argb")
         internal val KEY_TEMP_MODE = intPreferencesKey("temp_mode")
         internal val KEY_LENGTH_MODE = intPreferencesKey("length_mode")
         internal val KEY_PINNED_IDS = stringSetPreferencesKey("pinned_conv_ids")
         internal val KEY_ENABLE_WEB_SEARCH = booleanPreferencesKey("enable_web_search")
+        internal val KEY_SHOW_SEARCH_SOURCES = booleanPreferencesKey("show_search_sources")
         internal val KEY_SHOW_THINKING = booleanPreferencesKey("show_thinking")
         internal val KEY_LANGUAGE_CODE = stringPreferencesKey("language_code")
         internal val KEY_FONT_SIZE = intPreferencesKey("font_size_v2")
+        /** 输入框样式（1.0.70）：0 = 简洁（现状），1 = 完整。老数据缺键 = 0 = 简洁，零迁移 */
+        internal val KEY_INPUT_STYLE = intPreferencesKey("input_style")
+        /** 输入框状态（1.0.71）：0 = 自动隐藏（现状），1 = 永久固定。老数据缺键 = 0 = 自动隐藏，零迁移 */
+        internal val KEY_INPUT_BAR_STATE = intPreferencesKey("input_bar_state")
         internal val KEY_VOICE_MODEL = stringPreferencesKey("voice_model")
         internal val KEY_TTS_VOICE = stringPreferencesKey("tts_voice")
         internal val KEY_TTS_SPEED = floatPreferencesKey("tts_speed_v3")
@@ -41,10 +48,17 @@ class SettingsRepository(private val context: Context) {
         internal val KEY_USE_SYSTEM_FONT = booleanPreferencesKey("use_system_font")
         internal val KEY_GLOBAL_MEMORIES = stringPreferencesKey("global_memories")
         internal val KEY_ADVANCED_MATERIAL = booleanPreferencesKey("advanced_material")
+        internal val KEY_HEADER_BAR_STYLE = intPreferencesKey("header_bar_style")
         internal val KEY_SYSTEM_DARK_THEME = booleanPreferencesKey("system_dark_theme")
         internal val KEY_LIQUID_BACKDROP = booleanPreferencesKey("liquid_backdrop")
         internal val KEY_CHAT_MODE = intPreferencesKey("chat_mode")
         internal val KEY_CUSTOM_MODELS = stringPreferencesKey("custom_models")
+        /**
+         * 1.0.69：内置模型的**参数覆盖**（上下文声明 / 生图参数），JSON map："TYPE|id" → ModelInfo。
+         * 内置模型本体是代码里的常量（不可删、API 路由写死），但 1.0.69 起这几项参数用户可调 ——
+         * 调出来的值没地方放（不在 custom_models 里），单独开一键。本机字段，不参与同步。
+         */
+        internal val KEY_BUILT_IN_MODEL_PARAMS = stringPreferencesKey("built_in_model_params")
         internal val KEY_HAS_AGREED_TERMS = booleanPreferencesKey("has_agreed_terms")
         /**
          * 最后一次看过「更新了什么」的那个版本号（空 = 从没看过）。
@@ -82,7 +96,7 @@ class SettingsRepository(private val context: Context) {
         internal val KEY_DEFAULTS_VERSION = intPreferencesKey("defaults_version")
 
         /** 当前这一版默认值。加新默认值就 +1，并在 [migrateDefaultsIfNeeded] 里补一段。 */
-        private const val DEFAULTS_VERSION = 1
+        private const val DEFAULTS_VERSION = 2
 
         // ---- 1.0.64 起的新装默认值 ----
         // 每一对（新默认值 / 老默认值）都成对写在这里，别散落到迁移函数里去 ——
@@ -91,7 +105,7 @@ class SettingsRepository(private val context: Context) {
         private const val DEFAULT_SHOW_THINKING = true          // 老：false
         private const val DEFAULT_COLOR_THEME_ORDINAL = 2       // 2 = WHITE(纯白)；老：0 = BROWN(莫兰迪暖棕)
         private const val DEFAULT_ADVANCED_MATERIAL = true      // 老：false
-        private const val DEFAULT_LIQUID_BACKDROP = true        // 老：false
+        private const val DEFAULT_LIQUID_BACKDROP = SettingsPresentationPolicy.DEFAULT_LIQUID_BACKDROP
 
         // ---- 写入通知：同步引擎靠它知道"设置被用户改了" ----
 
@@ -231,6 +245,10 @@ class SettingsRepository(private val context: Context) {
         prefs[KEY_COLOR_THEME] ?: DEFAULT_COLOR_THEME_ORDINAL
     }
 
+    val customColorArgb: Flow<Int> = context.dataStore.data.map { prefs ->
+        prefs[KEY_CUSTOM_COLOR_ARGB] ?: 0xFF346C98.toInt()
+    }
+
     val tempModeOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
         prefs[KEY_TEMP_MODE] ?: 0
     }
@@ -247,6 +265,10 @@ class SettingsRepository(private val context: Context) {
         prefs[KEY_ENABLE_WEB_SEARCH] ?: true  // 默认开启
     }
 
+    val showSearchSources: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[KEY_SHOW_SEARCH_SOURCES] ?: false
+    }
+
     val showThinking: Flow<Boolean> = context.dataStore.data.afterDefaultMigration().map { prefs ->
         prefs[KEY_SHOW_THINKING] ?: DEFAULT_SHOW_THINKING
     }
@@ -257,6 +279,14 @@ class SettingsRepository(private val context: Context) {
 
     val fontSizeOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
         prefs[KEY_FONT_SIZE] ?: 1  // 1 = MEDIUM（标准）
+    }
+
+    val inputStyleOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+        prefs[KEY_INPUT_STYLE] ?: 0  // 0 = COMPACT（简洁，现状）
+    }
+
+    val inputBarStateOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+        prefs[KEY_INPUT_BAR_STATE] ?: 0  // 0 = AUTO_HIDE（自动隐藏，现状）
     }
 
     val voiceModel: Flow<String> = context.dataStore.data.map { prefs ->
@@ -298,26 +328,40 @@ class SettingsRepository(private val context: Context) {
         prefs[KEY_ADVANCED_MATERIAL] ?: DEFAULT_ADVANCED_MATERIAL
     }
 
+    val headerBarStyle: Flow<HeaderBarStyle> = context.dataStore.data.map { prefs ->
+        HeaderBarStyle.fromOrdinal(prefs[KEY_HEADER_BAR_STYLE] ?: HeaderBarStyle.CARD.ordinal)
+    }
+
     val systemDarkTheme: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[KEY_SYSTEM_DARK_THEME] ?: false  // 默认深色（false=深色，true=黑色）
     }
 
     // 流动炫彩：进阶视觉选项（每帧都在动，老机型会掉帧）。1.0.64 起改为默认开。
     val liquidBackdrop: Flow<Boolean> = context.dataStore.data.afterDefaultMigration().map { prefs ->
-        prefs[KEY_LIQUID_BACKDROP] ?: DEFAULT_LIQUID_BACKDROP
+        SettingsPresentationPolicy.liquidBackdrop(prefs[KEY_LIQUID_BACKDROP])
     }
 
     val chatModeOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
         prefs[KEY_CHAT_MODE] ?: 0  // 0 = STANDARD（标准问答）
     }
 
-    // 用户自定义模型（JSON 数组），5 类模型共用一份列表，按 modelType 区分
-    val customModels: Flow<List<ModelInfo>> = context.dataStore.data.map { prefs ->
+    // 用户自定义模型（JSON 数组），5 类模型共用一份列表，按 modelType 区分。
+    // 过 afterDefaultMigration：v2 迁移要动这两份 JSON（深度思考默认值归零），不先迁移就发值会闪一帧旧值
+    val customModels: Flow<List<ModelInfo>> = context.dataStore.data.afterDefaultMigration().map { prefs ->
         val raw = prefs[KEY_CUSTOM_MODELS] ?: "[]"
         runCatching {
             val listType = object : com.google.gson.reflect.TypeToken<List<ModelInfo>>() {}.type
-            com.google.gson.Gson().fromJson<List<ModelInfo>>(raw, listType)
+            AppJson.gson.fromJson<List<ModelInfo>>(raw, listType)?.map { it.healed() }.orEmpty()
         }.getOrElse { emptyList() }
+    }
+
+    // 内置模型的参数覆盖（"TYPE|id" → 参数已改过的 ModelInfo 副本），1.0.69
+    val builtInModelParams: Flow<Map<String, ModelInfo>> = context.dataStore.data.afterDefaultMigration().map { prefs ->
+        val raw = prefs[KEY_BUILT_IN_MODEL_PARAMS] ?: "{}"
+        runCatching {
+            val mapType = object : com.google.gson.reflect.TypeToken<Map<String, ModelInfo>>() {}.type
+            AppJson.gson.fromJson<Map<String, ModelInfo>>(raw, mapType)?.mapValues { it.value.healed() } ?: emptyMap()
+        }.getOrElse { emptyMap() }
     }
 
     // 是否已同意用户协议与免责声明（首次进入的门槛）
@@ -371,13 +415,43 @@ class SettingsRepository(private val context: Context) {
         val freshInstall = prefs.asMap().isEmpty()
         edit { mutable ->
             if (!freshInstall) {
-                // 老默认值（= 1.0.64 之前代码里写的那些），成对见 companion 顶部的常量
+                // 老默认值（= 1.0.64 之前代码里写的那些），成对见 companion 顶部的常量。
+                // 全部按「键不存在才写」走 —— DEFAULTS_VERSION 升版重跑时不会碰用户改过的值
                 if (KEY_SHOW_THINKING !in mutable) mutable[KEY_SHOW_THINKING] = false
                 if (KEY_COLOR_THEME !in mutable) mutable[KEY_COLOR_THEME] = 0
                 if (KEY_ADVANCED_MATERIAL !in mutable) mutable[KEY_ADVANCED_MATERIAL] = false
                 if (KEY_LIQUID_BACKDROP !in mutable) mutable[KEY_LIQUID_BACKDROP] = false
+                // 1.0.75（v2）：深度思考换语义 —— deepThinkingDefault 从「模型的默认值」变成
+                // 「全局设置里绑定模型的开关」，且**所有模型默认关**。1.0.74 写进模型 JSON 的
+                // true 是当时的字段默认值、不是用户选的，一律归零（用户在新设置页打开的才算数）。
+                // 1.0.74 实机未验，不存在「用户已经打开过」的情形；全新安装更是什么都不用写。
+                resetDeepThinkDefaults(mutable)
             }
             mutable[KEY_DEFAULTS_VERSION] = DEFAULTS_VERSION
+        }
+    }
+
+    /** 把模型存档里所有 deepThinkingDefault 归零（v2 迁移专用，见 [migrateDefaultsIfNeeded]） */
+    private fun resetDeepThinkDefaults(mutable: MutablePreferences) {
+        val gson = AppJson.gson
+        runCatching {
+            mutable[KEY_CUSTOM_MODELS]?.let { raw ->
+                val type = object : com.google.gson.reflect.TypeToken<List<ModelInfo>>() {}.type
+                val list = gson.fromJson<List<ModelInfo>>(raw, type) ?: return@let
+                if (list.any { it.deepThinkingDefault }) {
+                    mutable[KEY_CUSTOM_MODELS] = gson.toJson(list.map { it.copy(deepThinkingDefault = false) }, type)
+                }
+            }
+        }
+        runCatching {
+            mutable[KEY_BUILT_IN_MODEL_PARAMS]?.let { raw ->
+                val type = object : com.google.gson.reflect.TypeToken<Map<String, ModelInfo>>() {}.type
+                val map = gson.fromJson<Map<String, ModelInfo>>(raw, type) ?: return@let
+                if (map.values.any { it.deepThinkingDefault }) {
+                    mutable[KEY_BUILT_IN_MODEL_PARAMS] =
+                        gson.toJson(map.mapValues { it.value.copy(deepThinkingDefault = false) }, type)
+                }
+            }
         }
     }
 
@@ -413,6 +487,17 @@ class SettingsRepository(private val context: Context) {
         edit { prefs -> prefs[KEY_COLOR_THEME] = ordinal }
     }
 
+    suspend fun saveCustomColorArgb(argb: Int) {
+        edit { prefs -> prefs[KEY_CUSTOM_COLOR_ARGB] = argb }
+    }
+
+    suspend fun saveCustomTheme(argb: Int) {
+        edit { prefs ->
+            prefs[KEY_CUSTOM_COLOR_ARGB] = argb
+            prefs[KEY_COLOR_THEME] = com.freechat.model.ColorTheme.CUSTOM.ordinal
+        }
+    }
+
     suspend fun saveTempMode(ordinal: Int) {
         edit { prefs -> prefs[KEY_TEMP_MODE] = ordinal }
     }
@@ -429,6 +514,10 @@ class SettingsRepository(private val context: Context) {
         edit { prefs -> prefs[KEY_ENABLE_WEB_SEARCH] = enabled }
     }
 
+    suspend fun saveShowSearchSources(enabled: Boolean) {
+        edit { prefs -> prefs[KEY_SHOW_SEARCH_SOURCES] = enabled }
+    }
+
     suspend fun saveShowThinking(enabled: Boolean) {
         edit { prefs -> prefs[KEY_SHOW_THINKING] = enabled }
     }
@@ -439,6 +528,14 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun saveFontSize(ordinal: Int) {
         edit { prefs -> prefs[KEY_FONT_SIZE] = ordinal }
+    }
+
+    suspend fun saveInputStyle(ordinal: Int) {
+        edit { prefs -> prefs[KEY_INPUT_STYLE] = ordinal }
+    }
+
+    suspend fun saveInputBarState(ordinal: Int) {
+        edit { prefs -> prefs[KEY_INPUT_BAR_STATE] = ordinal }
     }
 
     suspend fun saveVoiceModel(model: String) {
@@ -478,6 +575,10 @@ class SettingsRepository(private val context: Context) {
         edit { prefs -> prefs[KEY_ADVANCED_MATERIAL] = enabled }
     }
 
+    suspend fun saveHeaderBarStyle(style: HeaderBarStyle) {
+        edit { prefs -> prefs[KEY_HEADER_BAR_STYLE] = style.ordinal }
+    }
+
     suspend fun saveSystemDarkTheme(isBlack: Boolean) {
         edit { prefs -> prefs[KEY_SYSTEM_DARK_THEME] = isBlack }
     }
@@ -493,6 +594,11 @@ class SettingsRepository(private val context: Context) {
     suspend fun saveCustomModels(models: List<ModelInfo>) {
         val raw = com.google.gson.Gson().toJson(models)
         edit { prefs -> prefs[KEY_CUSTOM_MODELS] = raw }
+    }
+
+    suspend fun saveBuiltInModelParams(params: Map<String, ModelInfo>) {
+        val raw = com.google.gson.Gson().toJson(params)
+        edit { prefs -> prefs[KEY_BUILT_IN_MODEL_PARAMS] = raw }
     }
 
     suspend fun saveHasAgreedTerms(agreed: Boolean) {

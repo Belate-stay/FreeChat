@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import com.freechat.ui.theme.LocalFreeChatColors
+import com.freechat.ui.animation.LocalMotionEnabled
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
@@ -41,26 +42,28 @@ fun SiriOrb(modifier: Modifier = Modifier, isDark: Boolean = true) {
     val glowBlend = if (isDark) BlendMode.Plus else BlendMode.Screen
 
     // 光斑颜色：高饱和紫/蓝/青/金/粉（在深色球体内加色会非常鲜艳）
-    val blobColors = listOf(
+    val blobColors = remember { listOf(
         Color(0xFF9D6BFF),
         Color(0xFF4DA6FF),
         Color(0xFF3EE6C8),
         Color(0xFFFFB84D),
         Color(0xFFFF6BA0)
-    )
+    ) }
     // 每个光斑的 Lissajous 频率比（a, b）与速度系数；无理数比 → 轨迹不闭合、不重复
-    val blobParams = listOf(
+    val blobParams = remember { listOf(
         doubleArrayOf(1.0, 2.0, 0.90),
         doubleArrayOf(1.3, 1.7, 0.78),
         doubleArrayOf(1.6, 0.8, 1.10),
         doubleArrayOf(2.0, 1.0, 0.65),
         doubleArrayOf(0.7, 1.4, 0.85)
-    )
+    ) }
 
     // 连续真实时间：从首帧起单调递增（Double 保证长时间运行精度足够，不取模）
     var startNanos by remember { mutableLongStateOf(0L) }
     var elapsedNanos by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
+    val motionEnabled = LocalMotionEnabled.current
+    LaunchedEffect(motionEnabled) {
+        if (!motionEnabled) return@LaunchedEffect
         while (true) {
             withFrameNanos { nanos ->
                 if (startNanos == 0L) startNanos = nanos
@@ -72,7 +75,7 @@ fun SiriOrb(modifier: Modifier = Modifier, isDark: Boolean = true) {
     Canvas(modifier) {
         val c = Offset(size.width / 2f, size.height / 2f)
         val r = min(size.width, size.height) * 0.42f   // 球体半径
-        val t = elapsedNanos / 1_000_000_000.0          // 秒（Double）
+        val t = if (motionEnabled) elapsedNanos / 1_000_000_000.0 else 0.0
         val tau = 2.0 * PI
 
         // 整体光晕轻微呼吸（连续 sin，无跳变）
