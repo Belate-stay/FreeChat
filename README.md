@@ -8,11 +8,11 @@
 
 一款 Android 端的多模型 AI 聊天应用 —— 既能当全能 AI 助手，也能成为你的专属拟人陪伴。
 
-[![Website](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-118.178.227.178-4C6FFF?style=flat-square&logo=googlechrome&logoColor=white)](https://118.178.227.178/)
+[![Website](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-freechater.com-4C6FFF?style=flat-square&logo=googlechrome&logoColor=white)](https://freechater.com/)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](https://github.com/Belate-stay/FreeChat)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://github.com/Belate-stay/FreeChat)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material3-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white)](https://github.com/Belate-stay/FreeChat)
-[![Version](https://img.shields.io/badge/Version-1.1.0-0A84FF?style=flat-square)](https://github.com/Belate-stay/FreeChat/releases)
+[![Version](https://img.shields.io/badge/Version-1.1.10-0A84FF?style=flat-square)](https://github.com/Belate-stay/FreeChat/releases)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
 </div>
@@ -37,7 +37,7 @@ FreeChat 是一个 Android 端的多模型 AI 聊天应用，内置**两种模�
 - 🎨 **AI 生图 / 识图** —— 文字生成图片，多图理解分析
 - 📄 **文件处理** —— 上传图片、音频、文本、Office 文档并智能解析；文档**附件进上下文**，长对话也能随时调取资料
 - 📊 **生成 Office 文档** —— 一句话生成 docx / xlsx / pptx
-- 🎙️ **语音交互** —— 语音输入（ASR）+ AI 朗读（TTS，秒读不断流）
+- 🎙️ **语音交互** —— 语音输入（ASR）+ AI 朗读（TTS，秒读不断流）；支持**自定义语音音色**（提示词设计 / 音频复刻还原音色，Beta）
 - 🧠 **思考过程展示** —— 实时呈现模型推理过程
 - ✍️ **Markdown 渲染** —— 结构化排版输出
 - ⭐ **收藏与分享** —— 消息收藏后集中查看；以 jpg / Markdown 分享或保存；对话可生成**在线网页链接**分享（免安装预览，可撤销）
@@ -56,12 +56,12 @@ FreeChat 是一个 Android 端的多模型 AI 聊天应用，内置**两种模�
 - 🧠 **记忆系统** —— 四层记忆（主线剧情 / 细节 / 全局 / 感知），删除保护联动，聊得越久越懂你
 - ⏳ **时间感知** —— 角色与现实时间对应，历史消息带时间标注，叙事档自有世界历法
 - 💬 **回复缓冲** —— 连发几条先攒着，一次想清楚再回（微信端与本地同语义）
-- 🖼️ **生成当前场景图** —— 把正在发生的剧情交给生图模型画出来（动作演绎 / 剧情补足档）
+- 🖼️ **生成当前场景图** —— 把正在发生的剧情交给生图模型画出来（动作演绎 / 剧情补足档）；可开「增强同元延续」，把近期生成的场景图一并作参考，连续画面元素统一（Beta）
 - 📚 **原文学习** —— 导入小说原文作高权重文风参考，回复文笔贴合原作
 - 🔎 **深度推演** —— 回复前先以角色的身份在心里过一遍，并带着回忆的关键词二次检索记忆（可选，代价是每轮多一次调用）
 - 🌙 **作息模拟** —— 角色会睡觉、会醒，醒来自然解释漏回的消息
 - 📮 **主动智能（Beta）** —— 会在合适的时间主动找你，由 AI 自己判断时机与要不要开口
-- 📱 **连接微信（Beta）** —— 扫码绑定后直接用微信和角色聊天，分条发送、正在输入，机制云端运行不依赖客户端后台
+- 📱 **连接微信（Beta）** —— 扫码绑定后直接用微信和角色聊天，分条发送、正在输入、emoji 表情识别与回复，机制云端运行不依赖客户端后台
 
 ### 🔌 自定义模型（开源版核心）
 - 五类模型 —— **语言 / 生图 / 识图 / TTS / ASR** —— 全部支持自定义
@@ -84,6 +84,7 @@ FreeChat 是一个 Android 端的多模型 AI 聊天应用，内置**两种模�
 - 🌐 **多语言** —— 简体中文 / 繁體中文 / English
 - ✨ **丝滑动画** —— 思考光球、消息入场、删除粒子、生成占位动效等
 - 🎯 **细节** —— 启动器图标可切换、首页问候语按时段更换、长对话时间线快速定位
+- 📦 **关于FreeChat** —— 设置内聚合页集中管理更新日志 / 关于作者 / 用户协议与使用条款，支持**在线检查更新**，一键下载安装新版本
 
 ---
 
@@ -91,7 +92,7 @@ FreeChat 是一个 Android 端的多模型 AI 聊天应用，内置**两种模�
 
 - **Android 客户端** —— 前往 [Releases](https://github.com/Belate-stay/FreeChat/releases) 下载最新 APK
   > 要求 Android 8.0（API 26）及以上。
-- **网页版** —— 免安装，浏览器直接打开 [官方网站](https://118.178.227.178/)，与手机端账号互通
+- **网页版** —— 免安装，浏览器直接打开 [官方网站](https://freechater.com/)，与手机端账号互通
 
 ---
 
@@ -158,17 +159,18 @@ app/src/main/java/com/freechat/
 
 ---
 
-## 📄 开源与免责声明
+## 📄 开源与用户协议
 
 - 内置模型为作者自用 API，**不保证随时在线、额度有限**，仅供体验，请勿依赖。
 - 本项目不采集、不上传对话数据：不登录时所有内容只保存在本地设备；登录账号后同步的也只有您主动同步的对话、记忆与图片，**API Key 仅保存在本地、不上传服务器**。
-- 首次启动需阅读并同意《免责声明》。
+- 「自定义语音音色」仅限使用您本人或已获授权的声音样本，严禁克隆他人声音用于冒充、欺诈等违法用途；音频样本会发送至第三方语音服务（小米 MiMo）处理，仅保存在本机、不参与云同步。
+- 首次启动需阅读并同意《用户协议与使用条款》。
 
 ---
 
 ## 👤 作者
 
-[Belate](https://github.com/Belate-stay) · [GitHub 仓库](https://github.com/Belate-stay/FreeChat) · [官方网站](https://118.178.227.178/) · [CSDN 主页](https://blog.csdn.net/weixin_51354748)
+[Belate](https://github.com/Belate-stay) · [GitHub 仓库](https://github.com/Belate-stay/FreeChat) · [官方网站](https://freechater.com/) · [CSDN 主页](https://blog.csdn.net/weixin_51354748)
 
 ---
 
