@@ -1,6 +1,7 @@
 package com.freechat.sync
 
 import com.freechat.data.AppJson
+import com.freechat.data.ConversationDeletion
 import com.freechat.data.LocalStore
 import com.freechat.data.MessageDeletion
 import com.freechat.data.PerConvStore
@@ -11,6 +12,8 @@ import com.freechat.model.Message
 import com.freechat.model.PerConvSettings
 import com.google.gson.JsonObject
 import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * 同步引擎读本地数据、把云端结果落回本地的**唯一通道**。
@@ -105,12 +108,12 @@ object Relay {
         AppJson.gson.fromJson<List<Conversation>>(
             LocalStore.readText(LocalStore.conversationsFile()) ?: "[]", convListType
         )
-    }.getOrNull()?.map { it.healed().also(MessageDeletion::register) } ?: emptyList()
+    }.getOrNull()?.filterNot { ConversationDeletion.contains(it.id) }?.map { it.healed().also(MessageDeletion::register) } ?: emptyList()
 
     suspend fun messages(convId: String): List<Message> =
         impl?.messages(convId) ?: messagesFromDisk(convId)
 
-    fun messagesFromDisk(convId: String): List<Message> = runCatching {
+    fun messagesFromDisk(convId: String): List<Message> = if (ConversationDeletion.contains(convId)) emptyList() else runCatching {
         LocalStore.readText(LocalStore.messagesFile(convId))?.let {
             AppJson.gson.fromJson<List<Message>>(it, msgListType)
         }
@@ -122,6 +125,7 @@ object Relay {
      * 中途被 `MemoryManager.append` 插进来一条，合并结果就会把它盖掉。
      */
     fun memories(convId: String): List<MemoryEntry> = LocalStore.locked {
+        if (ConversationDeletion.contains(convId)) return@locked emptyList()
         runCatching {
             LocalStore.readText(LocalStore.memoryFile(convId))?.let {
                 AppJson.gson.fromJson<List<MemoryEntry>>(it, memListType)
@@ -134,28 +138,37 @@ object Relay {
     // ============================================================
 
     suspend fun applyConversations(ops: List<ConvOp>) {
+        withContext(Dispatchers.IO) {
+            LocalStore.suspendApply {
+                ops.filterIsInstance<ConvOp.Remove>().forEach { ConversationDeletion.removeLocal(it.id) }
+            }
+        }
+        val allowed = ops.filterNot { it is ConvOp.Upsert && ConversationDeletion.contains(it.conv.id) }
         val i = impl
         if (i != null) {
-            i.applyConversations(ops)
+            i.applyConversations(allowed)
             return
         }
         LocalStore.suspendApply {
             LocalStore.locked {
                 val list = conversationsFromDisk().toMutableList()
-                for (op in ops) when (op) {
+                for (op in allowed) when (op) {
                     is ConvOp.Upsert -> {
+                        if (ConversationDeletion.contains(op.conv.id)) continue
                         val idx = list.indexOfFirst { it.id == op.conv.id }
                         val c = if (idx >= 0) Merge.mergeConv(list[idx], op.conv).conv else op.conv
                         MessageDeletion.register(c)
                         if (idx >= 0) list[idx] = c else list.add(c)
                     }
-                    is ConvOp.Remove -> list.removeAll { it.id == op.id }
+                    is ConvOp.Remove -> {
+                        list.removeAll { it.id == op.id }
+                    }
                 }
                 LocalStore.writeText(
                     LocalStore.conversationsFile(),
                     AppJson.gson.toJson(list, convListType)
                 )
-                for (op in ops.filterIsInstance<ConvOp.Upsert>()) {
+                for (op in allowed.filterIsInstance<ConvOp.Upsert>()) {
                     val deleted = MessageDeletion.deletedIds(op.conv.id)
                     if (deleted.isNotEmpty()) {
                         LocalStore.writeText(LocalStore.messagesFile(op.conv.id), AppJson.gson.toJson(messagesFromDisk(op.conv.id)))
@@ -171,6 +184,7 @@ object Relay {
     }
 
     suspend fun applyMessages(convId: String, incoming: List<Message>) {
+        if (ConversationDeletion.contains(convId)) return
         val i = impl
         if (i != null) {
             i.applyMessages(convId, incoming)
@@ -199,6 +213,7 @@ object Relay {
     }
 
     suspend fun applyMemories(convId: String, incoming: List<MemoryEntry>) {
+        if (ConversationDeletion.contains(convId)) return
         LocalStore.suspendApply {
             LocalStore.locked {
                 val merged = Merge.mergeMemories(memories(convId), incoming, MessageDeletion.memoryDeletionIds(convId))
@@ -226,6 +241,7 @@ object Relay {
         impl?.perConv(convId) ?: PerConvStore.load()[convId]
 
     suspend fun applyPerConv(convId: String, incoming: JsonObject) {
+        if (ConversationDeletion.contains(convId)) return
         val i = impl
         if (i != null) {
             i.applyPerConv(convId, incoming)

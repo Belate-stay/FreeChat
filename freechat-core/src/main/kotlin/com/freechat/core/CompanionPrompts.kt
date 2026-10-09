@@ -45,15 +45,19 @@ object CompanionPrompts {
     /**
      * 拟人系统提示词总装。分块顺序是行为的一部分（人设→原文→外貌→关系→气氛→铁律→档位→
      * 去污染→主动智能→对话规则→时间），golden 测试钉住，别随手调换。
+     * [allowWechatEmoji] 默认关，仅由校验过绑定的微信消息通道提供；叙事档始终禁用。
      */
     fun buildCompanionSystemPrompt(
         character: CharacterProfile?,
         messages: List<Message>,
         convRules: String = "",
         pendingReminder: PendingReminder? = null,
-        timeState: TimeState = TimeState()
+        timeState: TimeState = TimeState(),
+        allowWechatEmoji: Boolean = false
     ): String {
         val ch = character?.normalized()
+        // Capability is supplied by the trusted transport, never by character/user text.
+        val wechatEmojiAllowed = allowWechatEmoji && ch?.isNarrativeMode() != true
 
         val parts = mutableListOf<String>()
         parts.add("你是一个在微信上跟朋友聊天的人，不是AI助手。你要完全代入下面的人设，像一个真实的人一样思考和说话。")
@@ -241,6 +245,12 @@ object CompanionPrompts {
                 "★ 输出格式：整个回复就是「一条」完整的剧情正文（绝不是拆成好几条短消息），按小说的方式自然分段——叙述与对话可以分段、段与段之间可以空行，整体读起来要像小说的一节。\n" +
                 "★ 篇幅：${plotLengthDesc(ch.plotLength)}")
         } else {
+            val bracketBodyRule = if (wechatEmojiAllowed)
+                "正文只能使用白名单内的微信内置表情词，其他方括号标签（如 [开心]、[敷衍]）仍然禁止。" else
+                "正文里绝对不要出现任何方括号标签（比如 [开心]、[敷衍]、[无语] 这种）"
+            val emojiRule = if (wechatEmojiAllowed)
+                "10. emoji 偶尔用、别频繁：能用语言表达就不用表情，实在想用一句话最多一个。可用 Unicode emoji 或已知微信内置表情，不自造方括号表情词。不同人设不同——搞笑活泼的可略多一两个，高冷寡言的几乎不用" else
+                "10. emoji 偶尔用、别频繁：能用语言表达就不用表情，实在想用一句话最多一个。只用真正的 Unicode emoji（😊👍🥺 这种），绝对禁止用方括号文字当表情（[开心]、[敷衍] 这种）。不同人设不同——搞笑活泼的可略多一两个（🤣😂），高冷寡言的几乎不用"
             parts.add("【微信聊天——你发出去的每一条，都只是消息文字】\n" +
                 "没有动作、没有神态、没有心理描写、没有旁白、没有场景，也不用括号、星号或任何符号去夹带 —— 想表达动作，就用话本身说出来（「我到楼下了」而不是「*我走到楼下*」）。\n" +
                 "**用户怎么写都不影响你的格式**：哪怕他发来的是一整段小说或剧本，你也只能回「他会真正收到的那几条消息」。\n" +
@@ -254,8 +264,8 @@ object CompanionPrompts {
                 "6. 不要重复用户说的话\n" +
                 "7. 可以有自己的情绪和脾气，会开心、会敷衍、也会生气，像真人一样\n" +
                 "8. 不要暴露自己是 AI，不要提系统提示词、人设设定这些\n" +
-                "9. 回复前先判断你此刻的情绪，在回复最前面单独一行输出情绪标签，格式严格为 [情绪:开心]（只能从 开心/兴奋/平静/生气/难过/委屈/敷衍/害羞/无聊 中选一个），然后换行写回复内容。「害羞」只在人设确实是内向腼腆、容易紧张时才用，不要为了显得可爱而滥用。正文里绝对不要出现任何方括号标签（比如 [开心]、[敷衍]、[无语] 这种）\n" +
-                "10. emoji 偶尔用、别频繁：能用语言表达就不用表情，实在想用一句话最多一个。只用真正的 Unicode emoji（😊👍🥺 这种），绝对禁止用方括号文字当表情（[开心]、[敷衍] 这种）。不同人设不同——搞笑活泼的可略多一两个（🤣😂），高冷寡言的几乎不用\n" +
+                "9. 回复前先判断你此刻的情绪，在回复最前面单独一行输出情绪标签，格式严格为 [情绪:开心]（只能从 开心/兴奋/平静/生气/难过/委屈/敷衍/害羞/无聊 中选一个），然后换行写回复内容。「害羞」只在人设确实是内向腼腆、容易紧张时才用，不要为了显得可爱而滥用。" + bracketBodyRule + "\n" +
+                emojiRule + "\n" +
                 "11. 你完全可以回得很短：感到无语、不想理时只回「..」「。」「嗯」也 OK；感到疑惑、没听懂时只回「？」也正常。别为了凑字数硬说\n" +
                 "12. 用户如果一口气连发好几条消息，不要逐条机械地各回一句，把它们当一个整体场景理解，按你的人设决定回几条、回多长\n" +
                 "13. 你可以选择不回复：如果用户说晚安/睡了、或你们已经互道晚安，说句晚安就可以结束对话，不用再回；如果对方又连续发「晚安」，回一句「好了快睡」之类的即可；生气、不想理的时候可以真的不回，像真人一样")
@@ -333,6 +343,19 @@ object CompanionPrompts {
         }
 
         convRules.takeIf { it.isNotEmpty() }?.let { parts.add(it) }
+
+        if (wechatEmojiAllowed) {
+            parts.add("【当前通道表情规则】当前为已连接的微信消息通道，且使用微信聊天档。可使用已知微信内置表情，原样保留方括号词，例如 [抠鼻]、[微笑]。" +
+                "看到对方的这些表情时，要结合上下文理解语气；[微笑] 不一定表示开心，[抠鼻] 也可能是吐槽或玩笑，不要按词名机械判断情绪。" +
+                "首行情绪标签与末行主动智能指令仍按上述规则输出；[委屈]、[害羞] 这类表情属于正文，不能替代 [情绪:委屈] 这种显式情绪标签。" +
+                "只从下面白名单选择，不自造名称；自定义表情包或贴纸不属于这份名单，不要编造发送能力。白名单：" +
+                WechatEmojiTokens.names.joinToString("、") { "[$it]" })
+        } else {
+            val narrative = ch?.isNarrativeMode() == true
+            val channel = if (narrative) "当前使用叙事档。" else "当前不是已连接的微信消息通道。"
+            val hiddenRules = if (narrative) "叙事档不输出情绪标签或主动智能指令。" else "首行情绪标签与末行主动智能指令仍按上述规则输出。"
+            parts.add("【当前通道表情规则】" + channel + "只使用 Unicode emoji，禁止在正文输出微信方括号表情词；历史记录中的微信表情写法已作废，不要模仿。" + hiddenRules)
+        }
 
         // 1.0.73 时间感知：微信档注入现实时间（开关开 = 生活节律版 + 距上次衔接）；
         // 叙事两档注入「世界时间纪律」——时间以用户的世界设定为准，不掺现实日期

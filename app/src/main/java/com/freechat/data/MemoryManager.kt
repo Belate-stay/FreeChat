@@ -31,7 +31,7 @@ class MemoryManager {
     private fun memoryFile(convId: String): File = LocalStore.memoryFile(convId)
 
     /** 读取某对话的全部记忆（读出来一律先过 [healed] 补全老档案，见那里的说明） */
-    fun load(convId: String): List<MemoryEntry> = try {
+    fun load(convId: String): List<MemoryEntry> = if (ConversationDeletion.contains(convId)) emptyList() else try {
         val text = LocalStore.readText(memoryFile(convId))
         if (text != null) {
             val type = object : TypeToken<List<MemoryEntry>>() {}.type
@@ -51,6 +51,7 @@ class MemoryManager {
             // 整段读-改-写包在锁里：中间被云端同步插进来一条记忆，这份结果就会把它盖掉。
             // 锁可重入，里面那些 readText/writeText 自己再拿一次没问题。
             LocalStore.locked {
+                if (ConversationDeletion.contains(convId)) return@locked
                 if (MessageDeletion.memories(convId, listOf(entry)).isEmpty()) return@locked
                 val list = MemoryLogic.upsert(load(convId), entry)
                 LocalStore.writeText(memoryFile(convId), gson.toJson(MemoryLogic.trim(list, highQuality)))

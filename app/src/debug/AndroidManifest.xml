@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Debug only: permits the loopback model fixture used by UI/streaming regression tests. -->
-    <application android:usesCleartextTraffic="true" />
+    <application android:usesCleartextTraffic="true">
+        <activity android:name="com.freechat.qa.RenderQaActivity" android:exported="true"
+            android:windowSoftInputMode="adjustNothing" />
+        <activity android:name="com.freechat.qa.ImageRoutingQaActivity" android:exported="true" />
+    </application>
 </manifest>

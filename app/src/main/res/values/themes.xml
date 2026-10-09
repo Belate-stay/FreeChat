@@ -5,4 +5,9 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowBackground">#FFFFFF</item>
     </style>
+    <style name="Theme.FreeChat.Restart" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
 </resources>

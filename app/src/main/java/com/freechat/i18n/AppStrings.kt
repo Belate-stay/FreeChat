@@ -58,6 +58,9 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var addImage: String = ""
     var attachmentMenu: String = ""
     var imagePreview: String = ""
+    var previousImage: String = ""
+    var nextImage: String = ""
+    var jumpToFunctionalSettings: String = ""
     var downloadImage: String = ""
     var imageDownloaded: String = ""
     var uploadImage: String = ""
@@ -493,6 +496,8 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var generateImage: String = ""
     var generateSceneImage: String = ""
     var sceneImageVisualOnly: String = ""
+    var enhancedSceneContinuity: String = ""
+    var enhancedSceneContinuityDesc: String = ""
     var sceneErrorNoModel: String = ""
     var sceneErrorAuth: String = ""
     var sceneErrorEndpoint: String = ""
@@ -527,6 +532,10 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var appIconActive: String = ""
     var appIconSelected: String = ""
     var appIconSaveFailed: String = ""
+    var appIconRestartWarning: String = ""
+    var appIconDoNotChange: String = ""
+    var appIconRestartNow: String = ""
+    var appIconRestarting: String = ""
     var quickLocate: String = ""
     var locateStart: String = ""
     var locateEnd: String = ""
@@ -813,6 +822,16 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     /** 更新日志正文（简中直接复用 ChangelogData，其余语言各写各的） */
     var changelogEntries: List<com.freechat.model.ChangelogEntry> = emptyList()
 
+    // ===== 关于 FreeChat（聚合页 + 在线检查更新）=====
+    var aboutFreeChat: String = ""
+    var checkUpdate: String = ""
+    var updateChecking: String = ""
+    var updateLatest: String = ""
+    var updateDownloading: String = ""
+    var updateInstalling: String = ""
+    var updateFailed: String = ""
+    var updateVerifyFailed: String = ""
+
     // ===== 关于作者（设置 → 作者）=====
     /** 顶部标题栏的标题（1.0.49 起是「关于作者」；设置列表里那一行仍叫「作者」） */
     var authorAboutTitle: String = ""
@@ -914,6 +933,9 @@ val ZhCN = AppStrings("zh-CN").apply {
     addImage = "添加图片"
     attachmentMenu = "附件与工具"
     imagePreview = "图片预览"
+    previousImage = "上一张图片"
+    nextImage = "下一张图片"
+    jumpToFunctionalSettings = "跳转到功能设置"
     downloadImage = "下载图片"
     imageDownloaded = "图片已保存"
     uploadImage = "上传图片"
@@ -1338,6 +1360,8 @@ val ZhCN = AppStrings("zh-CN").apply {
     generateImage = "生成图片"
     generateSceneImage = "生成当前场景图"
     sceneImageVisualOnly = "当前场景图 · 仅供视觉呈现，不写入剧情记忆"
+    enhancedSceneContinuity = "增强同元延续"
+    enhancedSceneContinuityDesc = "使用最近保留的场景图延续服装、配饰与道具；最新剧情文字和人物设定优先。删除的场景图不再参与参考。"
     sceneErrorNoModel = "未配置可用的生图模型，请检查角色的生图模型或全局生图设置。"
     sceneErrorAuth = "生图服务的 API Key 无效或没有模型权限，请检查配置。"
     sceneErrorEndpoint = "生图接口或模型不存在；有参考图时，请确认服务支持 images/edits。"
@@ -1368,10 +1392,14 @@ val ZhCN = AppStrings("zh-CN").apply {
     appIconXinsheng = "新生"
     appIconRixiang = "日象"
     appIconHailuo = "海螺"
-    appIconRestart = "选择会保存在本机，重启 FreeChat 后更换桌面图标。"
+    appIconRestart = "选择图标后点击保存，FreeChat 将立即重启并加载新图标。"
     appIconActive = "正在使用"
     appIconSelected = "已选择"
     appIconSaveFailed = "图标选择未保存，请重试。"
+    appIconRestartWarning = "更换图标需要重启软件，当前有对话正在思考/回复，可能会导致该条思考/回复中断，确定现在重启？"
+    appIconDoNotChange = "暂不更换"
+    appIconRestartNow = "立即重启"
+    appIconRestarting = "正在重启…"
     quickLocate = "快速定位"
     locateStart = "定位到对话开头"
     locateEnd = "定位到最新消息"
@@ -1420,7 +1448,7 @@ val ZhCN = AppStrings("zh-CN").apply {
     deleteModel = "删除"
     unsavedTitle = "未保存更改"
     unsavedMessage = "当前有未保存的更改，确定要放弃吗？"
-    userAgreement = "免责声明"
+    userAgreement = "用户协议与使用条款"
     addModelFirst = "请先在设置里添加模型"
     favorites = "收藏"
     favorite = "收藏"
@@ -1621,7 +1649,8 @@ val ZhCN = AppStrings("zh-CN").apply {
         )),
         AgreementSectionText("二、模型需要自备", listOf(
             "除作者内置的少量模型外，AI 能力需您自行配置第三方 API Key。第三方服务的可用性、价格与内容政策由服务商独立决定，与作者无关。",
-            "内置模型为作者本人使用的 API，**不保证随时保有额度**，可能随时失效。"
+            "内置模型为作者本人使用的 API，**不保证随时保有额度**，可能随时失效。",
+            "「自定义语音音色」等语音功能会把您上传或录制的音频样本、音色描述发送至第三方语音服务（小米 MiMo）进行合成处理；音频样本仅保存在本机，不参与云同步。"
         )),
         AgreementSectionText("三、账号与服务器（可选）", listOf(
             "您**可以不注册**。不注册时全部功能均可正常使用，数据仅保存在本设备。",
@@ -1634,6 +1663,7 @@ val ZhCN = AppStrings("zh-CN").apply {
             "· 自行判断输出内容的合法性与准确性",
             "· 不利用本软件生成、传播违法或不良信息",
             "· 「在线网页分享」生成的公开链接可被任何持有链接者访问，请自行斟酌分享内容",
+            "· 「自定义语音音色」仅限使用您本人或已获授权的声音样本，严禁克隆、模仿他人声音用于冒充身份、欺诈、诽谤或任何违法用途",
             "AI 的输出可能包含错误，请自行判断，不应视为专业意见。"
         )),
         AgreementSectionText("五、未成年人", listOf(
@@ -1652,14 +1682,23 @@ val ZhCN = AppStrings("zh-CN").apply {
         "2. 内置模型为作者自备的 API，不保证随时可用或保有额度。",
         "3. 无需注册即可完整使用；注册仅用于跨设备同步，同步内容仅限您主动同步的资料。API Key 仅保存于本地，不会上传至服务器。",
         "4. 请勿利用本软件生成、存储或传播违反法律法规的内容。",
-        "5. 本软件仅供学习与研究使用，商用请自行评估相关法律风险。"
+        "5. 「自定义语音音色」仅限使用您本人或已获授权的声音样本，严禁克隆他人声音用于冒充、欺诈等违法用途；音频样本会发送至第三方语音服务处理。",
+        "6. 本软件仅供学习与研究使用，商用请自行评估相关法律风险。"
     )
     agreementAgreePrefix = "我已阅读并同意"
-    agreementDocName = "《免责声明》"
+    agreementDocName = "《用户协议与使用条款》"
     agreementContinue = "确定并继续"
     agreementReleasePage = "发布页："
     agreementWebLabel = "FreeChat官网："
     changelogEntries = com.freechat.model.ChangelogData.entries
+    aboutFreeChat = "关于FreeChat"
+    checkUpdate = "检查更新"
+    updateChecking = "检查中…"
+    updateLatest = "已是最新版本"
+    updateDownloading = "发现新版本，正在下载…"
+    updateInstalling = "下载完成，正在拉起安装…"
+    updateFailed = "检查更新失败，请稍后重试"
+    updateVerifyFailed = "安装包校验失败，已取消安装"
 
     // ===== 关于作者 =====
     // 这一页是「作者本人回答你」，语气按真人说话写，不做简报腔。
@@ -1673,7 +1712,7 @@ val ZhCN = AppStrings("zh-CN").apply {
     authorWordsTitle = "作者的话"
     authorWordsOpen = "点击阅读"
     authorWebAddress = "官方网页："
-    authorWebNote = "域名还没过审，直接用 IP —— 无毒无公害。"
+    authorWebNote = "域名已过审，直接用域名 —— 无毒无公害。"
     authorGithubRepo = "GitHub 仓库："
     authorGithubNote = "觉得不错的话，点个 Star。"
     authorCsdn = "CSDN 主页："
@@ -1727,6 +1766,9 @@ val ZhTW = AppStrings("zh-TW").apply {
     addImage = "添加圖片"
     attachmentMenu = "附件與工具"
     imagePreview = "圖片預覽"
+    previousImage = "上一張圖片"
+    nextImage = "下一張圖片"
+    jumpToFunctionalSettings = "跳轉至功能設定"
     downloadImage = "下載圖片"
     imageDownloaded = "圖片已儲存"
     uploadImage = "上傳圖片"
@@ -2153,6 +2195,8 @@ val ZhTW = AppStrings("zh-TW").apply {
     generateImage = "生成圖片"
     generateSceneImage = "生成目前場景圖"
     sceneImageVisualOnly = "目前場景圖 · 僅供視覺呈現，不寫入劇情記憶"
+    enhancedSceneContinuity = "增強同元延續"
+    enhancedSceneContinuityDesc = "使用最近保留的場景圖延續服裝、配飾與道具；最新劇情文字和人物設定優先。刪除的場景圖不再參與參考。"
     sceneErrorNoModel = "未設定可用的生圖模型，請檢查角色或全域生圖設定。"
     sceneErrorAuth = "生圖服務的 API Key 無效或沒有模型權限，請檢查設定。"
     sceneErrorEndpoint = "生圖介面或模型不存在；有參考圖時，請確認服務支援 images/edits。"
@@ -2183,10 +2227,14 @@ val ZhTW = AppStrings("zh-TW").apply {
     appIconXinsheng = "新生"
     appIconRixiang = "日象"
     appIconHailuo = "海螺"
-    appIconRestart = "選擇會儲存在本機，重新啟動 FreeChat 後更換桌面圖示。"
+    appIconRestart = "選擇圖示後點擊儲存，FreeChat 將立即重新啟動並載入新圖示。"
     appIconActive = "正在使用"
     appIconSelected = "已選擇"
     appIconSaveFailed = "圖示選擇未儲存，請重試。"
+    appIconRestartWarning = "更換圖示需要重新啟動軟體，目前有對話正在思考/回覆，可能會導致該條思考/回覆中斷，確定現在重新啟動？"
+    appIconDoNotChange = "暫不更換"
+    appIconRestartNow = "立即重新啟動"
+    appIconRestarting = "正在重新啟動…"
     quickLocate = "快速定位"
     locateStart = "定位到對話開頭"
     locateEnd = "定位到最新訊息"
@@ -2235,7 +2283,7 @@ val ZhTW = AppStrings("zh-TW").apply {
     deleteModel = "刪除"
     unsavedTitle = "未儲存變更"
     unsavedMessage = "目前有未儲存的變更，確定要放棄嗎？"
-    userAgreement = "免責聲明"
+    userAgreement = "用戶協議與使用條款"
     addModelFirst = "請先在設定裡新增模型"
     favorites = "收藏"
     favorite = "收藏"
@@ -2436,7 +2484,8 @@ val ZhTW = AppStrings("zh-TW").apply {
         )),
         AgreementSectionText("二、模型需自備", listOf(
             "除作者內建的少量模型外，AI 能力需您自行設定第三方 API Key。第三方服務的可用性、價格與內容政策由服務商獨立決定，與作者無關。",
-            "內建模型為作者本人使用的 API，**不保證隨時保有額度**，可能隨時失效。"
+            "內建模型為作者本人使用的 API，**不保證隨時保有額度**，可能隨時失效。",
+            "「自訂語音音色」等語音功能會把您上傳或錄製的音訊樣本、音色描述傳送至第三方語音服務（小米 MiMo）進行合成處理；音訊樣本僅保存在本機，不參與雲同步。"
         )),
         AgreementSectionText("三、帳號與伺服器（可選）", listOf(
             "您**可以不註冊**。不註冊時全部功能均可正常使用，資料僅保存在本裝置。",
@@ -2449,6 +2498,7 @@ val ZhTW = AppStrings("zh-TW").apply {
             "· 自行判斷輸出內容的合法性與準確性",
             "· 不利用本軟體生成、傳播違法或不良資訊",
             "· 「線上網頁分享」生成的公開連結可被任何持有連結者訪問，請自行斟酌分享內容",
+            "· 「自訂語音音色」僅限使用您本人或已獲授權的聲音樣本，嚴禁複製、模仿他人聲音用於冒充身分、詐欺、誹謗或任何違法用途",
             "AI 的輸出可能包含錯誤，請自行判斷，不應視為專業意見。"
         )),
         AgreementSectionText("五、未成年人", listOf(
@@ -2467,10 +2517,11 @@ val ZhTW = AppStrings("zh-TW").apply {
         "2. 內建模型為作者自備的 API，不保證隨時可用或保有額度。",
         "3. 無需註冊即可完整使用；註冊僅用於跨裝置同步，同步內容僅限您主動同步的資料。API Key 僅保存於本地，不會上傳至伺服器。",
         "4. 請勿利用本軟體生成、儲存或傳播違反法律法規的內容。",
-        "5. 本軟體僅供學習與研究使用，商用請自行評估相關法律風險。"
+        "5. 「自訂語音音色」僅限使用您本人或已獲授權的聲音樣本，嚴禁複製他人聲音用於冒充、詐欺等違法用途；音訊樣本會傳送至第三方語音服務處理。",
+        "6. 本軟體僅供學習與研究使用，商用請自行評估相關法律風險。"
     )
     agreementAgreePrefix = "我已閱讀並同意"
-    agreementDocName = "《免責聲明》"
+    agreementDocName = "《用戶協議與使用條款》"
     agreementContinue = "確定並繼續"
     agreementReleasePage = "發布頁："
     agreementWebLabel = "FreeChat官網："
@@ -2486,7 +2537,7 @@ val ZhTW = AppStrings("zh-TW").apply {
     authorWordsTitle = "作者的話"
     authorWordsOpen = "點擊閱讀"
     authorWebAddress = "官方網頁："
-    authorWebNote = "網域還沒過審，直接用 IP —— 無毒無害。"
+    authorWebNote = "網域已過審，直接用網域 —— 無毒無害。"
     authorGithubRepo = "GitHub 倉庫："
     authorGithubNote = "覺得不錯的話，點個 Star。"
     authorCsdn = "CSDN 主頁："
@@ -2495,6 +2546,14 @@ val ZhTW = AppStrings("zh-TW").apply {
     authorQrHint = "長按 QR Code 可儲存至相簿"
     saveQr = "儲存 QR Code"
     saveToGallery = "儲存至相簿"
+    aboutFreeChat = "關於FreeChat"
+    checkUpdate = "檢查更新"
+    updateChecking = "檢查中…"
+    updateLatest = "已是最新版本"
+    updateDownloading = "發現新版本，正在下載…"
+    updateInstalling = "下載完成，正在拉起安裝…"
+    updateFailed = "檢查更新失敗，請稍後重試"
+    updateVerifyFailed = "安裝包驗證失敗，已取消安裝"
     changelogEntries = listOf(
         ChangelogEntry("Version 1.0.18", "2026-09-10", listOf(
             ChangelogSection("新增功能", listOf(
@@ -2582,6 +2641,9 @@ val En = AppStrings("en").apply {
     addImage = "Add Image"
     attachmentMenu = "Attachments and tools"
     imagePreview = "Image Preview"
+    previousImage = "Previous image"
+    nextImage = "Next image"
+    jumpToFunctionalSettings = "Jump to functional settings"
     downloadImage = "Download"
     imageDownloaded = "Image saved"
     uploadImage = "Upload Image"
@@ -3009,6 +3071,8 @@ val En = AppStrings("en").apply {
     generateImage = "Generate image"
     generateSceneImage = "Generate current scene"
     sceneImageVisualOnly = "Scene illustration · Visual only, excluded from story memory"
+    enhancedSceneContinuity = "Enhanced scene continuity"
+    enhancedSceneContinuityDesc = "Use recent retained scenes to keep clothing, accessories, and props consistent. Current story text and character settings take priority. Deleted scenes are excluded."
     sceneErrorNoModel = "No image model configured. Check the character or global image model."
     sceneErrorAuth = "The image service rejected the API key or model permissions. Check configuration."
     sceneErrorEndpoint = "Image endpoint or model not found. With references, the service must support images/edits."
@@ -3039,10 +3103,14 @@ val En = AppStrings("en").apply {
     appIconXinsheng = "Newborn"
     appIconRixiang = "Sun"
     appIconHailuo = "Conch"
-    appIconRestart = "Your choice is saved on this device. Restart FreeChat to change the launcher icon."
+    appIconRestart = "Choose an icon and tap Save. FreeChat will restart immediately with the new icon."
     appIconActive = "In use"
     appIconSelected = "Selected"
     appIconSaveFailed = "Couldn't save the icon choice. Please retry."
+    appIconRestartWarning = "Changing the icon restarts FreeChat. A conversation is currently thinking or replying and may be interrupted. Restart now?"
+    appIconDoNotChange = "Don't change now"
+    appIconRestartNow = "Restart now"
+    appIconRestarting = "Restarting…"
     quickLocate = "Quick locate"
     locateStart = "Go to conversation start"
     locateEnd = "Go to latest message"
@@ -3091,7 +3159,7 @@ val En = AppStrings("en").apply {
     deleteModel = "Delete"
     unsavedTitle = "Unsaved Changes"
     unsavedMessage = "You have unsaved changes. Discard them?"
-    userAgreement = "Disclaimer"
+    userAgreement = "User Agreement and Terms of Use"
     addModelFirst = "Please add a model in Settings first"
     favorites = "Favorites"
     favorite = "Favorite"
@@ -3292,7 +3360,8 @@ val En = AppStrings("en").apply {
         )),
         AgreementSectionText("2. You supply the models", listOf(
             "Apart from the few models built in by the author, every AI capability requires you to configure a third-party API key. The availability, pricing and content policy of those services are determined independently by the provider and are not related to the author.",
-            "The built-in models are the author's own APIs and are **not guaranteed to carry quota at any time**. They may stop working without notice."
+            "The built-in models are the author's own APIs and are **not guaranteed to carry quota at any time**. They may stop working without notice.",
+            "Voice features such as \"Custom voice tone\" send the audio samples you upload or record, together with your voice description, to a third-party speech service (Xiaomi MiMo) for synthesis. Audio samples are stored on this device only and never take part in cloud sync."
         )),
         AgreementSectionText("3. Account & server (optional)", listOf(
             "You **do not have to sign up**. All features work without an account, and your data stays on this device only.",
@@ -3305,6 +3374,7 @@ val En = AppStrings("en").apply {
             "· judging for yourself whether the output is lawful and accurate",
             "· not using the app to create or spread illegal or harmful content",
             "· remembering that public links created via \"Web sharing\" can be opened by anyone who holds the link — share judiciously",
+            "· using \"Custom voice tone\" only with your own voice or voices you are authorized to use — never cloning or imitating someone else's voice to impersonate, defraud, defame or break the law",
             "AI output can be wrong. Use your own judgement; do not treat it as professional advice."
         )),
         AgreementSectionText("5. Minors", listOf(
@@ -3323,10 +3393,11 @@ val En = AppStrings("en").apply {
         "2. The built-in models are the author's own APIs and are not guaranteed to be available or to carry quota.",
         "3. The app is fully usable without an account; signing up is only for cross-device synchronization of the data you actively sync. API keys are stored locally and are never uploaded to the server.",
         "4. Do not use this app to create, store or spread unlawful content.",
-        "5. This app is for study and research. Assess the legal risk yourself before commercial use."
+        "5. \"Custom voice tone\" may only use your own voice or voices you are authorized to use. Cloning others' voices for impersonation, fraud or any unlawful purpose is forbidden; audio samples are sent to a third-party speech service for processing.",
+        "6. This app is for study and research. Assess the legal risk yourself before commercial use."
     )
     agreementAgreePrefix = "I have read and agree to"
-    agreementDocName = "the Disclaimer"
+    agreementDocName = "the User Agreement and Terms of Use"
     agreementContinue = "Agree and continue"
     agreementReleasePage = "Release page:"
     agreementWebLabel = "FreeChat website:"
@@ -3342,7 +3413,7 @@ val En = AppStrings("en").apply {
     authorWordsTitle = "Author's Words"
     authorWordsOpen = "Tap to read"
     authorWebAddress = "Official website:"
-    authorWebNote = "The domain hasn't cleared review yet, so it's the IP — harmless, honestly."
+    authorWebNote = "The domain has cleared review — use it directly. Harmless, honestly."
     authorGithubRepo = "GitHub repo:"
     authorGithubNote = "A Star would be appreciated."
     authorCsdn = "CSDN blog:"
@@ -3351,6 +3422,14 @@ val En = AppStrings("en").apply {
     authorQrHint = "Long-press the QR code to save it"
     saveQr = "Save QR code"
     saveToGallery = "Save to gallery"
+    aboutFreeChat = "About FreeChat"
+    checkUpdate = "Check for updates"
+    updateChecking = "Checking…"
+    updateLatest = "You are up to date"
+    updateDownloading = "New version found, downloading…"
+    updateInstalling = "Download complete, opening installer…"
+    updateFailed = "Update check failed, please try again later"
+    updateVerifyFailed = "Package verification failed, install cancelled"
     changelogEntries = listOf(
         ChangelogEntry("Version 1.0.18", "2026-09-10", listOf(
             ChangelogSection("New", listOf(

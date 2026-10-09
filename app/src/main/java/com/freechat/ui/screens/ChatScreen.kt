@@ -201,6 +201,7 @@ fun ChatScreen(
     val liveReasoningState = viewModel.liveReasoning.collectAsState()
     val liveContentState = viewModel.liveContent.collectAsState()
     val isGeneratingImage by viewModel.isGeneratingImage.collectAsState()
+    val imageGenerationPhase by viewModel.generationPhase.collectAsState()
     val generationReplyId by viewModel.generationReplyId.collectAsState()
     val pendingImages by viewModel.pendingImages.collectAsState()
     val isAddingImages by viewModel.isAddingImages.collectAsState()
@@ -430,6 +431,11 @@ fun ChatScreen(
     // 入场动画只播一次的凭据：播过的消息 id 记在这里。
     // 没有它的话，懒加载列表把消息滑出屏幕再滑回来就会重播一遍动画——一眼就假。
     val currentConvId by viewModel.currentConversationId.collectAsState()
+    val conversationImages by key(currentConvId) {
+        produceState(emptyList<PreviewImage>(), messages) {
+            value = withContext(Dispatchers.IO) { ConversationImageGallery.images(messages) }
+        }
+    }
     val firstSendMotion = remember(viewModel) { FirstSendMotionIntent() }
     val entranceLedger = remember(currentConvId) {
         val sentAt = firstSendMotion.consume(currentConvId)
@@ -884,13 +890,14 @@ fun ChatScreen(
                                     AnimatedContent(targetState = msgItem.msg.isStreaming && isGeneratingImage,
                                         transitionSpec = { FreeChatAnimation.contentReplacement() }, label = "image_wait_to_result") { waitingForImage ->
                                     if (waitingForImage) {
-                                        ImageGenerationPlaceholder(colors)
+                                        ImageGenerationPlaceholder(colors, phase = imageGenerationPhase)
                                     } else ChatBubble(
                                         message = if (msgItem.msg.isStreaming) msgItem.msg.copy(
                                             content = liveContentState.value, reasoningContent = liveReasoningState.value,
                                             answerLinksRequested = SearchPresentation.linksRequested(messages.lastOrNull { it.role == Role.USER }?.content.orEmpty())
                                         ) else msgItem.msg,
                                         isDark = isDark,
+                                        imageGallery = conversationImages,
                                         generationLabel = if (msgItem.msg.isStreaming) generationStatus(viewModel) else null,
                                         liveThinkingMs = if (msgItem.msg.isStreaming) viewModel.thinkingTimeMs.collectAsState().value else 0L,
                                         highlightKeyword = if (isFlashTarget) highlightKeyword else null,
@@ -1144,6 +1151,7 @@ fun ChatScreen(
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
             } else {
+            val voiceConversationId = currentConvId
             ChatInput(
                 onSend = { text ->
                     streamFollow.onGenerationRequested(!listState.canScrollForward)
@@ -1185,17 +1193,23 @@ fun ChatScreen(
                 },
                 draftText = draftText,
                 onDraftChanged = { txt -> currentConvId?.let { viewModel.saveDraft(it, txt) } },
-                onVoiceInput = { text ->
+                onVoiceInput = voice@{ text ->
+                    // Selection updates in the VM before the next Compose frame; never deliver into another chat.
+                    if (viewModel.currentConversationId.value != voiceConversationId) return@voice
                     if (text.isNotBlank()) {
                         streamFollow.onGenerationRequested(!listState.canScrollForward)
                         sendNewMessage(text)
                     }
                     // 认的是**这条对话**的语音识别模型（新规则里可以单独指定），不能再拿全局那份当准 ——
                     // 全局没配但这条对话配了的话，识别本来能成，提示「没模型」就把人挡在门外了
-                    else if (!viewModel.hasAsrModel(currentConvId)) showNoAsrDialog = true
+                    else if (!viewModel.hasAsrModel(voiceConversationId)) showNoAsrDialog = true
                 },
-                onRecognizeVoice = { wav -> viewModel.recognizeVoiceInput(wav) },
+                onRecognizeVoice = { wav ->
+                    if (viewModel.currentConversationId.value == voiceConversationId) viewModel.recognizeVoiceInput(wav)
+                    else null
+                },
                 onRecordingChanged = { isRecording = it },
+                voiceSessionKey = voiceConversationId,
                 hazeState = hazeState,
                 isCompanion = currentMode == com.freechat.model.ChatMode.COMPANION,
                 // 动作演绎 / 剧情补足：一次只发一条，发送后右侧键变终止键（点了撤回并退回输入框）

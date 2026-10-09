@@ -21,6 +21,8 @@ class FreeChatApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // The short-lived restart process must not open the store, start sync, or switch aliases.
+        if (IconRestartActivity.isRestartProcess(this)) return
         LocaleManager.captureSystemLocale()
         // 共享模块的标题兜底接上本地化文案（Conversation.healed 的罕见路径，见 AppJson 注释）
         com.freechat.data.AppJson.newChatTitleProvider = { LocaleManager.strings().newChat }

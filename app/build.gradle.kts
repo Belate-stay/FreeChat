@@ -21,10 +21,11 @@ android {
         applicationId = "com.freechat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 201
-        versionName = "1.1.0"
+        versionCode = 206
+        versionName = "1.1.10"
 
         buildConfigField("String", "XIAOMI_API_KEY", "\"${secretKey("XIAOMI_API_KEY")}\"")
+        buildConfigField("String", "DEEPSEEK_API_KEY", "\"${secretKey("DEEPSEEK_API_KEY")}\"")
         buildConfigField("String", "DOUBAO_API_KEY", "\"${secretKey("DOUBAO_API_KEY")}\"")
         buildConfigField("String", "MIMO_TTS_KEY", "\"${secretKey("MIMO_TTS_KEY")}\"")
     }

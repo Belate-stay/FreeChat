@@ -125,7 +125,16 @@ object Session {
          * 拿云端清单做差、只补云里从没有过的那部分，每个账号每台设备做一次。
          * 做失败不立标记，下次登录接着试。
          */
-        val seededMissing: Boolean = false
+        val seededMissing: Boolean = false,
+        /**
+         * 「图片存量补缺」做过了没有（1.2.3+，G5）。
+         *
+         * 和 [seededMissing] 同一个洞的图片版：1.0.99.3 之前推消息不推图、
+         * 以及历史上推送失败过（413 配额满/进程被杀）的图，云端一直缺着 ——
+         * 其他端对着引用只能显示缺图占位。[SyncEngine.seedImagesOnce] 拿云端清单
+         * 做差、只补云里从没有过的图对象，每个账号每台设备做一次；失败不立标记。
+         */
+        val seededImages: Boolean = false
     )
 
     private fun emptyState(userId: String) = SyncState(userId = userId)
@@ -146,7 +155,8 @@ object Session {
                 dirty = parsed.dirty ?: emptyList(),
                 lastSyncAt = parsed.lastSyncAt,
                 seededExtras = parsed.seededExtras,
-                seededMissing = parsed.seededMissing
+                seededMissing = parsed.seededMissing,
+                seededImages = parsed.seededImages
             )
         } else emptyState(userId)
         return syncCache!!

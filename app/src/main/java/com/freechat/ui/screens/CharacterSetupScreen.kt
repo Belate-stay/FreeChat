@@ -13,8 +13,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import com.freechat.data.CharacterPresentationPolicy
 import com.freechat.ui.animation.MotionPolicy
+import com.freechat.ui.animation.LocalMotionEnabled
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -59,12 +61,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
@@ -75,6 +80,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.freechat.data.ModelCatalog
+import com.freechat.data.ModelSelectionResolver
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.*
 import kotlinx.coroutines.launch
@@ -124,6 +130,11 @@ fun CharacterSetupScreen(
     val advancedMaterial = LocalAdvancedMaterial.current
     val hazeState = rememberHazeState()
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val motionEnabled = LocalMotionEnabled.current
+    val settingsScope = rememberCoroutineScope()
+    val settingsScrollState = rememberScrollState()
+    var functionalSettingsTop by remember { mutableIntStateOf(0) }
     val normInitial = initial?.normalized()
     val langModels by viewModel.languageModels.collectAsState()
     val visionModels by viewModel.visionModels.collectAsState()
@@ -156,6 +167,7 @@ fun CharacterSetupScreen(
     var replyBufferEnabled by remember { mutableStateOf(initial?.replyBufferEnabled ?: true) }
     var visionModelId by remember { mutableStateOf(initial?.visionModelId ?: "") }
     var visualModelId by remember { mutableStateOf(initial?.visualModelId ?: "") }
+    var enhancedSceneContinuity by remember { mutableStateOf(normInitial?.enhancedSceneContinuity ?: false) }
     var appearanceText by remember { mutableStateOf(initial?.appearanceText ?: "") }
     // 人物形象多图（最多 3 张）+ 对应识图结果
     var appearanceImagePaths by remember { mutableStateOf(normInitial?.appearanceImagePaths ?: emptyList()) }
@@ -302,6 +314,7 @@ fun CharacterSetupScreen(
         deepThinkingMode = deepThinkingMode,
         visionModelId = visionModelId,
         visualModelId = visualModelId,
+        enhancedSceneContinuity = enhancedSceneContinuity,
         enableWebSearch = webSearch,
         appearanceText = appearanceText.trim(),
         appearanceImagePaths = appearanceImagePaths,
@@ -348,7 +361,8 @@ fun CharacterSetupScreen(
             highQualityMemory = base.highQualityMemory,
             deepThinking = base.deepThinking,
             aiCreativity = base.aiCreativity,
-            proactiveEnabled = base.proactiveEnabled
+            proactiveEnabled = base.proactiveEnabled,
+            enhancedSceneContinuity = base.enhancedSceneContinuity
         ) != base
     } ?: false
     // 功能设置独立于角色提示词：预览态可修改，保存/返回不会重新学习角色。
@@ -367,6 +381,7 @@ fun CharacterSetupScreen(
         deepThinkingMode != initial.deepThinkingMode ||
         visionModelId != initial.visionModelId ||
         visualModelId != initial.visualModelId ||
+        enhancedSceneContinuity != initial.enhancedSceneContinuity ||
         webSearch != initial.enableWebSearch
     )
 
@@ -536,6 +551,8 @@ fun CharacterSetupScreen(
     }
 
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val settingsTopPadding = HazeSpec.topContentPaddingDp(statusBarHeightDp, 32.dp)
+    val settingsTopPaddingPx = with(LocalDensity.current) { settingsTopPadding.roundToPx() }
 
     // MBTI / 语言模型 / 识图模型三个选择器原本也在这里弹 AlertDialog，现在同样是窗口内的
     // 磨砂玻璃弹层，渲染在下面根 Box 的末尾（见 SheetPanel）。
@@ -569,8 +586,8 @@ fun CharacterSetupScreen(
                 // 放后面就成了「滚动内容里的一段留白」，视口还是被键盘盖着的那一整屏，
                 // 光标该被挡住还是被挡住。放前面 = 可视区真的变矮，内容才有地方滚上来。
                 .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 32.dp), bottom = 40.dp)
+                .verticalScroll(settingsScrollState)
+                .padding(top = settingsTopPadding, bottom = 40.dp)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -1122,7 +1139,10 @@ fun CharacterSetupScreen(
 
             // 人物设定 / 模拟设置 之间用分页线分隔，保留空间区分
             Spacer(Modifier.height(12.dp))
-            HorizontalDivider(color = colors.Divider.copy(alpha = 0.5f))
+            HorizontalDivider(color = colors.Divider.copy(alpha = 0.5f),
+                modifier = Modifier.onGloballyPositioned { coordinates ->
+                    functionalSettingsTop = coordinates.positionInRoot().y.roundToInt() + settingsScrollState.value
+                })
             Spacer(Modifier.height(16.dp))
 
             // ──── 增强检索（原「高质量检索回复」；创建/编辑都可随时切换）────
@@ -1385,7 +1405,7 @@ fun CharacterSetupScreen(
                         Column(Modifier.weight(1f)) {
                             Text(s.languageModel, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
                             Text(
-                                langModels.find { it.id == langModelId }?.displayName
+                                ModelSelectionResolver.find(langModelId, ModelType.LANGUAGE, langModels)?.displayName
                                     ?: "${s.followGlobal} · ${globalLangModel.displayName}",
                                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
                                 color = colors.TextSecondary
@@ -1397,7 +1417,7 @@ fun CharacterSetupScreen(
                     // 1.0.74 深度思考（所选模型支持才显示；与完整输入框按钮互通 —— 写的就是角色档案这份）
                     run {
                         val effLangModel = if (langModelId.isBlank()) globalLangModel
-                            else langModels.find { it.id == langModelId }
+                            else ModelSelectionResolver.find(langModelId, ModelType.LANGUAGE, langModels)
                                 ?: globalLangModel
                         AnimatedVisibility(effLangModel.supportsDeepThinking,
                             enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
@@ -1445,6 +1465,38 @@ fun CharacterSetupScreen(
                                 Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
                             }
                             HorizontalDivider(color = colors.Divider.copy(alpha = 0.4f), modifier = Modifier.padding(horizontal = 14.dp))
+                            if (generates) {
+                                SettingsRow {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(s.enhancedSceneContinuity, modifier = Modifier.weight(1f, fill = false),
+                                                    style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                                                BetaTag(s.betaTag, colors)
+                                            }
+                                            Text(s.enhancedSceneContinuityDesc,
+                                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
+                                                color = colors.TextSecondary)
+                                        }
+                                        Switch(
+                                            enabled = true,
+                                            checked = enhancedSceneContinuity,
+                                            onCheckedChange = { enhancedSceneContinuity = it },
+                                            colors = SwitchDefaults.colors(
+                                                checkedThumbColor = colors.OnPrimary,
+                                                checkedTrackColor = colors.Primary,
+                                                uncheckedThumbColor = colors.TextTertiary,
+                                                uncheckedTrackColor = colors.SurfaceVariant
+                                            )
+                                        )
+                                    }
+                                }
+                                HorizontalDivider(color = colors.Divider.copy(alpha = 0.4f), modifier = Modifier.padding(horizontal = 14.dp))
+                            }
                         }
                     }
                     Row(
@@ -1510,11 +1562,23 @@ fun CharacterSetupScreen(
             }
             Text(
                 s.characterSetup,
+                modifier = Modifier.weight(1f),
                 color = colors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
-                style = MaterialTheme.typography.titleLarge
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            Spacer(Modifier.weight(1f))
+            HeaderIconButton(onClick = {
+                focusManager.clearFocus()
+                settingsScope.launch {
+                    val target = (functionalSettingsTop - settingsTopPaddingPx).coerceAtLeast(0)
+                    if (motionEnabled) settingsScrollState.animateScrollTo(target, FreeChatAnimation.materialTween)
+                    else settingsScrollState.scrollTo(target)
+                }
+            }, enabled = functionalSettingsTop > 0) {
+                Icon(Icons.Filled.Tune, s.jumpToFunctionalSettings, tint = colors.TextSecondary)
+            }
             if (isEditing) {
                 HeaderIconButton(onClick = { exportCharacter() }) {
                     Icon(Icons.Filled.Share, s.exportCharacter, tint = colors.TextSecondary, modifier = Modifier.size(22.dp))
@@ -2169,13 +2233,13 @@ private fun BoxScope.LangModelSheet(
         )
         models.forEach { m ->
             SheetOption(
-                selected = m.id == current,
+                selected = ModelSelectionResolver.find(current, ModelType.LANGUAGE, models) == m,
                 title = m.displayName,
                 subtitle = com.freechat.i18n.localizedModelDesc(m, s),
                 colors = colors,
                 // 模型名是"代码感"的字符串，沿用原来的等宽字体
                 monoTitle = true,
-                onClick = { onSelect(m.id) }
+                onClick = { onSelect(ModelSelectionResolver.selectionKey(m)) }
             )
         }
     }

@@ -376,14 +376,16 @@ object FreeChatAnimation {
     const val INPUT_VELOCITY_FACTOR = 0.4f
 
     // ==================== 语音输入动画 ====================
-    /** 按住录音时输入框向右收起 — 非线性"灵动"曲线，参考 Gemini/DeepSeek 语音交互 */
+    /** 水滴吸入：起步轻，末段加速吸入固定的语音键；不使用有回弹的弹簧。 */
     val voiceCollapseTween = tween<Float>(
-        durationMillis = 280,
-        easing = iosEaseInOut
+        durationMillis = 440,
+        easing = CubicBezierEasing(0.58f, 0f, 0.82f, 0.24f)
     )
-    /** 波形条电平采样后的平滑过渡（消除电平跳变的毛刺） */
-    val voiceLevelTween = tween<Float>(
-        durationMillis = 90,
-        easing = FastOutSlowInEasing
+    /** 松手后从同一锚点舒展，减速落位，没有尺寸超调。 */
+    val voiceRestoreTween = tween<Float>(
+        durationMillis = 500,
+        easing = CubicBezierEasing(0.18f, 0.74f, 0.20f, 1f)
     )
+    val voiceBarsEnter = tween<Float>(320, delayMillis = 180, easing = arrivalEase)
+    val voiceBarsExit = tween<Float>(200, easing = iosEaseIn)
 }

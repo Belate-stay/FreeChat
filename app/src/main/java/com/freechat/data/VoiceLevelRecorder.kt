@@ -9,18 +9,17 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
-import kotlin.math.sqrt
 
 /**
  * 本地录音采集器：AudioRecord 读取麦克风 PCM（16kHz/16bit/单声道），
- * 一边实时算归一化电平（驱动波形动画），一边累积 PCM 字节（松手后交给 ASR 识别）。
+ * 同一份 PCM 驱动电平和频谱动画，并累积字节供松手后的 ASR 识别。
  *
  * 线程模型（根治「主线程 stop vs 录音线程 read」竞态与旧线程复活）：
- * - AudioRecord 的 stop/release 全部收口在录音线程内部完成；
- * - 主线程 stop() 只做三件事：置 running=false、调用 record.stop() 打断阻塞中的 read、
- *   用 CountDownLatch 无超时等待录音线程真正退出。不再有限时 join，杜绝「超时后旧线程
- *   被新的 running=true 唤醒、与新录音并发抢麦克风」的崩溃。
+ * - 活跃 AudioRecord 的 release 由录音线程完成；stop/cancel 可打断它的阻塞 read。
+ * - cancel() 只发出停止信号并丢弃 PCM；stop() 有限等待，调用方可放在 IO 线程。
+ * - 旧线程释放前不允许 start，有限等待不会让两个代次同时持有麦克风。
  * - 每次 start 递增 generation，录音线程退出前校验代次，旧线程绝不会被新录音复活。
  */
 class VoiceLevelRecorder {
@@ -28,6 +27,8 @@ class VoiceLevelRecorder {
     private val _level = MutableStateFlow(0f)
     /** 实时电平，0 静音 ~ 1 满幅，供波形条 collectAsState */
     val level: StateFlow<Float> = _level.asStateFlow()
+    private val _spectrum = MutableStateFlow(VoiceSpectrumFrame(0f, FloatArray(VoiceSpectrumAnalyzer.BAND_COUNT)))
+    val spectrum: StateFlow<VoiceSpectrumFrame> = _spectrum.asStateFlow()
 
     private val pcmBuffer = ByteArrayOutputStream()
     /** 最大累积 PCM 上限：60s × 32000 字节/秒 ≈ 1.92MB，防止长按录音 OOM 打崩进程 */
@@ -36,11 +37,12 @@ class VoiceLevelRecorder {
     @Volatile
     private var running = false
 
-    /** 主线程 stop() 时用它打断阻塞中的 read；只由主线程写，录音线程不碰它 */
+    /** stop/cancel 用它打断阻塞中的 read；release 仍由录音线程负责。 */
     @Volatile
     private var record: AudioRecord? = null
 
     /** 代次：每次 start 递增，录音线程退出前校验，杜绝旧线程被新 running=true 复活 */
+    @Volatile
     private var generation = 0
 
     private var captureThread: Thread? = null
@@ -48,20 +50,23 @@ class VoiceLevelRecorder {
 
     /** 开始录音。重复调用无副作用。 */
     @Synchronized
-    fun start() {
-        if (running) return
+    fun start(): Boolean {
+        if (running) return true
+        if (threadDone?.count == 1L) return false
         _level.value = 0f
+        _spectrum.value = VoiceSpectrumFrame(0f, FloatArray(VoiceSpectrumAnalyzer.BAND_COUNT))
         synchronized(pcmBuffer) { pcmBuffer.reset() }
 
-        val minBuf = AudioRecord.getMinBufferSize(
-            16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-        )
-        val bufSize = maxOf(minBuf, 1600) // ~50ms @16kHz
+        val minBuf = runCatching {
+            AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        }.getOrElse { return false }
+        if (minBuf <= 0) return false
+        val bufSize = maxOf(minBuf, 2560)
         val rec = try {
             AudioRecord(
                 MediaRecorder.AudioSource.MIC,
                 16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                bufSize * 2
+                bufSize
             )
         } catch (_: SecurityException) {
             // Permission may be revoked after the UI check; never start a capture session.
@@ -71,16 +76,21 @@ class VoiceLevelRecorder {
         }
         if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) {
             rec?.release()
-            return
+            return false
         }
         try {
             rec.startRecording()
         } catch (_: SecurityException) {
             rec.release()
-            return
+            return false
         } catch (e: Exception) {
             rec.release()
-            return
+            return false
+        }
+        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            runCatching { rec.stop() }
+            rec.release()
+            return false
         }
 
         generation++
@@ -92,8 +102,9 @@ class VoiceLevelRecorder {
 
         captureThread = thread(isDaemon = true, name = "voice-capture") {
             try {
-                val buf = ShortArray(bufSize)
-                val byteBuf = ByteArray(bufSize * 2)
+                val analyzer = VoiceSpectrumAnalyzer()
+                val buf = ShortArray(640) // 40ms @16kHz：频谱约 25Hz
+                val byteBuf = ByteArray(buf.size * 2)
                 while (running && myGen == generation) {
                     val n = try {
                         rec.read(buf, 0, buf.size)
@@ -106,25 +117,25 @@ class VoiceLevelRecorder {
                         Thread.sleep(1)   // 无数据时让渡 CPU，避免高速空转加剧 ANR
                         continue
                     }
-                    var sum = 0.0
+                    if (!running || myGen != generation) break
+                    val frame = analyzer.analyze(buf, n)
                     for (i in 0 until n) {
-                        val v = buf[i].toDouble()
-                        sum += v * v
                         val s = buf[i].toInt()
                         // little-endian 16bit PCM
                         byteBuf[i * 2] = (s and 0xFF).toByte()
                         byteBuf[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
                     }
-                    val rms = sqrt(sum / n)
-                    val raw = (rms / 32768.0).toFloat().coerceIn(0f, 1f)
-                    // 非线性放大低音量，让小声说话也有可见波形
-                    _level.value = (raw * 6f).coerceAtMost(1f)
                     synchronized(pcmBuffer) {
-                        if (pcmBuffer.size() < maxPcmBytes) {
-                            pcmBuffer.write(byteBuf, 0, n * 2)
+                        if (running && myGen == generation) {
+                            _level.value = frame.level
+                            _spectrum.value = frame
+                            val remaining = maxPcmBytes - pcmBuffer.size()
+                            if (remaining > 0) pcmBuffer.write(byteBuf, 0, minOf(n * 2, remaining))
                         }
                     }
                 }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
             } catch (t: Throwable) {
                 // 兜底：OOM 等 Error 不再走默认 handler 打崩整个进程
                 Log.e("VoiceLevelRecorder", "capture thread crashed", t)
@@ -137,28 +148,48 @@ class VoiceLevelRecorder {
                     rec.release()
                 } catch (_: Exception) {
                 }
+                synchronized(pcmBuffer) {
+                    if (myGen == generation) {
+                        running = false
+                        record = null
+                        _level.value = 0f
+                        _spectrum.value = VoiceSpectrumFrame(0f, FloatArray(VoiceSpectrumAnalyzer.BAND_COUNT))
+                    }
+                }
                 done.countDown()
             }
         }
+        return true
     }
 
     /** 停止录音，返回累积的 PCM 字节（16kHz/16bit/单声道，little-endian）。 */
-    @Synchronized
     fun stop(): ByteArray {
-        running = false
-        _level.value = 0f
-        // 打断阻塞中的 read（AudioRecord.stop 线程安全，会让 read 立即返回）
-        runCatching { record?.stop() }
-        val done = threadDone
-        record = null
-        // 无超时等待录音线程真正退出（它在 finally 里 stop/release 后 countDown）
+        val (done, pcm) = synchronized(this) {
+            requestStop()
+            threadDone to synchronized(pcmBuffer) { pcmBuffer.toByteArray().also { pcmBuffer.reset() } }
+        }
         try {
-            done?.await()
+            done?.await(120, TimeUnit.MILLISECONDS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
-        captureThread = null
-        threadDone = null
-        return synchronized(pcmBuffer) { pcmBuffer.toByteArray() }
+        return pcm
+    }
+
+    /** 取消录音：不复制 PCM，不等待录音线程，适合手势取消及页面销毁。 */
+    @Synchronized
+    fun cancel() {
+        requestStop()
+        synchronized(pcmBuffer) { pcmBuffer.reset() }
+    }
+
+    private fun requestStop() {
+        synchronized(pcmBuffer) {
+            running = false
+            _level.value = 0f
+            _spectrum.value = VoiceSpectrumFrame(0f, FloatArray(VoiceSpectrumAnalyzer.BAND_COUNT))
+        }
+        runCatching { record?.stop() }
+        captureThread?.interrupt()
     }
 }

@@ -194,8 +194,9 @@ class MainActivity : ComponentActivity() {
                 onDispose { lifecycle.removeObserver(observer) }
             }
             val themeMode by chatViewModel.themeMode.collectAsState()
-            val colorTheme by chatViewModel.colorTheme.collectAsState()
-            val customColorArgb by chatViewModel.customColorArgb.collectAsState()
+            val themeSelection by chatViewModel.themeSelection.collectAsState()
+            val colorTheme = themeSelection.theme
+            val customColorArgb = themeSelection.customColorArgb
             val fontSize by chatViewModel.fontSize.collectAsState()
             val useSystemFont by chatViewModel.useSystemFont.collectAsState()
             val systemDarkTheme by chatViewModel.systemDarkTheme.collectAsState()
@@ -217,6 +218,11 @@ class MainActivity : ComponentActivity() {
             val liquidBackdrop by chatViewModel.liquidBackdrop.collectAsState()
             val currentMode by chatViewModel.currentMode.collectAsState()
             val currentCharacter by chatViewModel.currentCharacter.collectAsState()
+            val voiceError by com.freechat.data.TtsController.lastError.collectAsState()
+            LaunchedEffect(voiceError) {
+                voiceError?.let { android.widget.Toast.makeText(this@MainActivity, it.message,
+                    android.widget.Toast.LENGTH_LONG).show() }
+            }
             val hasAgreedTerms by chatViewModel.hasAgreedTerms.collectAsState()
             val conversations by chatViewModel.conversations.collectAsState()
             val currentConvId by chatViewModel.currentConversationId.collectAsState()

@@ -151,6 +151,7 @@ class CompanionBrain(
      * [skipUserWrite]=App 自管用户消息落盘、大脑只把 [userText] 入上下文。
      * 新通道（1.0.99.4 微信缓冲批）：[messages] 逐条带稳定 id 幂等落库，[batchId] 是过期闸门 id
      *（通道层并批中止时按 id 调 [cancel]）。
+     * [wechatBinding] 只由受信任微信路由提供；仍须校验同步库里的当前绑定，不能由用户文本开启。
      */
     suspend fun reply(
         convId: String,
@@ -158,7 +159,8 @@ class CompanionBrain(
         userMessageId: String? = null,
         skipUserWrite: Boolean = false,
         batchId: String? = null,
-        messages: List<UserMsg> = emptyList()
+        messages: List<UserMsg> = emptyList(),
+        wechatBinding: WechatBinding? = null
     ): ReplyResult {
         evictStaleGates()
         val gate = RoundGate(batchId ?: CompanionStore.newMessageId(), convId)
@@ -173,7 +175,7 @@ class CompanionBrain(
         val lock = locks.computeIfAbsent(convId) { Mutex() }
         try {
             return lock.withLock {
-                replyLocked(convId, gate, userText, userMessageId, skipUserWrite, messages)
+                replyLocked(convId, gate, userText, userMessageId, skipUserWrite, messages, wechatBinding)
             }
         } finally {
             active.remove(convId, gate)
@@ -224,11 +226,21 @@ class CompanionBrain(
         userText: String,
         userMessageId: String?,
         skipUserWrite: Boolean,
-        messages: List<UserMsg>
+        messages: List<UserMsg>,
+        wechatBinding: WechatBinding?
     ): ReplyResult {
         val objs = store.load(convId) ?: throw IllegalArgumentException("conversation not found: $convId")
         val character = objs.conv.characterProfile?.normalized()
             ?: throw IllegalArgumentException("conversation has no character profile: $convId")
+        require(wechatBinding == null || store.hasActiveWechatBinding(objs.userId, convId, wechatBinding)) {
+            "wechat binding is no longer active"
+        }
+        val allowWechatEmoji = wechatBinding != null && character.dialogueMode == DialogueMode.WECHAT
+        fun ensureWechatBindingActive() {
+            if (wechatBinding != null && !store.hasActiveWechatBinding(objs.userId, convId, wechatBinding)) {
+                throw CancellationException("wechat binding changed during generation")
+            }
+        }
         val nowMs = System.currentTimeMillis()
 
         // 1) 用户消息（skipUserWrite=收口模式：只入上下文不落库，落库由 App 的正常同步负责）
@@ -257,7 +269,7 @@ class CompanionBrain(
             working += msg
         }
         working.sortBy { it.timestamp }
-        if (newUsers.isNotEmpty()) persistMessages(convId, newUsers)
+        if (newUsers.isNotEmpty()) persistMessages(convId, newUsers, wechatBinding)
 
         // 2) 作息：睡觉窗口内沉默不回复（记漏回，醒后提示词里自然解释）
         if (isSleepingNow(convId, character)) {
@@ -284,15 +296,18 @@ class CompanionBrain(
         )
         val systemPrompt = CompanionPrompts.buildCompanionSystemPrompt(
             character = character, messages = working,
-            convRules = objs.conv.rules.orEmpty(), pendingReminder = null, timeState = timeState
+            convRules = objs.conv.rules.orEmpty(), pendingReminder = null, timeState = timeState,
+            allowWechatEmoji = allowWechatEmoji
         )
         val memoryContext = if (autoMem) MemoryLogic.buildMemoryContext(objs.memories, turnText, hq, assoc) else ""
         val history = CompanionHistory.pickHistory(working, CompanionHistory.historyBudgetTokens(hq))
         // 深度推演（1.0.99.4 补大脑）：deepThinking ∧ 高质量记忆才跑（App 的 callCompanionApi 同条件）
+        ensureWechatBindingActive()
         val deepPrepNote = if (character.deepThinking && hq)
             runDeepPrepPass(character, systemPrompt, working, objs.memories, turnText, assoc, autoMem) else ""
 
         suspend fun generate(forceReply: Boolean, lengthHint: String? = null): com.freechat.core.ParsedCompanionReply {
+            ensureWechatBindingActive()
             val request = CompanionRequestBuilder.build(
                 character = character, systemPrompt = systemPrompt, memoryContext = memoryContext,
                 deepPrepNote = deepPrepNote, history = history, forceReply = forceReply, lengthHint = lengthHint,
@@ -302,13 +317,15 @@ class CompanionBrain(
             // 深度思考「尽力关」：与 App 的 companionDeepThink 同语义（角色开关 ∧ 模型能力位）
             val deepThink = character.deepThinkingMode && MIMO.supportsDeepThinking
             val raw = completer.complete(request, temperature, CompanionPrompts.deepThinkExtras(deepThink))
-            return CompanionReplyParser.parse(raw, narrative)
+            ensureWechatBindingActive()
+            return CompanionReplyParser.parse(raw, narrative, allowWechatEmoji = allowWechatEmoji)
         }
 
         var parsed = generate(forceReply = false)
         if (parsed.bodyLines.isEmpty()) parsed = generate(forceReply = true)
         if (parsed.bodyLines.isEmpty()) {
             // 仍空：与 App 同款发省略号（自然无语，不显示「（空回复）」）
+            ensureWechatBindingActive()
             if (!gate.tryCommit()) return ReplyResult(emotion = "", silence = true)
             val ellipsis = Message(
                 id = CompanionStore.newMessageId(), role = com.freechat.model.Role.ASSISTANT,
@@ -316,7 +333,7 @@ class CompanionBrain(
             )
             working += ellipsis
             gate.notePersisted(ellipsis.id)
-            persistMessages(convId, listOf(ellipsis))
+            persistMessages(convId, listOf(ellipsis), wechatBinding)
             return ReplyResult(emotion = "", segments = listOf("…"), messageIds = listOf(ellipsis.id))
         }
         if (narrative && CompanionPrompts.countChars(parsed.bodyLines.joinToString("")) <
@@ -335,6 +352,7 @@ class CompanionBrain(
 
         // 5) 分条落库（时间戳逐条 +1 保序）
         //    落库前最后看一眼过期闸门：被并批/被中止 → 弃写，不在箱里留孤儿回复
+        ensureWechatBindingActive()
         if (!gate.tryCommit()) return ReplyResult(emotion = parsed.emotion, silence = true)
         val baseTs = System.currentTimeMillis()
         val replyIds = mutableListOf<String>()
@@ -350,7 +368,8 @@ class CompanionBrain(
             replyMsgs += m
             gate.notePersisted(id)
         }
-        persistMessages(convId, replyMsgs)
+        ensureWechatBindingActive()
+        persistMessages(convId, replyMsgs, wechatBinding)
         sleepingMissedMessages[convId] = 0
 
         // 6) 记忆摘录 + 氛围快照（与 App 的 summarizeAndRemember 同款；摘录失败不拖回复）
@@ -502,14 +521,17 @@ class CompanionBrain(
      * （fresh 优先：App 刚做的删除/修改绝不被旧快照回滚），rev 对上为止。
      * 大脑对 msgs 箱只增不改，追加式合并不会复活删除、不会盖掉并发写。
      */
-    private suspend fun persistMessages(convId: String, additions: List<Message>) {
+    private suspend fun persistMessages(convId: String, additions: List<Message>, wechatBinding: WechatBinding? = null) {
         repeat(5) { attempt ->
             val fresh = store.load(convId) ?: return
+            if (wechatBinding != null && !store.hasActiveWechatBinding(fresh.userId, convId, wechatBinding)) {
+                throw CancellationException("wechat binding changed during persistence retry")
+            }
             try {
                 val known = fresh.messages.mapTo(HashSet()) { it.id }
                 val merged = (fresh.messages + additions.filterNot { it.id in known }).sortedBy { it.timestamp }
                 store.writeBox(fresh.userId, "msgs", convId, fresh.revs["msgs"] ?: 0L,
-                    store.messagesToWire(merged), System.currentTimeMillis())
+                    store.messagesToWire(merged), System.currentTimeMillis(), requiredWechatBinding = wechatBinding)
                 return
             } catch (_: CompanionStore.RevConflict) {
                 kotlinx.coroutines.delay(30L * (attempt + 1))

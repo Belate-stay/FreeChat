@@ -7,13 +7,19 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.freechat.model.ModelInfo
 import com.freechat.model.HeaderBarStyle
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "freechat_settings")
 
-class SettingsRepository(private val context: Context) {
+class SettingsRepository internal constructor(private val dataStore: DataStore<Preferences>) {
+    constructor(context: Context) : this(context.dataStore)
 
     companion object {
         /**
@@ -44,6 +50,9 @@ class SettingsRepository(private val context: Context) {
         internal val KEY_TTS_SPEED = floatPreferencesKey("tts_speed_v3")
         internal val KEY_TTS_PITCH = floatPreferencesKey("tts_pitch")
         internal val KEY_TTS_AUTO_PLAY = booleanPreferencesKey("tts_auto_play")
+        // Opaque, device-local selection only. Audio and prompts live in noBackupFilesDir.
+        // This key is deliberately absent from SettingsBridge's explicit sync allowlist.
+        private val KEY_TTS_PRESET_ID = stringPreferencesKey("tts_local_preset_id")
         internal val KEY_AUTO_SUMMARIZE_MEMORY = booleanPreferencesKey("auto_summarize_memory")
         internal val KEY_USE_SYSTEM_FONT = booleanPreferencesKey("use_system_font")
         internal val KEY_GLOBAL_MEMORIES = stringPreferencesKey("global_memories")
@@ -117,8 +126,9 @@ class SettingsRepository(private val context: Context) {
          */
         private var onWrite: (() -> Unit)? = null
 
-        @Volatile
-        private var suspendDepth = 0
+        private object RemoteApply : AbstractCoroutineContextElement(Key) {
+            object Key : CoroutineContext.Key<RemoteApply>
+        }
 
         /**
          * **本地刚改过、还没推上云端**的偏好键 → 改动序号。这是「开关自己弹回去」的唯一解药。
@@ -141,11 +151,17 @@ class SettingsRepository(private val context: Context) {
         /** 记下这一笔**用户改动**动到了哪些键（比对前后两份快照，见 [edit]） */
         private fun recordPending(before: Preferences, after: Preferences) {
             synchronized(LOCK) {
-                for (key in after.asMap().keys + before.asMap().keys) {
-                    if (before[key] != after[key]) {
-                        pendingSeq++
-                        pendingLocal[key.name] = pendingSeq
-                    }
+                val changed = (after.asMap().keys + before.asMap().keys)
+                    .filter { before[it] != after[it] }.mapTo(linkedSetOf()) { it.name }
+                // An existing custom pigment can be selected without changing its numeric value.
+                // Protect both halves so a stale remote pigment cannot alter that new choice.
+                if (KEY_COLOR_THEME.name in changed || KEY_CUSTOM_COLOR_ARGB.name in changed) {
+                    changed += KEY_COLOR_THEME.name
+                    changed += KEY_CUSTOM_COLOR_ARGB.name
+                }
+                for (name in changed) {
+                    pendingSeq++
+                    pendingLocal[name] = pendingSeq
                 }
             }
         }
@@ -168,16 +184,11 @@ class SettingsRepository(private val context: Context) {
         /**
          * 包住「同步引擎把云端设置落回来」的那几次写入，免得又被当成用户改的推回去。
          *
-         * 加计数器和加锁在**同一个** synchronized 块里完成：先拿锁再自增，
-         * 中途插进来的那个用户写入拿不到锁，就不会因为读到还没自增的深度而漏报。
+         * 作用域属于当前同步协程，不能用全局计数器：同步挂起时用户仍可修改设置，
+         * 那一笔必须记录为本地写入，而不能因为另一个协程正在同步就漏报/被覆盖。
          */
         suspend fun <T> suspendApply(block: suspend () -> T): T {
-            synchronized(LOCK) { suspendDepth++ }
-            try {
-                return block()
-            } finally {
-                synchronized(LOCK) { suspendDepth-- }
-            }
+            return withContext(RemoteApply) { block() }
         }
     }
 
@@ -189,12 +200,13 @@ class SettingsRepository(private val context: Context) {
      * DataStore 本身不认识同步 —— 反过来的依赖会让两边都绕不开对方。
      */
     private suspend fun edit(block: (MutablePreferences) -> Unit) {
-        // **必须写全 `context.dataStore.`**。Kotlin 解析调用时成员函数优先于扩展函数，
+        // **必须写全 `dataStore.`**。Kotlin 解析调用时成员函数优先于扩展函数，
         // 而 `DataStore.edit` 正是个扩展 —— 裸写 `edit { }` 会绑到**这个方法自己**身上，
         // 无限递归到 StackOverflowError。它又是所有 saveXxx 的唯一出口，
         // 所以表现是「改任何一项设置都闪退」，而不是某一项坏了。
-        context.dataStore.edit { prefs ->
-            if (suspendDepth == 0) {
+        val remoteApply = coroutineContext[RemoteApply.Key] != null
+        dataStore.edit { prefs ->
+            if (!remoteApply) {
                 // 用户改的：原样写，同时记下动到了哪几个键，好在推上去之前挡住远端旧值
                 val before = prefs.toPreferences()
                 block(prefs)
@@ -220,134 +232,146 @@ class SettingsRepository(private val context: Context) {
         // 设备本地字段（选模型、同意条款）也会走到这儿，它们压根不参与同步 ——
         // 于是会多推一次内容没变的设置。服务端对相同内容是字节比对后**不顶版本号**的，
         // 代价就是一次几百毫秒的往返，而换来的代码简单得多：这里不必知道哪个键算"可同步"。
-        val notify = synchronized(LOCK) { suspendDepth == 0 }
-        if (notify) onWrite?.invoke()
+        if (!remoteApply) onWrite?.invoke()
     }
 
-    val selectedModelId: Flow<String> = context.dataStore.data.map { prefs ->
+    val selectedModelId: Flow<String> = dataStore.data.map { prefs ->
         prefs[KEY_SELECTED_MODEL] ?: ""
     }
 
-    val selectedVisualModelId: Flow<String> = context.dataStore.data.map { prefs ->
+    val selectedVisualModelId: Flow<String> = dataStore.data.map { prefs ->
         prefs[KEY_SELECTED_VISUAL_MODEL] ?: ""
     }
 
-    val selectedVisionModelId: Flow<String> = context.dataStore.data.map { prefs ->
+    val selectedVisionModelId: Flow<String> = dataStore.data.map { prefs ->
         prefs[KEY_SELECTED_VISION_MODEL] ?: ""
     }
 
-    val themeModeOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+    val themeModeOrdinal: Flow<Int> = dataStore.data.map { prefs ->
         prefs[KEY_THEME_MODE] ?: 0
     }
 
     // 默认 2 = ColorTheme.WHITE（纯白）。1.0.64 起新装默认，老用户由迁移钉在原来的暖棕上。
-    val colorThemeOrdinal: Flow<Int> = context.dataStore.data.afterDefaultMigration().map { prefs ->
+    val colorThemeOrdinal: Flow<Int> = dataStore.data.afterDefaultMigration().map { prefs ->
         prefs[KEY_COLOR_THEME] ?: DEFAULT_COLOR_THEME_ORDINAL
     }
 
-    val customColorArgb: Flow<Int> = context.dataStore.data.map { prefs ->
+    val customColorArgb: Flow<Int> = dataStore.data.map { prefs ->
         prefs[KEY_CUSTOM_COLOR_ARGB] ?: 0xFF346C98.toInt()
     }
 
-    val tempModeOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+    val themeSelection: Flow<ThemeSelection> = dataStore.data.afterDefaultMigration().map { prefs ->
+        ThemeSelection(
+            com.freechat.model.ColorTheme.entries.getOrElse(prefs[KEY_COLOR_THEME] ?: DEFAULT_COLOR_THEME_ORDINAL) {
+                com.freechat.model.ColorTheme.WHITE
+            },
+            prefs[KEY_CUSTOM_COLOR_ARGB] ?: 0xFF346C98.toInt()
+        )
+    }.distinctUntilChanged()
+
+    val tempModeOrdinal: Flow<Int> = dataStore.data.map { prefs ->
         prefs[KEY_TEMP_MODE] ?: 0
     }
 
-    val lengthModeOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+    val lengthModeOrdinal: Flow<Int> = dataStore.data.map { prefs ->
         prefs[KEY_LENGTH_MODE] ?: 0
     }
 
-    val pinnedConversationIds: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+    val pinnedConversationIds: Flow<Set<String>> = dataStore.data.map { prefs ->
         prefs[KEY_PINNED_IDS] ?: emptySet()
     }
 
-    val enableWebSearch: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val enableWebSearch: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_ENABLE_WEB_SEARCH] ?: true  // 默认开启
     }
 
-    val showSearchSources: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val showSearchSources: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_SHOW_SEARCH_SOURCES] ?: false
     }
 
-    val showThinking: Flow<Boolean> = context.dataStore.data.afterDefaultMigration().map { prefs ->
+    val showThinking: Flow<Boolean> = dataStore.data.afterDefaultMigration().map { prefs ->
         prefs[KEY_SHOW_THINKING] ?: DEFAULT_SHOW_THINKING
     }
 
-    val languageCode: Flow<String> = context.dataStore.data.map { prefs ->
+    val languageCode: Flow<String> = dataStore.data.map { prefs ->
         prefs[KEY_LANGUAGE_CODE] ?: "system"
     }
 
-    val fontSizeOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+    val fontSizeOrdinal: Flow<Int> = dataStore.data.map { prefs ->
         prefs[KEY_FONT_SIZE] ?: 1  // 1 = MEDIUM（标准）
     }
 
-    val inputStyleOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+    val inputStyleOrdinal: Flow<Int> = dataStore.data.map { prefs ->
         prefs[KEY_INPUT_STYLE] ?: 0  // 0 = COMPACT（简洁，现状）
     }
 
-    val inputBarStateOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+    val inputBarStateOrdinal: Flow<Int> = dataStore.data.map { prefs ->
         prefs[KEY_INPUT_BAR_STATE] ?: 0  // 0 = AUTO_HIDE（自动隐藏，现状）
     }
 
-    val voiceModel: Flow<String> = context.dataStore.data.map { prefs ->
+    val voiceModel: Flow<String> = dataStore.data.map { prefs ->
         prefs[KEY_VOICE_MODEL] ?: "MiMo-V2.5-TTS"
     }
 
-    val ttsVoice: Flow<String> = context.dataStore.data.map { prefs ->
+    val ttsVoice: Flow<String> = dataStore.data.map { prefs ->
         prefs[KEY_TTS_VOICE] ?: "mimo_default"
     }
 
-    val ttsSpeed: Flow<Float> = context.dataStore.data.map { prefs ->
+    val ttsSpeed: Flow<Float> = dataStore.data.map { prefs ->
         prefs[KEY_TTS_SPEED] ?: 1.0f
     }
 
-    val ttsPitch: Flow<Float> = context.dataStore.data.map { prefs ->
+    val ttsPitch: Flow<Float> = dataStore.data.map { prefs ->
         prefs[KEY_TTS_PITCH] ?: 1.0f
     }
 
-    val ttsAutoPlay: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val ttsAutoPlay: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_TTS_AUTO_PLAY] ?: false  // 默认关闭自动朗读
     }
 
-    val autoSummarizeMemory: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val ttsPresetId: Flow<String> = dataStore.data.map { prefs ->
+        prefs[KEY_TTS_PRESET_ID] ?: ""
+    }.distinctUntilChanged()
+
+    val autoSummarizeMemory: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_AUTO_SUMMARIZE_MEMORY] ?: true  // 默认开启：自动总结对话以巩固 AI 记忆
     }
 
-    val useSystemFont: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val useSystemFont: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_USE_SYSTEM_FONT] ?: false  // 默认关闭：使用自定义聊天字体
     }
 
     // 全局记忆点（多条），存 JSON 数组字符串以保留顺序
-    val globalMemories: Flow<List<String>> = context.dataStore.data.map { prefs ->
+    val globalMemories: Flow<List<String>> = dataStore.data.map { prefs ->
         val raw = prefs[KEY_GLOBAL_MEMORIES] ?: "[]"
         runCatching { com.google.gson.Gson().fromJson(raw, Array<String>::class.java).toList() }
             .getOrElse { emptyList() }
     }
 
-    val advancedMaterial: Flow<Boolean> = context.dataStore.data.afterDefaultMigration().map { prefs ->
+    val advancedMaterial: Flow<Boolean> = dataStore.data.afterDefaultMigration().map { prefs ->
         prefs[KEY_ADVANCED_MATERIAL] ?: DEFAULT_ADVANCED_MATERIAL
     }
 
-    val headerBarStyle: Flow<HeaderBarStyle> = context.dataStore.data.map { prefs ->
+    val headerBarStyle: Flow<HeaderBarStyle> = dataStore.data.map { prefs ->
         HeaderBarStyle.fromOrdinal(prefs[KEY_HEADER_BAR_STYLE] ?: HeaderBarStyle.CARD.ordinal)
     }
 
-    val systemDarkTheme: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val systemDarkTheme: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_SYSTEM_DARK_THEME] ?: false  // 默认深色（false=深色，true=黑色）
     }
 
     // 流动炫彩：进阶视觉选项（每帧都在动，老机型会掉帧）。1.0.64 起改为默认开。
-    val liquidBackdrop: Flow<Boolean> = context.dataStore.data.afterDefaultMigration().map { prefs ->
+    val liquidBackdrop: Flow<Boolean> = dataStore.data.afterDefaultMigration().map { prefs ->
         SettingsPresentationPolicy.liquidBackdrop(prefs[KEY_LIQUID_BACKDROP])
     }
 
-    val chatModeOrdinal: Flow<Int> = context.dataStore.data.map { prefs ->
+    val chatModeOrdinal: Flow<Int> = dataStore.data.map { prefs ->
         prefs[KEY_CHAT_MODE] ?: 0  // 0 = STANDARD（标准问答）
     }
 
     // 用户自定义模型（JSON 数组），5 类模型共用一份列表，按 modelType 区分。
     // 过 afterDefaultMigration：v2 迁移要动这两份 JSON（深度思考默认值归零），不先迁移就发值会闪一帧旧值
-    val customModels: Flow<List<ModelInfo>> = context.dataStore.data.afterDefaultMigration().map { prefs ->
+    val customModels: Flow<List<ModelInfo>> = dataStore.data.afterDefaultMigration().map { prefs ->
         val raw = prefs[KEY_CUSTOM_MODELS] ?: "[]"
         runCatching {
             val listType = object : com.google.gson.reflect.TypeToken<List<ModelInfo>>() {}.type
@@ -356,7 +380,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     // 内置模型的参数覆盖（"TYPE|id" → 参数已改过的 ModelInfo 副本），1.0.69
-    val builtInModelParams: Flow<Map<String, ModelInfo>> = context.dataStore.data.afterDefaultMigration().map { prefs ->
+    val builtInModelParams: Flow<Map<String, ModelInfo>> = dataStore.data.afterDefaultMigration().map { prefs ->
         val raw = prefs[KEY_BUILT_IN_MODEL_PARAMS] ?: "{}"
         runCatching {
             val mapType = object : com.google.gson.reflect.TypeToken<Map<String, ModelInfo>>() {}.type
@@ -365,18 +389,18 @@ class SettingsRepository(private val context: Context) {
     }
 
     // 是否已同意用户协议与免责声明（首次进入的门槛）
-    val hasAgreedTerms: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val hasAgreedTerms: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_HAS_AGREED_TERMS] ?: false
     }
 
 
     // 语音识别模型 id（无内置，默认空 = 未添加）
-    val asrModel: Flow<String> = context.dataStore.data.map { prefs ->
+    val asrModel: Flow<String> = dataStore.data.map { prefs ->
         prefs[KEY_ASR_MODEL] ?: ""
     }
 
     /** 内置「Claude风格助理」是否生成过（置真后不回退，见 [KEY_CLAUDE_SEEDED]） */
-    val claudeSeeded: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val claudeSeeded: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_CLAUDE_SEEDED] ?: false
     }
 
@@ -386,7 +410,7 @@ class SettingsRepository(private val context: Context) {
      * 与 [claudeSeeded] 分开记，是因为两者合起来才能回答「它现在不在，是丢了还是被删了」：
      * 丢了要补回来，删了就得永远消失。只用一个「生成过」的闩，丢的那次会被误判成删的。
      */
-    val claudeDeleted: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    val claudeDeleted: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_CLAUDE_DELETED] ?: false
     }
 
@@ -395,7 +419,7 @@ class SettingsRepository(private val context: Context) {
      *
      * 只读 —— 拿它去改是不行的：所有落盘一律走 [edit]，那里才挂着写通知。
      */
-    suspend fun currentPreferences(): Preferences = context.dataStore.data.first()
+    suspend fun currentPreferences(): Preferences = dataStore.data.first()
 
     /**
      * 一次性把「老默认值」钉进盘里，让老用户在默认值换代之后**什么都不变**。
@@ -410,7 +434,7 @@ class SettingsRepository(private val context: Context) {
      * 两头夹着，"全新安装"那条路上先到的那个只会写下闩本身，后来的直接早退）。
      */
     private suspend fun migrateDefaultsIfNeeded() {
-        val prefs = context.dataStore.data.first()
+        val prefs = dataStore.data.first()
         if (prefs[KEY_DEFAULTS_VERSION] == DEFAULTS_VERSION) return
         val freshInstall = prefs.asMap().isEmpty()
         edit { mutable ->
@@ -498,6 +522,15 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
+    /** Theme identity and its custom pigment are a single visual state, including cloud restores. */
+    suspend fun saveThemeSelection(theme: com.freechat.model.ColorTheme?, argb: Int?) {
+        if (theme == null && argb == null) return
+        edit { prefs ->
+            theme?.let { prefs[KEY_COLOR_THEME] = it.ordinal }
+            argb?.let { prefs[KEY_CUSTOM_COLOR_ARGB] = it }
+        }
+    }
+
     suspend fun saveTempMode(ordinal: Int) {
         edit { prefs -> prefs[KEY_TEMP_MODE] = ordinal }
     }
@@ -556,6 +589,13 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun saveTtsAutoPlay(auto: Boolean) {
         edit { prefs -> prefs[KEY_TTS_AUTO_PLAY] = auto }
+    }
+
+    suspend fun saveTtsPresetId(presetId: String) {
+        edit { prefs ->
+            if (presetId.isBlank()) prefs.remove(KEY_TTS_PRESET_ID)
+            else prefs[KEY_TTS_PRESET_ID] = presetId
+        }
     }
 
     suspend fun saveAutoSummarizeMemory(enabled: Boolean) {

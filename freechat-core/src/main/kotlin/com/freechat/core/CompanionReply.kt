@@ -25,28 +25,40 @@ object CompanionReplyParser {
      * ① 主动智能指令行先剥掉（它是指令不是正文，绝不能出现在气泡里）；
      * ② 叙事档不解析情绪标签、整段一条（空行仅排版）；
      * ③ 微信档解析首行情绪标签（标准 [情绪:开心]，兼容裸 [开心]，识别不了当正文留着）；
-     * ④ 剥掉正文里漏出的裸方括号标签（[敷衍] 这类不是 emoji，绝不显示）。
+     * ④ 默认剥掉正文里的短方括号标签；已验证的微信通道仅保留已知内置表情。
+     *    表情词与情绪同名时（如 [委屈]），允许微信表情的通道以正文表情为准；
+     *    显式 [情绪:委屈] 与主动智能指令仍按原有规则解析。
      */
-    fun parse(rawOrig: String, narrativeMode: Boolean): ParsedCompanionReply {
+    fun parse(
+        rawOrig: String,
+        narrativeMode: Boolean,
+        allowWechatEmoji: Boolean = false
+    ): ParsedCompanionReply {
         val (raw, proactiveSignal) = stripProactiveDirective(rawOrig)
 
         val emotion: String
         val bodyLines: List<String>
         if (narrativeMode) {
             emotion = ""
-            bodyLines = listOf(raw.trim()).filter { it.isNotEmpty() }
+            bodyLines = listOf(WechatEmojiTokens.stripKnownTokens(raw).trim()).filter { it.isNotEmpty() }
         } else {
             val lines = raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
             val emotionTag = Regex("""^\s*\[(?:情绪|emotion)?\s*[:：]?\s*([^\]]+)]\s*$""")
             val first = lines.firstOrNull()
-            val parsed = first?.let { emotionTag.find(it) }?.let { m ->
+            val parsed = first?.takeUnless { allowWechatEmoji && WechatEmojiTokens.isKnownToken(it) }
+                ?.let { emotionTag.find(it) }?.let { m ->
                 val label = m.groupValues[1].trim()
                 if (parseEmotionLabel(label) != null) label else null
             }
             emotion = parsed ?: ""
             val rawBodyLines = if (parsed != null) lines.drop(1) else lines
-            val bracketToken = Regex("""\[[^\]]{1,6}]\s*""")
-            bodyLines = rawBodyLines.map { it.replace(bracketToken, "").trim() }.filter { it.isNotEmpty() }
+            val bracketToken = if (allowWechatEmoji) Regex("""\[[^\[\]\r\n]+]\s*""") else
+                Regex("""\[[^\]]{1,6}]\s*""")
+            bodyLines = rawBodyLines.map { line ->
+                line.replace(bracketToken) { match ->
+                    if (allowWechatEmoji && WechatEmojiTokens.isKnownToken(match.value.trimEnd())) match.value else ""
+                }.trim()
+            }.filter { it.isNotEmpty() }
         }
         return ParsedCompanionReply(emotion, bodyLines, proactiveSignal)
     }

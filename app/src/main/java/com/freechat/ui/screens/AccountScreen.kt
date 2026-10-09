@@ -178,13 +178,16 @@ fun AccountScreen(onBack: () -> Unit) {
         localSummary = runCatching { AccountManager.localSummary() }.getOrNull()
     }
 
-    // 已登录时拉一次用量和设备列表。失败不弹错 —— 这是附加信息，不该挡住主流程
-    LaunchedEffect(auth?.userId) {
+    // 同步结束后重新读取真实云盘用量，删除文件后不能一直显示入页时的旧统计。
+    LaunchedEffect(auth?.userId, syncStatus.lastSyncAt) {
         if (auth == null) {
             usage = null; user = null; tokens = emptyList()
             return@LaunchedEffect
         }
         runCatching { AccountManager.me() }.onSuccess { (u, g) -> user = u; usage = g }
+    }
+    LaunchedEffect(auth?.userId) {
+        if (auth == null) return@LaunchedEffect
         runCatching { AccountManager.listTokens() }.onSuccess { tokens = it }
     }
 

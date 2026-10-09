@@ -81,6 +81,7 @@ object LocalStore {
     /** 由 `FreeChatApp.onCreate` 调一次。之前各处自己 `File(filesDir, ...)`，两处来源早晚会分叉。 */
     fun init(filesDir: File) {
         dir = filesDir
+        ConversationDeletion.reload()
     }
 
     /** 本 App 的私有目录。**只给真正需要落一个"不是同步对象"的文件的地方用**（如角色头像），业务数据一律走上面那几个 File */
@@ -187,7 +188,8 @@ object LocalStore {
     fun writeText(file: File, text: String) {
         val key: String?
         synchronized(LOCK) {
-            atomicWrite(file, text)
+            val fenced = ConversationDeletion.fence(keyOf(file), text) ?: return
+            atomicWrite(file, fenced)
             key = if (suspendDepth > 0) null else keyOf(file)
         }
         key?.let { onWrite?.invoke(it) }

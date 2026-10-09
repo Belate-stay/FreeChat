@@ -57,7 +57,7 @@ object Merge {
         fun wireView(p: CharacterProfile) = p.copy(
             avatarPath = "", avatarHash = "",
             appearanceImagePath = "", appearanceImagePaths = emptyList(), appearanceImageDescs = emptyList(),
-            languageModelId = "", visionModelId = "", visualModelId = ""
+            languageModelId = "", visionModelId = "", visualModelId = "", enhancedSceneContinuity = false
         )
         return sameValue(wireView(a), wireView(b))
     }

@@ -5,7 +5,7 @@ import com.freechat.i18n.ZhCN
 import com.freechat.i18n.ZhTW
 import com.freechat.model.Message
 import com.freechat.model.Role
-import com.freechat.ui.components.ImageParticleMotion
+import com.freechat.ui.components.ImageDotMotion
 import androidx.compose.animation.EnterExitState
 import com.freechat.ui.animation.pageTranslation
 import com.google.gson.JsonParser
@@ -120,20 +120,21 @@ class Beta991RegressionTest {
         assertEquals(listOf("https://example.org/jobs"), ranked.map { it.link })
     }
 
-    @Test fun particleFieldIsBoundedStableAndNotARepeatingOrbit() {
-        val particles = ImageParticleMotion.create()
-        assertEquals(ImageParticleMotion.Count, particles.size)
-        assertTrue(particles.size <= 96)
-        assertEquals(particles, ImageParticleMotion.create())
-        for (p in particles) for (seconds in 0..200) {
+    @Test fun dotFieldIsBoundedStableAndSmooth() {
+        assertEquals(20, ImageDotMotion.Columns)
+        assertEquals(ImageDotMotion.frame(0f), ImageDotMotion.frame(0f))
+        for (column in 0 until ImageDotMotion.Columns) for (seconds in 0..200) {
             val t = seconds.toFloat()
-            assertTrue(p.x(t).isFinite() && p.y(t).isFinite())
-            assertTrue(p.x(t) in -.2f..1.2f && p.y(t) in -.2f..1.2f)
-            assertTrue(p.alpha(t) in 0f..1f)
-            assertTrue(abs(p.x(t + .016f) - p.x(t)) < .002f)
-            assertTrue(abs(p.y(t + .016f) - p.y(t)) < .002f)
+            val x = (column + .5f) / ImageDotMotion.Columns
+            val frame = ImageDotMotion.frame(t)
+            assertTrue(frame.radius(x, .5f).isFinite())
+            assertTrue(frame.radius(x, .5f) in ImageDotMotion.MinRadius..ImageDotMotion.MaxRadius)
+            assertTrue(ImageDotMotion.edgeOpacity(x, .5f) in 0f..1f)
+            assertTrue(abs(frame.radius(x, .5f) - ImageDotMotion.frame(t + .016f).radius(x, .5f)) < .004f)
         }
-        assertTrue(particles.any { abs(it.x(0f) - it.x(7.2f)) > .01f })
+        assertTrue((0 until ImageDotMotion.Columns).any { column ->
+            ImageDotMotion.frame(7.2f).radius((column + .5f) / ImageDotMotion.Columns, .5f) > ImageDotMotion.MinRadius + .01f
+        })
     }
 
     @Test fun anySearchDescriptionAndIconNamesExistInEveryLanguage() {

@@ -5,11 +5,8 @@ import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.media.PlaybackParams
-import android.util.Base64
 import android.util.Log
 import com.freechat.BuildConfig
-import com.google.gson.Gson
-import com.google.gson.JsonParser
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,10 +27,15 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import java.io.IOException
 import java.util.LinkedHashMap
 import java.util.concurrent.TimeUnit
 
@@ -55,7 +57,7 @@ import java.util.concurrent.TimeUnit
  */
 object TtsController {
     private const val TAG = "FreeChatTTS"
-    private const val MIMO_URL = "https://api.xiaomimimo.com/v1/chat/completions"
+    private const val MIMO_URL = BuiltInVoiceModel.ENDPOINT
     private val MIMO_KEY = BuildConfig.MIMO_TTS_KEY
     private const val MAX_SEGMENT = 120   // 普通段最大字数
     private const val FIRST_SEGMENT_MAX = 30  // 首段更短，保证秒读（首段合成越快开播越早）
@@ -67,7 +69,6 @@ object TtsController {
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .build()
-    private val gson = Gson()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     @Volatile
@@ -76,7 +77,6 @@ object TtsController {
     private var playJob: Job? = null
     private var progressJob: Job? = null
     private var segments = listOf<String>()
-    private var voice = "mimo_default"
     private var speed = 1f
     private var pitch = 1f
     private var speakingMessageId: String? = null
@@ -119,6 +119,16 @@ object TtsController {
     private val _isBuffering = MutableStateFlow(false)
     val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow()
 
+    // Retained after playback stops so creation screens and chat can explain the failed request.
+    private val _lastError = MutableStateFlow<MiMoTtsError?>(null)
+    val lastError: StateFlow<MiMoTtsError?> = _lastError.asStateFlow()
+
+    fun clearError() { _lastError.value = null }
+
+    fun reportConfigurationError(message: String) {
+        _lastError.value = MiMoTtsError(MiMoTtsErrorKind.INVALID_CONFIGURATION, message)
+    }
+
     /** 一条已完整合成语音的缓存 */
     private class CachedSpeech(
         val audios: Array<ByteArray?>,
@@ -134,12 +144,25 @@ object TtsController {
 
     /** 开始朗读：切分 → 后台并行合成并缓存 → 边播边合成 */
     fun speak(messageId: String, text: String, voice: String, speed: Float, pitch: Float) {
+        speak(messageId, text, MiMoVoiceConfig(stockVoice = voice), speed, pitch)
+    }
+
+    fun speak(messageId: String, text: String, config: MiMoVoiceConfig, speed: Float, pitch: Float) {
         stop()
-        this.voice = voice
+        clearError()
+        try { MiMoVoiceRequest.validate(config) }
+        catch (error: VoiceConfigurationException) {
+            reportConfigurationError(error.message.orEmpty())
+            return
+        }
         this.speed = speed
         this.pitch = pitch
 
-        val segs = splitForSpeech(text)
+        // A design request produces a fresh voice. Use one request for a coherent utterance;
+        // saved designed voices instead replay through the retained clone reference.
+        val segs = if (BuiltInVoiceModel.apiModelId(config.modelId) == BuiltInVoiceModel.DESIGN_API_ID) {
+            listOf(cleanForSpeech(text)).filter { it.isNotBlank() }
+        } else splitForSpeech(text)
         if (segs.isEmpty()) return
         this.speakingMessageId = messageId
         segments = segs
@@ -157,7 +180,7 @@ object TtsController {
         _isBuffering.value = false
 
         // 命中缓存 → 直接秒播，不再合成（key 含文本指纹，防同 id 内容变化误命中）
-        val cacheKey = "$messageId|$voice|${text.hashCode()}"
+        val cacheKey = MiMoVoiceRequest.cacheIdentity(messageId, text, config)
         val cached = speechCache[cacheKey]
         if (cached != null && cached.totalChars == totalChars) {
             segmentAudios = cached.audios
@@ -167,7 +190,7 @@ object TtsController {
             _playingMessageId.value = messageId
         } else {
             _loadingMessageId.value = messageId
-            startSynthesis(cacheKey, segs)
+            startSynthesis(cacheKey, segs, config)
         }
 
         // 进度轮询：每 100ms 刷新一次播放进度
@@ -184,6 +207,7 @@ object TtsController {
     /** 播放一段已合成的完整音频（自定义 TTS 模型），时间进度 */
     fun speakSingle(messageId: String, audio: ByteArray, speed: Float, pitch: Float) {
         stop()
+        clearError()
         timeBasedProgress = true
         this.speakingMessageId = messageId
         this.speed = speed
@@ -209,12 +233,12 @@ object TtsController {
     }
 
     /** 后台合成：先独占合成首段（最快响应秒播），首段完成后并行合成其余段。segs 为本地快照。 */
-    private fun startSynthesis(cacheKey: String, segs: List<String>) {
+    private fun startSynthesis(cacheKey: String, segs: List<String>, config: MiMoVoiceConfig) {
         synthJob = scope.launch(Dispatchers.IO) {
             // 第一步：单独合成首段，独占网络/服务端不被并发挤占，实现秒播
             val first = segs.firstOrNull()
             if (first != null) {
-                val audio = synthesize(first, voice)
+                val audio = synthesize(first, config)
                 if (audio != null) {
                     val dur = getAudioDuration(audio)
                     withContext(Dispatchers.Main) {
@@ -223,6 +247,10 @@ object TtsController {
                         segmentDurations[0] = dur
                         updateBufferFraction()
                     }
+                } else {
+                    // Do not issue more calls with a failed key, entitlement, quota or reference.
+                    withContext(Dispatchers.Main) { if (isActive) allSynthesized = true }
+                    return@launch
                 }
             }
             // 第二步：并行合成其余段（Semaphore 限流），播放期间持续预取，缓冲不断流
@@ -233,7 +261,7 @@ object TtsController {
                         async {
                             if (!isActive) return@async
                             val seg = segs[i]
-                            val audio = semaphore.withPermit { synthesize(seg, voice) }
+                            val audio = semaphore.withPermit { synthesize(seg, config) }
                             if (audio != null) {
                                 val dur = getAudioDuration(audio)
                                 withContext(Dispatchers.Main) {
@@ -386,7 +414,8 @@ object TtsController {
             } catch (e: CancellationException) {
                 // 停止/seek 时正常退出，静默处理
             } catch (e: Exception) {
-                Log.w(TAG, "播放异常: ${e.message}")
+                Log.w(TAG, "语音播放异常")
+                _lastError.value = MiMoTtsError(MiMoTtsErrorKind.PLAYBACK, "语音播放失败，请重新试听。")
                 stop()
             }
         }
@@ -412,6 +441,7 @@ object TtsController {
                         if (cont.isActive) cont.resume(true)
                     }
                     setOnErrorListener { _, _, _ ->
+                        _lastError.value = MiMoTtsError(MiMoTtsErrorKind.PLAYBACK, "语音播放失败，请重新试听。")
                         try { release() } catch (_: Exception) {}
                         if (player === this) player = null
                         if (cont.isActive) cont.resume(false)
@@ -422,7 +452,8 @@ object TtsController {
                     start()
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "播放段失败: ${e.message}")
+                Log.w(TAG, "语音播放段失败")
+                _lastError.value = MiMoTtsError(MiMoTtsErrorKind.PLAYBACK, "语音播放失败，请重新试听。")
                 mp?.let { try { it.release() } catch (_: Exception) {} }
                 if (cont.isActive) cont.resume(false)
                 return@suspendCancellableCoroutine
@@ -437,15 +468,21 @@ object TtsController {
             }
         }
 
-    /** 调用 MiMo TTS 合成，返回 mp3 字节；失败返回 null */
-    private suspend fun synthesize(text: String, voice: String): ByteArray? =
-        kotlinx.coroutines.withContext(Dispatchers.IO) {
+    /** Only the user's explicit creation action should call this; it does not save a preset. */
+    suspend fun synthesizePreview(text: String, config: MiMoVoiceConfig): ByteArray? {
+        clearError()
+        return synthesize(text, config, "wav")
+    }
+
+    /** MiMo's design and clone endpoints use complete non-stream responses. */
+    private suspend fun synthesize(text: String, config: MiMoVoiceConfig, format: String = "mp3"): ByteArray? =
+        withContext(Dispatchers.IO) {
             try {
-                val body = gson.toJson(mapOf(
-                    "model" to "mimo-v2.5-tts",
-                    "messages" to listOf(mapOf("role" to "assistant", "content" to text)),
-                    "audio" to mapOf("format" to "mp3", "voice" to voice)
-                )).toRequestBody(JSON_MEDIA)
+                if (MIMO_KEY.isBlank()) {
+                    _lastError.value = MiMoTtsErrorPolicy.httpError(401)
+                    return@withContext null
+                }
+                val body = MiMoVoiceRequest.create(text, config, format).toString().toRequestBody(JSON_MEDIA)
 
                 val request = Request.Builder()
                     .url(MIMO_URL)
@@ -454,31 +491,60 @@ object TtsController {
                     .post(body)
                     .build()
 
-                val response = client.newCall(request).execute()
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "TTS HTTP ${response.code}: ${response.message}")
+                val response = executeCancellable(request)
+                if (response.status !in 200..299) {
+                    Log.w(TAG, "TTS HTTP ${response.status}")
+                    _lastError.value = MiMoTtsErrorPolicy.httpError(response.status,
+                        MiMoVoiceResponse.providerErrorCode(response.body))
                     return@withContext null
                 }
-                val respBody = response.body?.string() ?: return@withContext null
-                val json = try {
-                    JsonParser.parseString(respBody).asJsonObject
-                } catch (e: Exception) {
-                    Log.w(TAG, "TTS JSON 解析失败: ${e.message}")
+                if (MiMoVoiceResponse.hasProviderError(response.body)) {
+                    _lastError.value = MiMoTtsErrorPolicy.httpError(400,
+                        MiMoVoiceResponse.providerErrorCode(response.body))
                     return@withContext null
                 }
-                if (json.has("error")) {
-                    Log.w(TAG, "TTS 返回错误: ${json.get("error")}")
-                    return@withContext null
+                try {
+                    MiMoVoiceResponse.decode(response.body)
+                } catch (_: VoiceConfigurationException) {
+                    _lastError.value = MiMoTtsError(MiMoTtsErrorKind.INVALID_RESPONSE, "MiMo 没有返回有效音频，请重试或检查模型权限。")
+                    null
                 }
-                val audioData = json.getAsJsonArray("choices")?.get(0)?.asJsonObject
-                    ?.getAsJsonObject("message")?.getAsJsonObject("audio")?.get("data")?.asString
-                    ?: return@withContext null
-                Base64.decode(audioData, Base64.DEFAULT)
-            } catch (e: Exception) {
-                Log.w(TAG, "TTS 合成失败: ${e.message}")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: VoiceConfigurationException) {
+                reportConfigurationError(error.message.orEmpty())
+                null
+            } catch (_: IOException) {
+                _lastError.value = MiMoTtsError(MiMoTtsErrorKind.NETWORK, "语音请求连接失败，请检查网络后重试。")
+                null
+            } catch (_: Exception) {
+                Log.w(TAG, "TTS 合成失败")
+                _lastError.value = MiMoTtsError(MiMoTtsErrorKind.UNKNOWN, "MiMo 语音创建失败，请稍后重试。")
                 null
             }
         }
+
+    private data class HttpSpeechReply(val status: Int, val body: String)
+
+    /** Cancelling playback or creation cancels the socket call and never logs personal request data. */
+    private suspend fun executeCancellable(request: Request): HttpSpeechReply = suspendCancellableCoroutine { cont ->
+        val call = client.newCall(request)
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (cont.isActive) cont.resumeWithException(error)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val result = response.use { HttpSpeechReply(it.code, it.body?.string().orEmpty()) }
+                    if (cont.isActive) cont.resume(result)
+                } catch (error: IOException) {
+                    if (cont.isActive) cont.resumeWithException(error)
+                }
+            }
+        })
+    }
 
     /** 读取 mp3 字节的时长（毫秒），失败返回 0 */
     private fun getAudioDuration(audio: ByteArray): Long {

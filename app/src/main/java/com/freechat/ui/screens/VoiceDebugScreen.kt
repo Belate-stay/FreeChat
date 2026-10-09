@@ -19,6 +19,8 @@ import com.freechat.ui.components.NeumorphicSwitch as Switch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -29,6 +31,15 @@ import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.viewmodel.ChatViewModel
+import com.freechat.data.BuiltInVoiceModel
+import com.freechat.data.SettingsRepository
+import com.freechat.data.TtsController
+import com.freechat.data.VoicePreset
+import com.freechat.data.VoicePresetRepository
+import com.freechat.ui.animation.MotionPolicy
+import com.freechat.ui.animation.PageMotion
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.pageBackground
 import com.freechat.ui.theme.hazeBackground
@@ -49,6 +60,52 @@ fun VoiceDebugScreen(
     val ttsVoice by viewModel.ttsVoice.collectAsState()
     val ttsSpeed by viewModel.ttsSpeed.collectAsState()
     val ttsPitch by viewModel.ttsPitch.collectAsState()
+    val voiceModel by viewModel.voiceModel.collectAsState()
+
+    val context = LocalContext.current
+    val settings = remember(context) { SettingsRepository(context) }
+    val voiceRepository = remember(context) { VoicePresetRepository.get(context) }
+    val customVoices by voiceRepository.presets.collectAsState()
+    val selectedPresetId by settings.ttsPresetId.collectAsState(initial = "")
+    val customSelectionActive = voiceModel.equals(BuiltInVoiceModel.CLONE_ID, ignoreCase = true) ||
+        voiceModel.equals(BuiltInVoiceModel.DESIGN_ID, ignoreCase = true)
+    val selectedPreset = customVoices.find { it.id == selectedPresetId }.takeIf { customSelectionActive }
+    val storageError by voiceRepository.storageError.collectAsState()
+    val ttsError by TtsController.lastError.collectAsState()
+    val scope = rememberCoroutineScope()
+    var showAdvancedVoice by remember { mutableStateOf(false) }
+    var deletingPreset by remember { mutableStateOf<VoicePreset?>(null) }
+    var localVoiceNotice by remember { mutableStateOf<String?>(null) }
+    var localVoiceError by remember { mutableStateOf<String?>(null) }
+
+    fun choosePreset(preset: VoicePreset, after: () -> Unit = {}) {
+        localVoiceError = null
+        TtsController.clearError()
+        scope.launch {
+            try {
+                    settings.saveTtsPresetId(preset.id)
+                    viewModel.setVoiceModel(BuiltInVoiceModel.CLONE_ID)
+                    localVoiceNotice = "已使用音色「${preset.name}」。"
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { localVoiceError = "音色选择保存失败，请在列表中重试。" }
+            finally { after() }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            if (TtsController.playingMessageId.value?.startsWith("mimo-voice-preset-") == true) TtsController.stop()
+        }
+    }
+
+    val pageTravel = with(LocalDensity.current) { MotionPolicy.PageTravelDp.dp.roundToPx() }
+    PageMotion(targetState = showAdvancedVoice, distancePx = pageTravel.toFloat(),
+        forward = { _, target -> target }, label = "advanced_voice_page") { advancedPage ->
+        if (advancedPage) {
+            MiMoVoiceSettingsPage(onBack = { showAdvancedVoice = false }, onSaved = { preset ->
+                choosePreset(preset) { showAdvancedVoice = false }
+            })
+        } else {
 
     var showVoicePicker by remember { mutableStateOf(false) }
 
@@ -116,11 +173,71 @@ fun VoiceDebugScreen(
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(s.voiceTone, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
-                            Text(voiceLabel(ttsVoice, s), style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
+                            Text(selectedPreset?.name ?: voiceLabel(ttsVoice, s), style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
                         }
                     }
                     Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
                 }
+            }
+
+            SettingsRow {
+                Row(Modifier.fillMaxWidth().clickable {
+                    if (TtsController.playingMessageId.value?.startsWith("mimo-voice-preset-") == true) TtsController.stop()
+                    showAdvancedVoice = true
+                }
+                    .padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Tune, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("高级自定义", color = colors.TextPrimary, style = MaterialTheme.typography.bodyMedium)
+                            Text("Beta", Modifier.clip(RoundedCornerShape(4.dp)).background(colors.SurfaceVariant)
+                                .padding(horizontal = 6.dp, vertical = 2.dp), color = colors.Primary,
+                                style = MaterialTheme.typography.labelSmall)
+                        }
+                        Text("根据提示词或参考音频创建自己的音色", color = colors.TextSecondary, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                }
+            }
+
+            if (customVoices.isNotEmpty()) {
+                SectionLabel(Icons.Filled.RecordVoiceOver, "本机自定义音色")
+                SettingsRow {
+                    Column {
+                        customVoices.forEach { preset ->
+                            Row(Modifier.fillMaxWidth().clickable {
+                                choosePreset(preset)
+                            }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(preset.name, color = colors.TextPrimary, style = MaterialTheme.typography.bodyMedium)
+                                    Text(if (customSelectionActive && preset.id == selectedPresetId) "当前使用" else "点击使用",
+                                        color = colors.TextSecondary, style = MaterialTheme.typography.bodySmall)
+                                }
+                                IconButton(onClick = {
+                                    scope.launch {
+                                        try {
+                                            TtsController.speakSingle("mimo-voice-preset-${preset.id}",
+                                                voiceRepository.readSample(preset.preview).bytes(), ttsSpeed, ttsPitch)
+                                        } catch (cancelled: CancellationException) { throw cancelled }
+                                        catch (error: Exception) { localVoiceError = error.message ?: "本机试听音频无法读取。" }
+                                    }
+                                }) { Icon(Icons.Filled.PlayArrow, "试听 ${preset.name}", tint = colors.Primary) }
+                                IconButton(onClick = { deletingPreset = preset }) {
+                                    Icon(Icons.Filled.DeleteOutline, "删除 ${preset.name}", tint = colors.TextTertiary)
+                                }
+                            }
+                        }
+                    }
+                }
+                TextButton(onClick = { TtsController.stop() }, modifier = Modifier.align(Alignment.End)) { Text("停止试听") }
+                Text("音色和参考音频仅保存在本机。使用时会将参考音频发送给 MiMo。", color = colors.TextTertiary,
+                    style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 8.dp))
+            }
+
+            (storageError ?: localVoiceError ?: ttsError?.message ?: localVoiceNotice)?.let { text ->
+                Text(text, color = if (storageError != null || localVoiceError != null || ttsError != null) MaterialTheme.colorScheme.error else colors.TextSecondary,
+                    style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 8.dp))
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -206,17 +323,57 @@ fun VoiceDebugScreen(
     ) {
         viewModel.ttsVoices.forEach { voice ->
             SheetOption(
-                selected = voice == ttsVoice,
+                selected = voice == ttsVoice && !customSelectionActive,
                 title = voiceLabel(voice, s),
                 colors = colors,
                 onClick = {
-                    viewModel.setTtsVoice(voice)
+                    localVoiceError = null
+                    scope.launch {
+                        try {
+                            settings.saveTtsPresetId("")
+                            viewModel.setTtsVoice(voice)
+                            viewModel.setVoiceModel(BuiltInVoiceModel.STOCK_ID)
+                            TtsController.clearError()
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { localVoiceError = "音色选择保存失败，请重试。" }
+                    }
                     showVoicePicker = false
                 }
             )
         }
+        customVoices.forEach { preset ->
+            SheetOption(selected = customSelectionActive && preset.id == selectedPresetId, title = preset.name, colors = colors,
+                onClick = {
+                    choosePreset(preset)
+                    showVoicePicker = false
+                })
+        }
+    }
+
+    deletingPreset?.let { preset ->
+        AlertDialog(onDismissRequest = { deletingPreset = null }, title = { Text("删除音色「${preset.name}」？") },
+            text = { Text("这个音色的本机配置和未被其他音色使用的参考音频会一起删除。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    deletingPreset = null
+                    scope.launch {
+                        try {
+                            TtsController.stop()
+                            voiceRepository.delete(preset.id)
+                            if (selectedPresetId == preset.id) {
+                                settings.saveTtsPresetId("")
+                                if (customSelectionActive) viewModel.setVoiceModel(BuiltInVoiceModel.STOCK_ID)
+                            }
+                            localVoiceNotice = "已删除本机音色「${preset.name}」。"
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (error: Exception) { localVoiceError = error.message ?: "删除音色失败，请稍后重试。" }
+                    }
+                }) { Text("删除") }
+            }, dismissButton = { TextButton(onClick = { deletingPreset = null }) { Text("取消") } })
     }
     }
+    }
+        }
     }
 }
 

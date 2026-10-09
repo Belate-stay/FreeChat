@@ -3,6 +3,7 @@ package com.freechat.sync
 import android.content.Context
 import android.util.Log
 import com.freechat.data.LocalStore
+import com.freechat.data.ConversationDeletion
 import com.freechat.data.SettingsRepository
 import com.freechat.i18n.LocaleManager
 import com.freechat.model.Conversation
@@ -78,6 +79,8 @@ object SyncEngine {
     private var settingsRepo: SettingsRepository? = null
 
     private var debounce: Job? = null
+    private var scheduledSync: Job? = null
+    private val scheduleLock = Any()
 
     /** 每个对象同步到第几版了。**只属于一轮同步的局部状态**，一轮开始从盘上读、结束写回去 */
     private val revs = mutableMapOf<String, Long>()
@@ -91,6 +94,15 @@ object SyncEngine {
      * 得先分清楚是「这台设备还没收到过」还是「用户在这台设备上删了这条对话」。
      */
     private val pulledConvIds = mutableSetOf<String>()
+
+    /**
+     * 1.2.3+ 缺图补拉：这批里没取回载荷的 IMG 对象 id。
+     *
+     * 以前取不到就 `return` 放过（注释还写着"下一轮再说"）—— 但游标已经
+     * 走过这条变更了，下一轮**根本不会再见到它**，引用永久悬空。
+     * 现在挂进这里，pull 收尾统一再补取一次（云端还在就一定能补上）。
+     */
+    private val pendingImgFetch = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     // ============================================================
     //  装配
@@ -119,6 +131,13 @@ object SyncEngine {
             schedule(800)
         }
         updatePending()
+        scope.launch {
+            // Resume cleanup if the process stopped between hiding the row and deleting its files.
+            for (id in ConversationDeletion.pendingIds()) {
+                val images = LocalStore.suspendApply { ConversationDeletion.removeLocal(id) }
+                Adapter.markConversationDeleted(id, images)
+            }
+        }
     }
 
     /** 有没有登录 —— 界面用它决定显示哪一套 */
@@ -132,10 +151,24 @@ object SyncEngine {
     fun schedule(delayMs: Long = 1200) {
         updatePending()
         if (Session.loadAuth() == null) return
-        debounce?.cancel()
-        debounce = scope.launch {
-            delay(delayMs)
-            runCatching { syncNow() }
+        synchronized(scheduleLock) {
+            debounce?.cancel()
+            debounce = scope.launch {
+                delay(delayMs)
+                synchronized(scheduleLock) {
+                    // New writes may cancel the waiting timer, never the in-flight sync request.
+                    if (scheduledSync?.isActive != true) {
+                        scheduledSync = scope.launch {
+                            try {
+                                runCatching { syncNow() }
+                            } finally {
+                                synchronized(scheduleLock) { scheduledSync = null }
+                                if (Adapter.pendingCount() > 0 && Session.loadAuth() != null) schedule(5000)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -314,15 +347,35 @@ object SyncEngine {
             cursor = maxOf(cursor, res.nextSeq)
             if (!res.hasMore) break
         }
+
+        // 1.2.3+ 缺图收尾补拉：这批没取回载荷的 IMG 统计补一次（见 pendingImgFetch）
+        if (pendingImgFetch.isNotEmpty()) {
+            val ids = pendingImgFetch.toList()
+            pendingImgFetch.clear()
+            runCatching {
+                val got = ApiClient.fetchObjects(auth.token, ids.map { SyncKind.IMG to it })
+                for (obj in got) {
+                    val payload = obj.data?.takeIf { it.isJsonPrimitive }?.asString
+                        ?.let { runCatching { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }.getOrNull() }
+                    // 只补字节不动 rev 账（rev 由正常变更流记账）——补拉是自愈，不是一次"应用变更"
+                    if (payload != null) ImageSync.materialize(obj.id, payload)
+                }
+            }.onFailure { Log.w(TAG, "pending img refetch failed, will heal later", it) }
+        }
     }
 
     private suspend fun applyChange(meta: ObjectMeta, obj: SyncObject?) {
         val key = Adapter.objKey(meta.kind, meta.id)
 
-        if (meta.deleted) {
-            // 本地这条还有没推上去的改动 → 不删，让下一轮把它复活。
-            // （数据比删除意图重要，而且用户明明刚在这台设备上改过它。）
-            if (Adapter.dirtyKeys().contains(key)) {
+        val conversationKind = meta.kind in setOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET)
+        if (conversationKind && ConversationDeletion.contains(meta.id) && !meta.deleted && obj?.deleted != true) {
+            synchronized(revs) { revs[key] = obj?.rev ?: meta.rev }
+            Adapter.markDirty(key)
+            return
+        }
+        if (meta.deleted || obj?.deleted == true) {
+            // A conversation tombstone always wins, including over pending local edits.
+            if (meta.kind != SyncKind.CONV && !ConversationDeletion.contains(meta.id) && Adapter.dirtyKeys().contains(key)) {
                 synchronized(revs) { revs[key] = meta.rev }
                 return
             }
@@ -331,15 +384,25 @@ object SyncEngine {
                 SyncKind.MSGS -> Relay.dropMessages(meta.id)
                 SyncKind.MEMS -> Relay.removeMemoryFile(meta.id)
                 SyncKind.PCSET -> Relay.removePerConv(meta.id)
-                // 图片对象墓碑：别处引用计数归零后被清 —— 缓存跟着删，引用留待消息层自行收敛
-                SyncKind.IMG -> runCatching { ImageSync.cacheFile(meta.id).delete() }
+                // 图片对象墓碑（1.2.3+ 护栏）：只有**本机引用归零**才跟着删缓存 ——
+                // 内容寻址的图可能还被别的消息/对话引用着（两端引用不同步），
+                // 盲删会把在用的图删瞎；宁可留一份没人要的缓存占点空间
+                SyncKind.IMG -> runCatching {
+                    if (!ImageSync.isReferencedLocally(meta.id)) ImageSync.cacheFile(meta.id).delete()
+                }
                 else -> Unit
             }
             synchronized(revs) { revs[key] = meta.rev }
+            Adapter.unmarkDirty(key)
             return
         }
 
-        val data = obj?.data ?: return
+        val data = obj?.data ?: run {
+            // 取不到载荷（刚好被删？网络抖了？）——IMG 挂补拉队列（1.2.3+），
+            // 其余 kind 放过等下轮；游标一走这条变更就再也见不到了，别让图永久悬空
+            if (meta.kind == SyncKind.IMG && !meta.deleted) pendingImgFetch.add(meta.id)
+            return
+        }
 
         // 1.0.99.3 图片对象：下载载荷落缓存（`img_<hash>.jpg`），消息层解引用就用它
         if (meta.kind == SyncKind.IMG) {
@@ -395,6 +458,7 @@ object SyncEngine {
     }
 
     private suspend fun applyConv(id: String, data: JsonElement) {
+        if (ConversationDeletion.contains(id)) return
         val local = Relay.conversations().find { it.id == id }
         val remote = Wire.convFromWire(data, local) ?: return
         val ops = mutableListOf<Relay.ConvOp>()
@@ -473,6 +537,9 @@ object SyncEngine {
         pushingVersions[key] = Adapter.dirtyVersion(key)
         val rev = synchronized(revs) { revs[key] } ?: 0L
         return try {
+            if (kind in setOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET) && ConversationDeletion.contains(id)) {
+                return deleteRemote(auth, kind, id, rev, key)
+            }
             when (kind) {
                 SyncKind.CONV -> {
                     val conv = Relay.conversations().find { it.id == id }
@@ -494,16 +561,27 @@ object SyncEngine {
                         putRemote(auth, kind, id, rev, wire, Wire.msgsUpdatedAt(msgs), key)
                     }
                 }
-                // 1.0.99.3 图片对象：缓存还在就推载荷，缓存没了（引用归零被清）就立墓碑
+                // 1.0.99.3 图片对象：缓存还在就推载荷；缓存没了分两种（1.2.3+ 护栏）
                 SyncKind.IMG -> {
                     val cache = ImageSync.cacheFile(id)
-                    if (cache.isFile && cache.length() > 0) {
+                    if (!ImageSync.isReferencedLocally(id)) {
+                        deleteRemote(auth, kind, id, rev, key)
+                    } else if (cache.isFile && cache.length() > 0) {
                         val payload = runCatching {
                             android.util.Base64.encodeToString(cache.readBytes(), android.util.Base64.NO_WRAP)
                         }.getOrNull()
                         if (payload == null) { Adapter.unmarkDirty(key); false }
                         else putRemote(auth, kind, id, rev, com.google.gson.JsonPrimitive(payload), cache.lastModified(), key)
-                    } else deleteRemote(auth, kind, id, rev, key)
+                    } else if (ImageSync.isReferencedLocally(id)) {
+                        // 缓存没了但本机还引用着：**绝不推墓碑** —— 内容寻址的图可能
+                        // 在云端/别的设备还活着，推墓碑=把别人手里的同图一起删了。
+                        // 字节等收端拉回（云端有这份就一定能补上），本轮无进展放着。
+                        Adapter.unmarkDirty(key)
+                        false
+                    } else {
+                        // 引用在本机归零（删消息时清掉的）→ 真删除，立墓碑回收配额
+                        deleteRemote(auth, kind, id, rev, key)
+                    }
                 }
                 SyncKind.MEMS -> {
                     if (!LocalStore.memoryFile(id).exists()) deleteRemote(auth, kind, id, rev, key)
@@ -521,11 +599,20 @@ object SyncEngine {
             }
         } catch (e: ApiError) {
             when {
+                kind == SyncKind.IMG && e.code == "image_referenced" -> {
+                    e.current?.rev?.let { remoteRev -> synchronized(revs) { revs[key] = remoteRev } }
+                    Adapter.unmarkDirty(key, pushingVersions[key])
+                    true // Other live conversations still own this shared image.
+                }
                 e.isConflict -> resolveConflict(auth, kind, id, key, e)
                 e.status == 413 -> {
-                    // 太大或云端空间满。**别再每轮重试同一个必然失败的请求**
-                    notice(LocaleManager.strings().syncObjectTooLarge(describe(kind, id)))
-                    Adapter.unmarkDirty(key)
+                    /* 413 有两种：对象过大（必然失败，别重试）和**配额满**（过会儿
+                       腾出空间就能成）。IMG 的载荷 ≤4MB 时 base64 远小于单对象上限，
+                       413 只可能是配额 —— **留脏下轮再试**，清掉这张图就永远上不了云
+                       （G5 病根之一：以前一律 unmark，等于配额满那一刻起图就丢了）。 */
+                    val retryable = kind == SyncKind.IMG && ImageSync.cacheFile(id).length() <= 4 * 1024 * 1024
+                    if (!retryable) notice(LocaleManager.strings().syncObjectTooLarge(describe(kind, id)))
+                    if (!retryable) Adapter.unmarkDirty(key)
                     false
                 }
                 else -> throw e
@@ -609,11 +696,7 @@ object SyncEngine {
     }
 
     private suspend fun deleteRemote(auth: Session.Auth, kind: String, id: String, rev: Long, key: String): Boolean {
-        if (rev == 0L) {
-            // 云端压根没有过这一条 —— 没什么可删的，销账走人
-            Adapter.unmarkDirty(key, pushingVersions[key])
-            return true
-        }
+        // rev=0 means "not seen here", not "absent on the server". Send the deletion intent too.
         val r = try {
             ApiClient.deleteObject(auth.token, kind, id, rev)
         } catch (e: ApiError) {
@@ -648,15 +731,21 @@ object SyncEngine {
         val remoteRev = e.current?.rev
         val deleted = e.current?.deleted == true
 
+        val conversationKind = kind in setOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET)
+        if (conversationKind && ConversationDeletion.contains(id)) {
+            synchronized(revs) { revs[key] = remoteRev ?: 0L }
+            if (deleted) Adapter.unmarkDirty(key, pushingVersions[key])
+            return true // Retry DELETE at the latest revision, never apply an old live payload.
+        }
+        if (deleted && conversationKind) {
+            val parentDeleted = kind == SyncKind.CONV || fetchOne(auth, SyncKind.CONV, id)?.deleted == true
+            if (parentDeleted) Relay.applyConversations(listOf(Relay.ConvOp.Remove(id)))
+            synchronized(revs) { revs[key] = remoteRev ?: 0L }
+            Adapter.unmarkDirty(key, pushingVersions[key])
+            return true
+        }
         if (deleted || remoteRev == null) {
-            /**
-             * 云端那份刚好被删了 —— 拿墓碑版本号重推一次就是**复活**。
-             *
-             * 复活是故意的（数据比删除意图重要），但不能不吭声：用户在另一台设备上
-             * 删掉了这条对话，这边一改它又回来了，不说一声会以为是同步出了毛病。
-             */
             synchronized(revs) { revs[key] = e.current?.rev ?: 0L }
-            notice(LocaleManager.strings().syncResurrected(describe(kind, id)))
             return true
         }
 
@@ -665,7 +754,13 @@ object SyncEngine {
             return false
         }
         if (remote.deleted) {
-            synchronized(revs) { revs[key] = remoteRev }
+            // The object can be deleted after the original 409 but before this fetch.
+            if (conversationKind) {
+                val parentDeleted = kind == SyncKind.CONV || fetchOne(auth, SyncKind.CONV, id)?.deleted == true
+                if (parentDeleted) Relay.applyConversations(listOf(Relay.ConvOp.Remove(id)))
+                Adapter.unmarkDirty(key, pushingVersions[key])
+            }
+            synchronized(revs) { revs[key] = remote.rev }
             return true
         }
 
@@ -782,12 +877,44 @@ object SyncEngine {
                 return
             }
             Adapter.markLocalMissing(Relay.conversations(), known)
-            Session.update({ it.copy(seededMissing = true) })
+            // localAllKeys 现在含缓存里的图（1.2.3+）——这一趟顺手把图片缺口也补了
+            Session.update({ it.copy(seededMissing = true, seededImages = true) })
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
             // 补缺是「下次还能再来」的锦上添花，绝不能把登录流程带崩 —— 不立标记，下回接着试
             Log.w(TAG, "seedMissing failed, will retry next login", e)
+        }
+    }
+
+    /**
+     * 图片存量补缺（1.2.3+，G5）：口径与 [seedMissing] 一致（含墓碑的云端清单做差、
+     * 只补云里从没有过的、绝不复活墓碑），专门给「seededMissing 早就立过标记」的
+     * 老账号补图片这一类 —— 1.0.99.3 之前的历史图、推送失败过的图都在这里收口。
+     */
+    suspend fun seedImagesOnce() {
+        val auth = Session.loadAuth() ?: return
+        try {
+            val known = mutableSetOf<String>()
+            var since = 0L
+            var pages = 0
+            while (pages < MAX_SEED_PAGES) {
+                val r = ApiClient.changes(auth.token, since, 200)
+                for (c in r.changes) known.add(Adapter.objKey(c.kind, c.id)) // 墓碑也算「云里有过」
+                if (!r.hasMore) break
+                since = r.nextSeq
+                pages++
+            }
+            if (pages >= MAX_SEED_PAGES) {
+                Log.w(TAG, "seedImagesOnce: cloud list too long, skip this round")
+                return
+            }
+            Adapter.markLocalMissing(Relay.conversations(), known)
+            Session.update({ it.copy(seededImages = true) })
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "seedImagesOnce failed, will retry next login", e)
         }
     }
 

@@ -96,6 +96,9 @@ object AccountManager {
             //    会一直留在本地（用户报「云端内容少了好多」的根因），拿云端清单做差补上
             if (!state.seededExtras) SyncEngine.seedExtras()
             if (!state.seededMissing) SyncEngine.seedMissing()
+            //  · seedImagesOnce —— 图片存量补缺（1.2.3+，G5）：seededMissing 早立过标记的
+            //    老账号也要收一次图片这一类（历史图/推送失败过的图），每账号一次
+            if (!state.seededImages) SyncEngine.seedImagesOnce()
         }
 
         SyncEngine.syncSoon(0)

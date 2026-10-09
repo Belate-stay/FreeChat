@@ -34,6 +34,7 @@ data class CharacterProfile(
     val languageModelId: String = "",            // 每角色独立语言模型（空=跟随全局）
     val visionModelId: String = "",              // 每角色独立识图模型（空=跟随全局）
     val visualModelId: String = "",              // 每角色独立生图模型（空=跟随全局）
+    val enhancedSceneContinuity: Boolean = false, // 增强同元延续（Beta）：叙事生图可参考最近仍保留的场景图，老档案缺字段保持关闭
     val enableWebSearch: Boolean? = null,        // 每角色独立联网搜索（null=跟随全局）
     val appearanceText: String = "",             // 人物形象文字描述（身材/体型/外貌等）
     val appearanceImagePath: String = "",        // 【旧】人物形象参考图单路径（兼容 1.540 前数据，新代码勿写入）

@@ -1,172 +1,100 @@
 package com.freechat.ui.components
 
+import android.os.Build
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.drawscope.withTransform
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.freechat.i18n.LocalStrings
-import com.freechat.ui.animation.LocalMotionEnabled
 import com.freechat.ui.theme.FreeChatColors
-import com.freechat.ui.theme.LocalChatFontFamily
-import kotlin.math.sin
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
+import com.freechat.data.GenerationPhase
+import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.LocalMotionEnabled
+import kotlin.math.max
+import kotlin.math.roundToInt
 
-object ImageLoadingMotion {
-    const val DotMillis = 600L
-    fun dots(step: Int) = ".".repeat(Math.floorMod(step, 4))
-}
-
-/** Quiet fog-lit particles: a soft material coming into focus, not a spinner or a starfield. */
+/** An ordered dot field softly breathes while the image is being generated. */
 @Composable
-fun ImageGenerationPlaceholder(colors: FreeChatColors, modifier: Modifier = Modifier) {
+fun ImageGenerationPlaceholder(colors: FreeChatColors, modifier: Modifier = Modifier, phase: GenerationPhase = GenerationPhase.IDLE) {
     val s = LocalStrings.current
-    Box(modifier.fillMaxWidth().padding(start = 8.dp, end = 24.dp, top = 4.dp)) {
-        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(24.dp)),
-            contentAlignment = Alignment.Center) {
-            ImageGenerationParticles(colors, Modifier.matchParentSize())
-            LoadingImageCaption(s.generatingImage, colors)
+    Box(modifier.fillMaxWidth().padding(start = 8.dp, end = 24.dp, top = 4.dp)
+        .semantics { contentDescription = s.generatingImage }) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f)) {
+            ImageGenerationParticles(colors, Modifier.matchParentSize(), phase)
         }
     }
 }
 
 @Composable
-internal fun ImageGenerationParticles(colors: FreeChatColors, modifier: Modifier = Modifier) {
-    val enabled = LocalMotionEnabled.current
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val seconds = remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(enabled, lifecycle) {
-        if (!enabled) { seconds.floatValue = 0f; return@LaunchedEffect }
-        // Off-screen lazy items are disposed; backgrounding also stops the frame clock completely.
-        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            var previous = 0L
-            while (isActive) withFrameNanos { now ->
-                if (previous != 0L) seconds.floatValue += ((now - previous) / 1e9f).coerceIn(0f, .05f)
-                previous = now
-            }
-        }
-    }
+internal fun ImageGenerationParticles(colors: FreeChatColors, modifier: Modifier = Modifier, phase: GenerationPhase = GenerationPhase.IDLE) {
+    val view = LocalView.current
+    var visible by remember { mutableStateOf(false) }
+    val seconds = rememberRenderSeconds(active = visible)
+    val stageSize = animateFloatAsState(ImageDotMotion.growthFor(phase),
+        if (LocalMotionEnabled.current) FreeChatAnimation.materialTween else androidx.compose.animation.core.snap(), label = "imageStageSize")
     val appearance = remember(colors) { ImageLoadingAppearance(colors) }
-    val dark = appearance.dark
-    val particles = remember { ImageParticleMotion.create() }
-    val palette = appearance.palette
-    val base = remember(appearance) { Brush.linearGradient(appearance.base) }
-    val unit = with(LocalDensity.current) { 1.dp.toPx() }
-    // Unit-radius shaders are cached; only their canvas transforms change per frame.
-    // No bitmap noise, blur passes, rotating geometry or per-frame shader allocation.
-    val mist = remember(appearance) { palette.take(3).map { color ->
-        val opacity = appearance.mistOpacity
-        Brush.radialGradient(0f to color.copy(alpha = opacity),
-            .3f to color.copy(alpha = opacity * .72f),
-            .7f to color.copy(alpha = opacity * .16f),
-            1f to color.copy(alpha = 0f), center = Offset.Zero, radius = 1f)
-    } }
-    // Flowing gradient: 3 soft color bands drifting at different speeds (cached brushes).
-    val flowBrushes = remember(appearance) {
-        val flowOpacity = if (appearance.dark) .09f else .40f
-        listOf(
-            Brush.radialGradient(0f to palette[0].copy(alpha = flowOpacity),
-                .5f to palette[1].copy(alpha = flowOpacity * .45f),
-                1f to Color.Transparent, center = Offset.Zero, radius = 1f),
-            Brush.radialGradient(0f to palette[2].copy(alpha = flowOpacity * .85f),
-                .4f to palette[3].copy(alpha = flowOpacity * .40f),
-                1f to Color.Transparent, center = Offset.Zero, radius = 1f),
-            Brush.radialGradient(0f to palette[1].copy(alpha = flowOpacity * .70f),
-                .45f to palette[0].copy(alpha = flowOpacity * .30f),
-                1f to Color.Transparent, center = Offset.Zero, radius = 1f)
-        )
+    val shader = remember {
+        if (Build.VERSION.SDK_INT >= 33) ImageDotShader() else null
     }
-    // Read the clock ONLY in drawing, not composition/layout or the containing message list.
-    Canvas(modifier) {
-        drawRect(base)
-        val time = seconds.floatValue
-        // Slowly drifting gradient blobs — aurora-like soft light flow.
-        flowBrushes.forEachIndexed { index, brush ->
-            val drift = particles[(index * 17 + 5) % particles.size]
-            val cx = drift.x(time * .20f) * size.width
-            val cy = drift.y(time * .20f) * size.height
-            val breathScale = 1f + .12f * sin(time * (.08f + index.toFloat() * .02f))
-            val r = size.maxDimension * (1.2f + index.toFloat() * .15f) * breathScale
-            withTransform({ translate(cx, cy); scale(r, r, pivot = Offset.Zero) }) {
-                drawCircle(brush, radius = 1f, center = Offset.Zero)
-            }
-        }
-        // Original mist layer (kept for depth).
-        mist.forEachIndexed { index, brush ->
-            val drift = particles[index * 13]
-            val center = Offset(drift.x(time * .55f) * size.width, drift.y(time * .55f) * size.height)
-            val radius = size.maxDimension * (.66f + index * .06f)
-            withTransform({ translate(center.x, center.y); scale(radius, radius, pivot = Offset.Zero) }) {
-                drawCircle(brush, radius = 1f, center = Offset.Zero)
-            }
-        }
-        // Particles with soft glow halo and subtle parallax by size.
-        particles.forEachIndexed { index, particle ->
-            val parallax = 1f + (particle.radius - 1f) * .015f
-            val center = Offset(particle.x(time * parallax) * size.width,
-                particle.y(time * parallax) * size.height)
-            val color = palette[particle.tint]
-            val alpha = particle.alpha(time) * if (dark) .86f else .72f
-            // Outer glow halo: larger, softer, dimmer than the core.
-            drawCircle(color.copy(alpha = alpha * .10f), particle.radius * 3.0f * unit, center)
-            drawCircle(color.copy(alpha = alpha * .25f), particle.radius * 1.8f * unit, center)
-            // Core particle.
-            drawCircle(color.copy(alpha = alpha), particle.radius * unit, center)
-            // Bright core highlight (every 5th particle).
-            if (index % 5 == 0) drawCircle(lerp(color, Color.White, .6f).copy(alpha = alpha * .5f),
-                particle.radius * .32f * unit, center)
+    SideEffect {
+        if (Build.VERSION.SDK_INT >= 33) shader?.updatePalette(appearance)
+    }
+    Canvas(modifier.onGloballyPositioned { coordinates ->
+        val bounds = coordinates.boundsInWindow()
+        visible = bounds.width > 0f && bounds.height > 0f && bounds.right > 0f && bounds.bottom > 0f &&
+            bounds.left < view.width && bounds.top < view.height
+    }) {
+        if (size.width <= 0f || size.height <= 0f) return@Canvas
+        // The frame clock invalidates drawing only; the message stays stable.
+        val frame = ImageDotMotion.frame(seconds.value, stageSize.value)
+        val cell = size.width / ImageDotMotion.Columns
+        val rows = (size.height / cell).roundToInt().coerceAtLeast(1)
+        val originY = (size.height - rows * cell) * .5f
+        if (Build.VERSION.SDK_INT >= 33 && shader != null && drawContext.canvas.nativeCanvas.isHardwareAccelerated) {
+            shader.draw(this, frame, cell, originY)
+        } else {
+            drawImageDotFallback(frame, appearance, cell, originY, rows)
         }
     }
 }
 
-@Composable
-private fun LoadingImageCaption(label: String, colors: FreeChatColors) {
-    val enabled = LocalMotionEnabled.current
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var dotStep by remember { mutableIntStateOf(0) }
-    LaunchedEffect(enabled, lifecycle) {
-        dotStep = if (enabled) 0 else 3
-        if (enabled) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (isActive) { delay(ImageLoadingMotion.DotMillis); dotStep = (dotStep + 1) % 4 }
-        }
+private fun DrawScope.drawImageDotFallback(
+    frame: ImageDotMotion.Frame, appearance: ImageLoadingAppearance, cell: Float, originY: Float, rows: Int
+) {
+    // Nested translucent fills approximate the same rounded-distance feather on software/older Android.
+    var previous = 0f
+    for (layer in 0 until 16) {
+        val inset = ImageDotMotion.Feather * layer / 16f
+        val opacity = ImageDotMotion.smoothStep(0f, 1f, (layer + 1f) / 16f)
+        drawRoundRect(appearance.base.copy(alpha = appearance.base.alpha * (opacity - previous)),
+            topLeft = Offset(size.width * inset, size.height * inset),
+            size = Size(size.width * (1f - 2f * inset), size.height * (1f - 2f * inset)),
+            cornerRadius = CornerRadius(size.width * max(0f, ImageDotMotion.Corner - inset),
+                size.height * max(0f, ImageDotMotion.Corner - inset)))
+        previous = opacity
     }
-    // A fixed dot slot avoids moving the whole caption as 0–3 dots cycle.
-    // 1.0.99.3: faded caption — subdued, not prominent.
-    val appearance = remember(colors) { ImageLoadingAppearance(colors) }
-    val ink = appearance.caption.copy(alpha = appearance.captionAlpha)
-    val captionStyle = MaterialTheme.typography.bodyLarge.copy(
-        fontFamily = LocalChatFontFamily.current, fontSize = 15.sp, lineHeight = 24.sp,
-        fontWeight = FontWeight.Normal, fontStyle = FontStyle.Normal, letterSpacing = .4.sp)
-    Row(Modifier.semantics { contentDescription = label }.padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label.trimEnd('.', '…'), style = captionStyle, color = ink, modifier = Modifier.weight(1f, fill = false))
-        // Always lay out all three dots, including at large font sizes; only their ink changes.
-        Text(buildAnnotatedString {
-            val visible = ImageLoadingMotion.dots(dotStep)
-            append(visible)
-            withStyle(SpanStyle(color = Color.Transparent)) { append(".".repeat(3 - visible.length)) }
-        }, style = captionStyle, color = ink)
+    for (row in 0 until rows) for (column in 0 until ImageDotMotion.Columns) {
+        val center = Offset((column + .5f) * cell, (row + .5f) * cell + originY)
+        val x = center.x / size.width
+        val y = center.y / size.height
+        val opacity = ImageDotMotion.edgeOpacity(x, y)
+        if (opacity <= 0f) continue
+        val strength = frame.strength(x, y)
+        val ink = lerp(appearance.dot, appearance.gloss, .28f * strength + .42f * frame.sheen(x, y))
+        drawCircle(ink.copy(alpha = ink.alpha * opacity),
+            cell * (ImageDotMotion.MinRadius + (ImageDotMotion.MaxRadius - ImageDotMotion.MinRadius) * strength), center)
     }
 }

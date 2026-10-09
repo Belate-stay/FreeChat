@@ -9,10 +9,12 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.CancellationException
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.sql.Connection
 import java.sql.DriverManager
+import java.sql.SQLException
 import java.util.UUID
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
@@ -46,6 +48,33 @@ class CompanionStore(dbPath: String) : AutoCloseable {
 
     /** id 白名单：对话 id 是客户端生成的 UUID/短串，只放行安全字符（拼进 SQL 前必须过这道） */
     fun safeId(id: String): Boolean = id.isNotEmpty() && id.length <= 64 && id.all { it.isLetterOrDigit() || it in "-_" }
+
+    /** Read only: validate the owner, attached role and binding generation without returning a token. */
+    @Synchronized
+    fun hasActiveWechatBinding(ownerId: String, convId: String, binding: WechatBinding): Boolean {
+        return try {
+            queryActiveWechatBinding(ownerId, convId, binding)
+        } finally {
+            // End this standalone read snapshot, not a writeBox transaction.
+            conn.rollback()
+        }
+    }
+
+    /** Caller owns the transaction; do not rollback a guarded write's snapshot. */
+    private fun queryActiveWechatBinding(ownerId: String, convId: String, binding: WechatBinding): Boolean {
+        if (binding.userId != ownerId || binding.boundAt <= 0L || !safeId(ownerId) || !safeId(convId)) return false
+        return try {
+            conn.prepareStatement("SELECT 1 FROM wechat_bots WHERE user_id=? AND conv_id=? AND bound_at=? AND length(trim(bot_token))>0").use { ps ->
+                ps.setString(1, ownerId)
+                ps.setString(2, convId)
+                ps.setLong(3, binding.boundAt)
+                ps.executeQuery().use { it.next() }
+            }
+        } catch (_: SQLException) {
+            // Old/test databases may lack the WeChat table. A missing fact cannot grant the capability.
+            false
+        }
+    }
 
     data class ConvObjects(
         val userId: String,
@@ -114,13 +143,20 @@ class CompanionStore(dbPath: String) : AutoCloseable {
      *    只能回滚重来。Node 侧此刻写库很密（图片上云/同步），这是常态不是异常。
      */
     @Synchronized
-    fun writeBox(userId: String, kind: String, id: String, baseRev: Long, jsonText: String, updatedAt: Long): Long {
+    fun writeBox(
+        userId: String, kind: String, id: String, baseRev: Long, jsonText: String, updatedAt: Long,
+        requiredWechatBinding: WechatBinding? = null
+    ): Long {
         val gz = gzip(jsonText)
         val rawSize = jsonText.toByteArray(Charsets.UTF_8).size.toLong()
         var lastError: Exception? = null
         repeat(5) { attempt ->
             try {
                 conn.rollback()   // 收掉任何残留事务，保证这一把是全新事务
+                // Keep provenance and the object write in the same snapshot on every BUSY retry.
+                if (requiredWechatBinding != null && !queryActiveWechatBinding(userId, id, requiredWechatBinding)) {
+                    throw CancellationException("wechat binding changed before persistence")
+                }
                 var newSeq = 0L
                 conn.prepareStatement("SELECT seq FROM users WHERE id=?").use { ps ->
                     ps.setString(1, userId)

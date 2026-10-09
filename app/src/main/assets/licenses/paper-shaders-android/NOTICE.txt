@@ -1,0 +1,17 @@
+Paper Shaders Android / Jetpack Compose port
+Copyright 2026 Andre Frelicot
+
+This package is a native Android port of paper-design/shaders:
+https://github.com/paper-design/shaders
+
+The original Paper Shaders project is licensed under the Apache License 2.0.
+Shader algorithms, presets, and visual design are based on the upstream work by
+Paper.
+
+FreeChat adapts the circular cell/fract distance and antialias mask from:
+https://github.com/AndreFrelicot/paper-shaders-android
+paper-shaders-compose/src/main/kotlin/dev/andrefrelicot/papershaders/shaders/DotGridAgsl.kt
+
+FreeChat modifications: fixed dot-grid cells, coherent regional breathing,
+theme-based ink and gloss, feathered rounded opacity, and an older Android /
+software Canvas fallback. No noise texture or full shader library is included.

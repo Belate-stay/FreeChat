@@ -184,12 +184,12 @@ fun AgreementGateDialog(
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(s.agreementWebLabel, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
                     Text(
-                        "https://118.178.227.178/",
+                        "https://freechater.com/",
                         style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
                         color = if (isSystemInDarkTheme()) Color(0xFF8AB4F8) else Color(0xFF1A73E8),
                         textDecoration = TextDecoration.Underline,
                         modifier = Modifier.clickable {
-                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://118.178.227.178/"))) }
+                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://freechater.com/"))) }
                         }
                     )
                 }

@@ -29,6 +29,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.freechat.i18n.AppStrings
+import com.freechat.data.ModelSelectionResolver
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.LengthMode
 import com.freechat.model.ModelInfo
@@ -423,7 +424,7 @@ fun NewRulesScreen(
             ModelPickerOptions(languageModels, effModel, colors, s,
                 followGlobal = com.freechat.data.ModelSelectionResolver.followsGlobal(per.languageModelId, com.freechat.model.ModelType.LANGUAGE, catalog),
                 onFollowGlobal = { set { it.copy(languageModelId = null) }; showLangPicker = false }) { m ->
-                set { it.copy(languageModelId = m.id) }
+                set { it.copy(languageModelId = ModelSelectionResolver.selectionKey(m)) }
                 showLangPicker = false
             }
         }
@@ -576,7 +577,7 @@ fun NewRulesScreen(
             hazeState = hazeState
         ) {
             TriStateOptions(deepThinkTri, effDeepThink, colors, s) { v ->
-                viewModel.setDeepThinkOverride(convId, effModel.id, v)
+                viewModel.setDeepThinkOverride(convId, ModelSelectionResolver.selectionKey(effModel), v)
                 showDeepTri = false
             }
         }
@@ -632,7 +633,7 @@ private fun ModelPickerOptions(
     }
     models.forEach { m ->
         SheetOption(
-            selected = !followGlobal && m.id == selected?.id,
+            selected = !followGlobal && selected != null && ModelSelectionResolver.selectionKey(m) == ModelSelectionResolver.selectionKey(selected),
             title = m.displayName,
             subtitle = com.freechat.i18n.localizedModelDesc(m, s),
             colors = colors,

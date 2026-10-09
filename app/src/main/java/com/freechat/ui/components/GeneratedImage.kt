@@ -21,6 +21,7 @@ import coil.request.ImageRequest
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.Message
 import com.freechat.model.Role as ChatRole
+import com.freechat.sync.ImageSync
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.theme.LocalFreeChatColors
 import java.io.File
@@ -29,6 +30,9 @@ object ImageDisplayPolicy {
     fun aspectRatio(width: Int, height: Int): Float =
         if (width > 0 && height > 0) (width.toFloat() / height).coerceIn(0.05f, 20f) else 1f
     fun isLocal(source: String) = source.startsWith("/") || File(source).isAbsolute
+
+    /** Also handles saved rows from versions that persisted both original and compressed cache. Call on IO. */
+    fun generatedImages(message: Message): List<String> = ImageSync.canonicalEntries(message.imageUrls.orEmpty())
 
     /** Old image-only records may have lost the result or arrived without device-local media. */
     fun hasMissingResult(message: Message): Boolean =

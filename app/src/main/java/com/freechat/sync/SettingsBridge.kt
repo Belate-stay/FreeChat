@@ -228,9 +228,8 @@ object SettingsBridge {
         p[KEY_SYSTEM_DARK_THEME]?.let { o.addProperty("systemDarkTheme", it) }
         p[KEY_CUSTOM_COLOR_ARGB]?.let { o.addProperty("customColorArgb", it) }
         p[KEY_COLOR_THEME]?.let { ColorTheme.entries.getOrNull(it) }?.let { selected ->
-            if (selected == ColorTheme.CUSTOM || selected == ColorTheme.PINE || selected == ColorTheme.CORAL) {
-                o.addProperty("androidColorTheme", selected.name)
-            }
+            // Explicitly replace a previous Android-only accent, even when switching to WHITE.
+            o.addProperty("androidColorTheme", selected.name)
         }
         // 内置助理生成过没有。它必须同步：否则换一台设备登录，那台看到的是 false，
         // 会再生成一条同名的对话出来，用户侧栏里就有两个「Claude风格助理」了。
@@ -257,7 +256,8 @@ object SettingsBridge {
      * 会被写监听当成「用户改的」，立刻又推回云端。
      */
     suspend fun applyRemote(repo: SettingsRepository, remote: JsonObject) {
-        val localGlobal = repo.currentPreferences()[KEY_GLOBAL_MEMORIES]?.let { globalMemoriesOf(it) }
+        val local = repo.currentPreferences()
+        val localGlobal = local[KEY_GLOBAL_MEMORIES]?.let { globalMemoriesOf(it) }
         // 「跟随系统」是**本机**的语义：它按的正是**这台设备的**系统语言。
         // 而线上那份语言是**另一台设备/网页端**存的（网页端根本没有「跟随系统」这一档，
         // 它只会存 zh-Hans / zh-Hant / en）。本地选了跟随系统时再去套线上那份，
@@ -266,9 +266,20 @@ object SettingsBridge {
         // （英文系统 + 网页端存的是 en ⇒ 每次同步都被写成 en，设置里那一项还看着像自己变的）。
         // 所以这一档不参与写入：本地是 system，云端说什么都不动它；
         // 本地是明确语言（en / zh-CN / zh-TW）时照旧以云端为准，跨设备改语言仍然有效。
-        val localLocale = repo.currentPreferences()[KEY_LANGUAGE_CODE] ?: "system"
+        val localLocale = local[KEY_LANGUAGE_CODE] ?: "system"
+
+        // Decode the final Android accent before any write. WHITE is the web fallback for
+        // PINE/CORAL/CUSTOM, not an intermediate state that the UI should ever observe.
+        val android = remote.subObject(ANDROID_PREFS)
+        val family = remote.str("themeFamily")
+        val androidTheme = android?.str("androidColorTheme")?.let { name ->
+            ColorTheme.entries.firstOrNull { it.name == name && WIRE_NAME[it] == family }
+        }
+        val theme = androidTheme ?: family?.let { fromWire<ColorTheme>(it) }
+        repo.saveThemeSelection(theme, android?.int("customColorArgb"))
 
         for (f in FIELDS) {
+            if (f.wire == "themeFamily") continue
             val el = remote.get(f.wire) ?: continue
             if (el.isJsonNull) continue
             if (f.wire == "locale" && localLocale == "system") continue
@@ -293,12 +304,10 @@ object SettingsBridge {
 
         // 用 subObject 而不是 getAsJsonObject：后者碰上 `"androidPrefs": null` 会抛
         // JsonNull 强转异常（同 [Wire.subObject] 那段注释，1.0.64 的「同步出错」）
-        remote.subObject(ANDROID_PREFS)?.let {
-            applyAndroidPrefs(repo, it, remote.str("themeFamily") == "WHITE")
-        }
+        android?.let { applyAndroidPrefs(repo, it) }
     }
 
-    private suspend fun applyAndroidPrefs(repo: SettingsRepository, o: JsonObject, allowAndroidTheme: Boolean) {
+    private suspend fun applyAndroidPrefs(repo: SettingsRepository, o: JsonObject) {
         o.int("fontSize")?.let { repo.saveFontSize(it) }
         o.int("inputStyle")?.let { repo.saveInputStyle(it) }
         o.int("inputBarState")?.let { repo.saveInputBarState(it) }
@@ -311,14 +320,6 @@ object SettingsBridge {
         o.boolean("liquidBackdrop")?.let { repo.saveLiquidBackdrop(it) }
         o.boolean("advancedMaterial")?.let { repo.saveAdvancedMaterial(it) }
         o.boolean("systemDarkTheme")?.let { repo.saveSystemDarkTheme(it) }
-        o.int("customColorArgb")?.let { repo.saveCustomColorArgb(it) }
-        if (allowAndroidTheme) {
-            when (o.str("androidColorTheme")) {
-                ColorTheme.CUSTOM.name -> o.int("customColorArgb")?.let { repo.saveCustomTheme(it) }
-                ColorTheme.PINE.name -> repo.saveColorTheme(ColorTheme.PINE.ordinal)
-                ColorTheme.CORAL.name -> repo.saveColorTheme(ColorTheme.CORAL.ordinal)
-            }
-        }
         // **只能单向置真**：这是「已经生成过」的闩，不是用户偏好。
         // 云端的 false 不能把本地的 true 抹掉 —— 抹掉就意味着用户删过的内置助理
         // 会在下次冷启动时长回来，而"删了就没了"是这个功能的承诺。
@@ -361,6 +362,12 @@ object SettingsBridge {
             } else {
                 merged.add(k, mine)
             }
+        }
+        // Repair snapshots produced by older Android builds which omitted the common
+        // themes from androidPrefs. Unknown Android/web preferences are still retained.
+        if (ours.str("themeFamily") in setOf("WHITE", "WARM", "BLUE") &&
+            ours.subObject(ANDROID_PREFS)?.str("androidColorTheme") == null) {
+            merged.subObject(ANDROID_PREFS)?.remove("androidColorTheme")
         }
         return merged
     }

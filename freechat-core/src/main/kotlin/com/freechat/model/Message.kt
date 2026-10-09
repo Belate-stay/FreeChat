@@ -34,7 +34,11 @@ data class Message(
     /** Visual-only companion scene. Never feed this row to a model or memory summarizer. */
     val sceneVisualization: Boolean = false,
     /** null = legacy row; true only when the user asked for usable URLs rather than citations. */
-    val answerLinksRequested: Boolean? = null
+    val answerLinksRequested: Boolean? = null,
+    /** The executed image prompt, so model changes and image follow-ups keep the same requirements. */
+    val imagePrompt: String? = null,
+    /** The retained source message actually used for an image edit; never retain deleted image bytes. */
+    val imageReferenceMessageId: String? = null
 )
 
 data class SearchCitation(val title: String = "", val url: String = "")

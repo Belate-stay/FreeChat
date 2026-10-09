@@ -8,7 +8,6 @@ import com.freechat.model.Role
 import com.freechat.ui.components.ChatScrollGeometry
 import com.freechat.ui.components.ChatScrollItem
 import com.freechat.ui.components.ImageDisplayPolicy
-import com.freechat.ui.components.ImageLoadingMotion
 import com.freechat.ui.components.QuickLocatePolicy
 import org.junit.Assert.*
 import org.junit.Test
@@ -119,10 +118,6 @@ class Beta99RegressionTest {
         assertEquals(2f / 3f, ImageDisplayPolicy.aspectRatio(1024, 1536), 0.001f)
         assertTrue(ImageDisplayPolicy.isLocal("/data/user/0/com.freechat/files/gen.png"))
         assertFalse(ImageDisplayPolicy.isLocal("https://example.org/a.png"))
-    }
-
-    @Test fun loadingDotsCycleFromNoneThroughThreeWithoutFakeProgress() {
-        assertEquals(listOf("", ".", "..", "...", "", "."), (0..5).map(ImageLoadingMotion::dots))
     }
 
     @Test fun oldImageOnlyRecordsWithoutMediaDoNotRenderAsAnEmptyReply() {

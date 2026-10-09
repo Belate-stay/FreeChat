@@ -14,7 +14,7 @@ import android.util.Base64
 import android.util.Log
 import com.freechat.data.MiMoAsr
 import com.freechat.core.CompanionMood
-import com.freechat.core.CompanionReply
+import com.freechat.data.CompanionApiReply as CompanionReply
 import com.freechat.core.CompanionRhythm
 import com.freechat.core.MemoryDraft
 import com.freechat.core.ProactiveFire
@@ -59,6 +59,12 @@ import com.freechat.data.NativeSearchPolicy
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import com.freechat.data.SettingsRepository
 import com.freechat.data.TtsController
+import com.freechat.data.BuiltInVoiceModel
+import com.freechat.data.MiMoVoiceConfig
+import com.freechat.data.MiMoVoiceRequest
+import com.freechat.data.VoicePresetRepository
+import com.freechat.data.VoiceConfigurationException
+import com.freechat.data.SceneReferenceSelector
 import com.freechat.i18n.AppLanguage
 import com.freechat.model.*
 import com.freechat.proactive.ProactiveRequest
@@ -127,30 +133,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         private const val LOCK_RENEW_INTERVAL_MS = 5 * 60 * 1000L
         private const val MAX_ATTACH_IMAGES = 9        // 单次最多 9 张
         private const val MAX_IMAGE_DIM = 2048          // 压缩上限（像素），减小识别请求体积、加速响应
-        // 生图检测关键词
-        private val IMAGE_GEN_KEYWORDS = listOf(
-            "生成图片", "生成一张", "画一张", "画个", "画一幅", "画张",
-            "图片生成", "帮我画", "给我画", "画图", "画画", "帮我生成",
-            "配图", "插图", "生成图像", "做一张图", "生成一张图", "来张图",
-            "generate image", "create image", "draw a", "make an image"
-        )
-        // 修图/p图/图生图关键词（用参考图生成新图）
-        private val IMAGE_EDIT_KEYWORDS = listOf(
-            "修图", "p图", "P图", "改图", "美化", "修一下", "修改图片",
-            "换背景", "去水印", "抠图", "加滤镜", "调色", "改色",
-            "把这张", "基于这张", "根据这张", "将这张", "这张图",
-            "图片处理", "处理图片", "修改这张", "编辑图片", "优化图片",
-            "增强", "修复", "变清晰", "风格转换", "风格化",
-            "edit image", "fix image", "enhance image", "retouch"
-        )
-        // 识图/图片分析关键词
-        private val IMAGE_ANALYSIS_KEYWORDS = listOf(
-            "分析", "识别", "看看", "看看这", "描述", "这是什么", "有什么",
-            "读图", "看图", "识图", "解析", "理解这张",
-            "里面是", "图片里", "图中", "图上", "图里",
-            "翻泽", "翻译图片", "提取文字", "OCR",
-            "describe", "analyze", "what is", "tell me about"
-        )
 
         // ===== 主动智能：进程级共享状态 =====
 
@@ -189,6 +171,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val settingsRepo = SettingsRepository(application)
+    private val voicePresetRepo = VoicePresetRepository.get(application)
     private val searchConfigStore = SearchConfigStore(application)
     private val _searchConfig = MutableStateFlow(searchConfigStore.load())
     val searchConfig: StateFlow<SearchConfig> = _searchConfig.asStateFlow()
@@ -411,7 +394,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun clearAttachmentNotice() { _attachmentNotice.value = "" }
 
     private val _selectedModel = MutableStateFlow(
-        ModelInfo("mimo-v2.6-flash", "MiMo-V2.6-Flash", Provider.XIAOMI, "Xiaomi深度推理模型，作者自用API，不保证随时在线，可适当白嫖。", supportsWebSearch = true, modelType = ModelType.LANGUAGE, supportsDeepThinking = true, supportsNativeSearch = true, isBuiltIn = true)
+        com.freechat.data.BuiltInLanguageModel.create(BuildConfig.DEEPSEEK_API_KEY)
     )
     val selectedModel: StateFlow<ModelInfo> = _selectedModel.asStateFlow()
 
@@ -432,7 +415,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _themeMode = MutableStateFlow(ThemeMode.SYSTEM)
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
-    private val _colorTheme = MutableStateFlow(ColorTheme.BROWN)
+    private val _themeSelection = MutableStateFlow(com.freechat.data.ThemeSelection())
+    val themeSelection: StateFlow<com.freechat.data.ThemeSelection> = _themeSelection.asStateFlow()
+    private val _colorTheme = MutableStateFlow(ColorTheme.WHITE)
     val colorTheme: StateFlow<ColorTheme> = _colorTheme.asStateFlow()
 
     private val _customColorArgb = MutableStateFlow(0xFF346C98.toInt())
@@ -487,6 +472,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _ttsVoice = MutableStateFlow("mimo_default")
     val ttsVoice: StateFlow<String> = _ttsVoice.asStateFlow()
+    private val _ttsPresetId = MutableStateFlow("")
 
     private val _ttsSpeed = MutableStateFlow(1.0f)
     val ttsSpeed: StateFlow<Float> = _ttsSpeed.asStateFlow()
@@ -627,14 +613,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Beta 1.0.96: built-in model definitions are fixed. The legacy preference table now
     // contributes only the global per-model reasoning usage switch, never editable capabilities.
     private val builtInLanguageModels = listOf(
-        ModelInfo("mimo-v2.6-flash", "MiMo-V2.6-Flash", Provider.XIAOMI, "Xiaomi深度推理模型，作者自用API，不保证随时在线，可适当白嫖。", supportsWebSearch = true, modelType = ModelType.LANGUAGE, supportsDeepThinking = true, supportsNativeSearch = true, isBuiltIn = true)
+        com.freechat.data.BuiltInLanguageModel.create(BuildConfig.DEEPSEEK_API_KEY)
     )
     private val builtInVisualModels = listOf(
         ModelInfo("ep-20260629143810-ffvjl", "Doubao-Seedream-5.0-Lite", Provider.DOUBAO, "Volcano Engine轻量级生图模型，作者自用API，不保证随时在线，可适当白嫖。", modelType = ModelType.VISUAL, isBuiltIn = true)
     )
-    private val builtInTtsModels = listOf(
-        ModelInfo("MiMo-V2.5-TTS", "MiMo-V2.5-TTS", Provider.XIAOMI, "小米语音合成模型，作者自用API，不保证随时在线，可适当白嫖。", modelType = ModelType.TTS, isBuiltIn = true)
-    )
+    private val builtInTtsModels = BuiltInVoiceModel.createAll(BuildConfig.MIMO_TTS_KEY)
 
     /** Legacy storage key: only deepThinkingDefault is consumed as a usage preference. */
     private val _builtInParams = MutableStateFlow<Map<String, ModelInfo>>(emptyMap())
@@ -669,7 +653,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * （内置+自定义都在里面），不再是只查内置。
      */
     private fun refreshSelectedFromCatalog() {
-        modelsOfType(ModelType.LANGUAGE).find { it.id == _selectedModel.value.id }?.let { _selectedModel.value = it }
+        ModelSelectionResolver.find(ModelSelectionResolver.selectionKey(_selectedModel.value), ModelType.LANGUAGE,
+            modelsOfType(ModelType.LANGUAGE))?.let { _selectedModel.value = it }
         modelsOfType(ModelType.VISUAL).find { it.id == _selectedVisualModel.value.id }?.let { _selectedVisualModel.value = it }
         _selectedVisionModel.value?.let { v ->
             modelsOfType(ModelType.VISION).find { it.id == v.id }?.let { _selectedVisionModel.value = it }
@@ -740,7 +725,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val syncRelay: Relay.Impl = object : Relay.Impl {
 
         override suspend fun conversations(): List<Conversation> =
-            if (conversationsReady) _conversations.value else Relay.conversationsFromDisk()
+            if (conversationsReady) _conversations.value.filterNot { com.freechat.data.ConversationDeletion.contains(it.id) } else Relay.conversationsFromDisk()
 
         /**
          * 收下的是**一批操作**而不是"新的对话数组"，这一点是刻意的：
@@ -754,6 +739,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     val gone = ops.filterIsInstance<Relay.ConvOp.Remove>().map { it.id }.toSet()
                     for (op in ops) when (op) {
                         is Relay.ConvOp.Upsert -> {
+                            if (com.freechat.data.ConversationDeletion.contains(op.conv.id)) continue
                             val idx = list.indexOfFirst { it.id == op.conv.id }
                             val newlyDeleted = op.conv.deletedMessageIds.toSet() - (list.getOrNull(idx)?.deletedMessageIds.orEmpty().toSet())
                             if (newlyDeleted.isNotEmpty()) cancelConversationGeneration(op.conv.id)
@@ -768,8 +754,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     // （云端那两条墓碑会由引擎自己走 applyChange，这里管的是**本机**的残留）
                     if (gone.isNotEmpty()) {
                         gone.forEach(::cancelConversationGeneration)
-                        for (conv in _conversations.value.filter { it.id in gone }) {
-                            deleteConvOwnedFiles(conv, list)
+                        viewModelScope.launch(Dispatchers.IO) {
+                            gone.forEach { id -> runCatching { ProactiveScheduler.cancel(getApplication(), id) } }
                         }
                         val table = _perConvSettings.value
                         if (table.keys.any { it in gone }) {
@@ -801,6 +787,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         // 否则用户对着一屏已经没有归属的消息继续打字
                         _currentConversationId.value = null
                         _messages.value = emptyList()
+                        _currentCharacter.value = null
                         _isLoading.value = false
                         _isTyping.value = false
                     }
@@ -813,6 +800,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         override suspend fun applyMessages(convId: String, incoming: List<Message>) {
             withContext(Dispatchers.Main) {
+                if (com.freechat.data.ConversationDeletion.contains(convId)) return@withContext
                 LocalStore.suspendApply {
                     // 落盘的这一刻再并一次集，中途新发的那条自然就被保住了
                     val merged = applyFavoriteOverrides(Merge.mergeMessages(loadMessages(convId), incoming, MessageDeletion.deletedIds(convId)))
@@ -846,6 +834,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         override suspend fun applyPerConv(convId: String, incoming: JsonObject) {
             withContext(Dispatchers.Main) {
+                if (com.freechat.data.ConversationDeletion.contains(convId)) return@withContext
                 LocalStore.suspendApply {
                     LocalStore.locked {
                         val cur = PerConvStore.load()[convId] ?: PerConvSettings()
@@ -883,7 +872,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             combine(settingsRepo.selectedModelId, _customModels, _builtInParams) { savedId, _, _ -> savedId }
                 .collect { savedId ->
-                    _selectedModel.value = modelsOfType(ModelType.LANGUAGE).find { it.id == savedId }
+                    _selectedModel.value = ModelSelectionResolver.find(savedId, ModelType.LANGUAGE, modelsOfType(ModelType.LANGUAGE))
                         ?: mergedBuiltIn(ModelType.LANGUAGE).first()
                 }
         }
@@ -912,12 +901,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
-            settingsRepo.colorThemeOrdinal.collect { ordinal ->
-                _colorTheme.value = ColorTheme.entries.getOrElse(ordinal) { ColorTheme.BROWN }
+            settingsRepo.themeSelection.collect { selection ->
+                _themeSelection.value = selection
+                _colorTheme.value = selection.theme
+                _customColorArgb.value = selection.customColorArgb
             }
-        }
-        viewModelScope.launch {
-            settingsRepo.customColorArgb.collect { argb -> _customColorArgb.value = argb }
         }
         viewModelScope.launch {
             settingsRepo.tempModeOrdinal.collect { ordinal ->
@@ -963,6 +951,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             settingsRepo.ttsVoice.collect { voice -> _ttsVoice.value = voice }
+        }
+        viewModelScope.launch {
+            settingsRepo.ttsPresetId.collect { id -> _ttsPresetId.value = id }
         }
         viewModelScope.launch {
             settingsRepo.ttsSpeed.collect { speed -> _ttsSpeed.value = speed }
@@ -1163,7 +1154,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val (selected, models, conversations) = catalog
             val character = conversations.find { it.id == convId }?.characterProfile
             val modelId = if (character != null) character.languageModelId else per?.languageModelId
-            val model = models.find { it.id == modelId } ?: selected
+            val model = ModelSelectionResolver.find(modelId, ModelType.LANGUAGE, models) ?: selected
             com.freechat.data.SettingsPresentationPolicy.reasoningVisible(
                 requested = per?.showThinking ?: global,
                 deepEnabled = (character?.deepThinkingMode ?: deepThinkFor(per, model)) && model.supportsDeepThinking,
@@ -1236,7 +1227,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // ========== 设置 ==========
     fun selectLanguageModel(model: ModelInfo) {
         _selectedModel.value = model
-        viewModelScope.launch { settingsRepo.saveSelectedModel(model.id) }
+        viewModelScope.launch { settingsRepo.saveSelectedModel(ModelSelectionResolver.selectionKey(model)) }
     }
     fun selectVisualModel(model: ModelInfo) {
         _selectedVisualModel.value = model
@@ -1275,7 +1266,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         persistCustomModels()
         // 删除的是当前选中的模型则回退
         when (modelType) {
-            ModelType.LANGUAGE -> if (_selectedModel.value.id == modelId) _selectedModel.value = mergedBuiltIn(ModelType.LANGUAGE).first()
+            ModelType.LANGUAGE -> if (!_selectedModel.value.isBuiltIn && _selectedModel.value.id == modelId)
+                selectLanguageModel(mergedBuiltIn(ModelType.LANGUAGE).first())
             ModelType.VISUAL -> if (_selectedVisualModel.value.id == modelId) _selectedVisualModel.value = mergedBuiltIn(ModelType.VISUAL).first()
             ModelType.VISION -> if (_selectedVisionModel.value?.id == modelId) _selectedVisionModel.value = null
             ModelType.TTS -> if (_voiceModel.value == modelId) _voiceModel.value = mergedBuiltIn(ModelType.TTS).first().id
@@ -1294,13 +1286,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setColorTheme(ct: ColorTheme) {
-        _colorTheme.value = ct
+        // Palette changes are acknowledged by the single DataStore snapshot above.
+        // An optimistic value could otherwise be overwritten by an older queued emission.
         viewModelScope.launch { settingsRepo.saveColorTheme(ct.ordinal) }
     }
 
     fun setCustomColorTheme(argb: Int) {
-        _customColorArgb.value = argb
-        _colorTheme.value = ColorTheme.CUSTOM
         viewModelScope.launch { settingsRepo.saveCustomTheme(argb) }
     }
     fun setTempMode(mode: TempMode) {
@@ -1455,7 +1446,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val tts = currentTtsModel(convId)
             if (tts == null || tts.isBuiltIn) {
-                TtsController.speak(messageId, text, _ttsVoice.value, _ttsSpeed.value, _ttsPitch.value)
+                try {
+                    val config = when (BuiltInVoiceModel.apiModelId(tts?.id ?: BuiltInVoiceModel.STOCK_ID)) {
+                        BuiltInVoiceModel.STOCK_API_ID -> MiMoVoiceConfig(stockVoice = _ttsVoice.value)
+                        BuiltInVoiceModel.CLONE_API_ID -> voicePresetRepo.playbackConfig(_ttsPresetId.value)
+                        BuiltInVoiceModel.DESIGN_API_ID -> {
+                            val preset = voicePresetRepo.presets.value.find { it.id == _ttsPresetId.value }
+                                ?: throw VoiceConfigurationException("请先在 AI语音的高级自定义中创建并选择音色。")
+                            MiMoVoiceConfig(modelId = BuiltInVoiceModel.DESIGN_API_ID,
+                                designPrompt = preset.sourcePrompt, speakerStyle = preset.speakerStyle)
+                        }
+                        else -> throw VoiceConfigurationException("不支持的 MiMo 音色，请重新选择。")
+                    }
+                    MiMoVoiceRequest.validate(config)
+                    TtsController.speak(messageId, text, config, _ttsSpeed.value, _ttsPitch.value)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: VoiceConfigurationException) {
+                    TtsController.reportConfigurationError(error.message ?: "这个音色暂不可用，请重新选择。")
+                }
             } else {
                 val audio = synthSpeechOpenAi(tts, text)
                 if (audio != null) {
@@ -1508,12 +1517,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 .addFormDataPart("file", "speech.wav", fileBody)
                 .addFormDataPart("language", "zh")
                 .build()
-            val resp = client.newCall(Request.Builder().url(url)
+            val responseText = client.newCall(Request.Builder().url(url)
                 .addHeader("Authorization", "Bearer $key")
-                .post(multipart).build()).execute()
-            if (!resp.isSuccessful) return@withContext null
-            val json = JsonParser.parseString(resp.body?.string() ?: "").asJsonObject
+                .post(multipart).build()).awaitText(maxBytes = 131_072)
+            val json = JsonParser.parseString(responseText).asJsonObject
             json.get("text")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e("FreeChat", "transcribeAudioOpenAi failed", e)
             null
@@ -1640,6 +1650,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 删除单个对话的实际清理逻辑（不含落盘与收藏夹刷新，见 [deleteConversation] / [deleteConversations]） */
     private fun deleteConversationCore(conversation: Conversation) {
+        com.freechat.data.ConversationDeletion.record(conversation.id, conversation)
         // 内置助理被**用户亲手删掉**了 —— 单独记一笔。
         // `claude_seeded` 这个闩只说明「生成过」，说明不了「是丢的还是被删的」，
         // 而这两件事该有完全不同的下场：丢了要补回来，删了就得永远消失（见 seedBuiltInAssistant）。
@@ -1647,7 +1658,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch { settingsRepo.saveClaudeDeleted(true) }
         }
         // 删除对话时取消其在途生成（若有），避免后台 job 再写回已删除的对话
-        companionPipelines.remove(conversation.id)?.job?.cancel()
+        cancelConversationGeneration(conversation.id)
+        companionPipelines.remove(conversation.id)
         convLoading.remove(conversation.id)
         convTyping.remove(conversation.id)
         // 主动智能：对话都没了，别再定时把它唤醒（否则到点会去读一个不存在的会话）
@@ -1655,16 +1667,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { ProactiveScheduler.cancel(getApplication(), conversation.id) }
         }
-        if (_currentConversationId.value == conversation.id) streamJob?.cancel()
-        val msgFile = messagesFile(conversation.id)
-        if (msgFile.exists()) {
-            // 清理该会话引用过的图片文件（避免删除对话后图片残留占用空间）
-            loadMessages(conversation.id).forEach { m ->
-                m.imagePaths.forEach { runCatching { File(it).delete() } }
-            }
-            LocalStore.deleteFile(msgFile)
-        }
-        memoryManager.delete(conversation.id)
         // 「新规则」那条记录也摘掉，并**点名让同步把云端那条一起清掉**。
         // 光靠"文件改了自动 diff"不够：这台设备可能压根没有它的定制记录，而云端那条是
         // 另一台设备推上去的 —— 那条云端数据不能因为"我这边没有"就永远留在服务器上
@@ -1674,40 +1676,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 savePerConvSettings()
             }
         }
-        Adapter.markDirty(Adapter.objKey(com.freechat.sync.SyncKind.PCSET, conversation.id))
+        Adapter.markConversationDeleted(conversation.id)
         _conversations.value = _conversations.value.filter { it.id != conversation.id }
-        // 角色头像 / 形象参考图：只有**没有别的对话在用**才删（冲突副本会和原对话共用同一张头像）
-        deleteConvOwnedFiles(conversation, _conversations.value)
+        viewModelScope.launch(Dispatchers.IO) {
+            val images = LocalStore.suspendApply {
+                com.freechat.data.ConversationDeletion.removeLocal(conversation.id, conversation)
+            }
+            Adapter.markConversationDeleted(conversation.id, images)
+            com.freechat.sync.SyncEngine.syncSoon()
+        }
+        com.freechat.sync.SyncEngine.syncSoon()
         if (_currentConversationId.value == conversation.id) {
             _currentConversationId.value = null
             _messages.value = emptyList()
+            _currentCharacter.value = null
             _isLoading.value = false
             _isTyping.value = false
-        }
-    }
-
-    /**
-     * 删对话时把它**独占**的那些本机文件一起清掉：角色头像、形象参考图（含 1.540 前那张单图）。
-     *
-     * 「独占」两个字是认真的，不是修辞：两台设备各改过一次同一条对话的设定时会产生一份冲突副本
-     * （见 `Merge.mergeConv`），**副本和原对话共用同一个 avatarPath** —— 天真的"删对话就删图"
-     * 会把另一条还在用的头像删掉，那条对话的头像当场变成灰人。
-     *
-     * 另一道闸：只删 App 私有目录里的文件。万一日后混进一个外部路径（相册原图之类），
-     * 宁可留个孤儿文件，也不能去动用户自己目录里的东西。
-     */
-    private fun deleteConvOwnedFiles(conv: Conversation, survivors: List<Conversation>) {
-        val p = conv.characterProfile ?: return
-        val used = survivors.asSequence()
-            .mapNotNull { it.characterProfile }
-            .flatMap { c -> sequenceOf(c.avatarPath, c.appearanceImagePath) + c.appearanceImagePaths.asSequence() }
-            .filter { it.isNotBlank() }
-            .toHashSet()
-        val mine = listOf(p.avatarPath, p.appearanceImagePath) + p.appearanceImagePaths
-        val home = runCatching { LocalStore.filesDir().absolutePath }.getOrNull() ?: return
-        for (path in mine) {
-            if (path.isBlank() || path in used || !path.startsWith(home)) continue
-            runCatching { File(path).delete() }
         }
     }
 
@@ -1911,11 +1895,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 标准档深度思考解析（1.0.75 双键）：(对话×模型) 覆盖 → 遗留每对话兜底 → 模型的全局开关 */
     fun deepThinkFor(per: PerConvSettings?, model: ModelInfo): Boolean =
-        per?.deepThinkByModel?.get(model.id) ?: per?.deepThinking ?: model.deepThinkingDefault
+        per?.deepThinkByModel?.get(ModelSelectionResolver.selectionKey(model)) ?: per?.deepThinking ?: model.deepThinkingDefault
 
     /** 新规则页三态显示用：null = 跟随全局，非 null = 用户为（对话×模型）显式选的开/关 */
     fun deepThinkOverride(per: PerConvSettings?, model: ModelInfo): Boolean? =
-        per?.deepThinkByModel?.get(model.id) ?: per?.deepThinking
+        per?.deepThinkByModel?.get(ModelSelectionResolver.selectionKey(model)) ?: per?.deepThinking
 
     /**
      * 当前对话**生效的语言模型**：新规则里的模型覆盖优先，没覆盖才是全局选中的那个。
@@ -1948,7 +1932,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val model = effectiveLangModel()
         if (!model.supportsDeepThinking) return
         val on = !effectiveDeepThinking()
-        val modelId = model.id
+        val modelId = ModelSelectionResolver.selectionKey(model)
         val convId = _currentConversationId.value
         if (convId == null) {
             val draft = _pendingNewConvSettings.value
@@ -1978,7 +1962,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 全局设置页的「绑定模型」开关（1.0.75）：改的就是模型档案里那个值，切走再切回仍在 */
     fun setDeepThinkDefaultForModel(modelId: String, modelType: ModelType, on: Boolean) {
-        val target = modelsOfType(modelType).find { it.id == modelId } ?: return
+        val target = ModelSelectionResolver.find(modelId, modelType, modelsOfType(modelType)) ?: return
         if (target.isBuiltIn) setBuiltInDeepThinkDefault(target, on)
         else updateCustomModel(modelId, modelType, target.copy(deepThinkingDefault = on))
     }
@@ -1991,7 +1975,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * 深度思考「尽力关」参数（1.0.74）：业界常见的关推理参数一并带上 —— 认识的端点生效、不认识的忽略。
      * 开 = 不干预（模型默认就是它自己的思考模式）。个别严格网关若拒收多余字段，见注释里的降级说明。
      */
-    private fun deepThinkExtras(on: Boolean): Map<String, Any?> = com.freechat.core.CompanionPrompts.deepThinkExtras(on)
+    private fun deepThinkExtras(on: Boolean, model: ModelInfo): Map<String, Any?> =
+        com.freechat.data.ModelThinkingPolicy.parameters(model, on)
 
     private val _forceImageGen = MutableStateFlow(false)
     val forceImageGen: StateFlow<Boolean> = _forceImageGen.asStateFlow()
@@ -2010,42 +1995,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun pickHistory(working: List<Message>, budgetTokens: Int): List<Message> =
         com.freechat.core.CompanionHistory.pickHistory(working, budgetTokens)
-
-    // ========== Skills 调度系统 ==========
-    // 能力枚举：每个 Skill 绑定一类任务，detectSkill 负责路由到对应模型/执行器
-    private enum class Skill {
-        IMAGE_GEN,   // 文本生图 → Doubao Seedream
-        IMAGE_EDIT,  // 修图/图生图 → Doubao Seedream img2img
-        VISION,      // 识图/带图对话 → 识图模型（Doubao Seed / MiMo）
-        CALENDAR,    // 日历行程 → CalendarContract
-        DOCUMENT,    // 生成/编辑原生文档（docx/xlsx/pptx）
-        FILE,        // 理解上传的文件内容并回复
-        TEXT         // 纯文本 → 已选语言模型（可带检索资料）
-    }
-
-    /** Skills 核心：根据用户意图 + 是否带图/带文件，路由到对应能力 */
-    private fun detectSkill(text: String, hasImage: Boolean, hasFile: Boolean): Skill {
-        // 1. 带文件：区分「生成/编辑文档」与「理解文件内容」
-        if (hasFile) {
-            return if (isDocumentRequest(text)) Skill.DOCUMENT else Skill.FILE
-        }
-        // 2. 日历（无需附件，意图明确）
-        if (isCalendarRequest(text)) return Skill.CALENDAR
-        // 3. 生成/编辑文档（纯文本指令，如「做个PPT」）
-        if (isDocumentRequest(text)) return Skill.DOCUMENT
-        // 4. 图片相关
-        if (hasImage) {
-            val analysis = isImageAnalysisRequest(text) || text.isBlank()
-            val edit = !analysis && isImageEditRequest(text)
-            val gen = !analysis && !edit && isImageGenRequest(text)
-            return when {
-                edit -> Skill.IMAGE_EDIT
-                gen -> Skill.IMAGE_GEN
-                else -> Skill.VISION
-            }
-        }
-        return if (isImageGenRequest(text)) Skill.IMAGE_GEN else Skill.TEXT
-    }
 
     // ========== Function Calling：AI 自主判断意图、调用工具 ==========
     /** 模型返回的一次工具调用 */
@@ -2194,26 +2143,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return action && noun
     }
 
-    // ========== 图片意图检测 ==========
-    private fun isImageGenRequest(text: String): Boolean {
-        val t = text.trim()
-        if (t.isEmpty()) return false
-        // 1. 精确关键词（原有列表）
-        if (IMAGE_GEN_KEYWORDS.any { t.contains(it, ignoreCase = true) }) return true
-        // 2. 前缀动词补漏：画/生成/创建/制作 开头（覆盖「画一只猫」「生成海报」等漏判）
-        if (Regex("""^(帮我|给我|请|麻烦|来|快|能|能不能|可以|我想|我要|想|求|帮忙)?\s*(画|生成|创建|制作)""").containsMatchIn(t)) return true
-        return false
-    }
-    /** 用户意图是修图/p图/图生图（需要参考原图生成新图） */
-    private fun isImageEditRequest(text: String): Boolean {
-        return IMAGE_EDIT_KEYWORDS.any { text.contains(it, ignoreCase = true) }
-    }
-    /** 用户意图是识图/分析图片内容 */
-    private fun isImageAnalysisRequest(text: String): Boolean {
-        // 有图片但文字很短/没有 → 默认识图
-        if (text.isBlank()) return true
-        return IMAGE_ANALYSIS_KEYWORDS.any { text.contains(it, ignoreCase = true) }
-    }
     /** DeepSeek 是否说出了「无法生图」类否定（用于兜底替换） */
     private fun isImageGenRefusal(text: String): Boolean {
         val refusal = listOf(
@@ -2623,6 +2552,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         syncDisplayGenerationState(null)
     }
 
+    /** Saving an icon can interrupt any conversation, not just the one currently on screen. */
+    fun hasAnyActiveGeneration(): Boolean = com.freechat.data.IconRestartPolicy.requiresConfirmation(
+        generationPending, convLoading.values, convTyping.values)
+
+    /** A restart is not the stop/delete action: keep all already persisted dialogue and user input. */
+    fun prepareForIconRestart() {
+        saveCurrentConversation()
+        val activeIds = (convLoading.keys + convTyping.keys + companionPipelines.keys +
+            proactiveJobs.keys + listOfNotNull(standardGenerationConvId)).toSet()
+        activeIds.forEach(::cancelConversationGeneration)
+        currentCall.getAndSet(null)?.cancel()
+        generationPending = false
+        TtsController.stop()
+        syncForegroundService()
+    }
+
     /** 停止当前 AI 生成，并删除本轮（用户消息 + AI 回复） */
     fun stopGeneration() {
         val convId = _currentConversationId.value
@@ -2682,6 +2627,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val plan = com.freechat.data.RegenerationPlan.from(msgs, aiIndex) ?: return
         val userMsgs = plan.userMessages
         val text = userMsgs.map { it.content }.filter { it.isNotBlank() }.joinToString("\n")
+        val imageReply = plan.removedReplies.firstOrNull { it.imagePrompt?.isNotBlank() == true || it.imageUrls.isNotEmpty() }
         val images = userMsgs.flatMap { m -> m.imagePaths.map { PendingImage(it, detectMime(it)) } }
         val files = userMsgs.mapNotNull { m ->
             m.attachmentPath?.let { p -> PendingFile(p, m.attachmentName ?: File(p).name, detectMime(p)) }
@@ -2758,7 +2704,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // Future exchanges must not leak into a historical regeneration's prompt.
             val working = plan.context.toMutableList()
             try {
-                val assistantMessage = generateReply(text, images, files, langModelName, visualModelName, startTime, convId, working)
+                val assistantMessage = (if (imageReply != null) executeImageTask(
+                    com.freechat.data.ImageTaskRouting.regeneration(text, images.map { it.path }, working, imageReply),
+                    visualModelName, startTime, convId)
+                    else generateReply(text, images, files, langModelName, visualModelName, startTime, convId, working))
                     .let(generationTimer::complete).let { separateCitationLinks(it, text) }
                 ensureActive()
                 val fresh = assistantMessage.copy(id = replyId, timestamp = plan.removedReplies.first().timestamp)
@@ -2882,7 +2831,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return message.copy(content = display.answer, searchSources = display.sources, answerLinksRequested = requested)
     }
 
-    /** 生成一条 AI 回复（function calling 优先，XIAOMI 关键字兜底）。不改动 _messages，由调用方负责插入。 */
+    /** 明确的图片任务由客户端调度；其余任务允许模型选择工具。不改动 _messages。 */
     private suspend fun generateReply(
         text: String,
         images: List<PendingImage>,
@@ -2896,32 +2845,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     ): Message {
         val hasImage = images.isNotEmpty()
         val hasFile = files.isNotEmpty()
-        // 1.0.69：「+」菜单勾了「生成图片」→ 跳过关键词猜测直接生图（带图=图生图）。
-        // 消费点在 sendMessage（一次性，发完自动取消）；regenerate 不带这个参数
-        val skill = when {
-            forceImageGen && hasImage -> Skill.IMAGE_EDIT
-            forceImageGen -> Skill.IMAGE_GEN
-            else -> detectSkill(text, hasImage, hasFile)
-        }
-        // 强制生图不给 function calling 留猜测机会 —— 工作单的全部意义就是「不猜」，
-        // 直接走生图执行器（跳过 tools 分支与搜索）
-        if (forceImageGen) {
-            return executeSkill(
-                skill, text, images, files, langModelName, visualModelName, startTime,
-                needsSearch = false, serpResults = "", convId = convId, history = history,
-                serpFallbackQuery = ""
-            )
-        }
-        // grok-4.5 走 ccapi 中转不吃 function calling 的 tools 参数，单独排除走关键字兜底
+        val imageTask = com.freechat.data.ImageTaskRouting.plan(text, images.map { it.path }, history, forceImageGen)
+        if (imageTask != null) return executeImageTask(imageTask, visualModelName, startTime, convId)
         // File reading is local work, not a tool decision by a model that has not seen it yet.
-        if (skill == Skill.FILE) return executeSkill(skill, text, images, files, langModelName, visualModelName,
-            startTime, needsSearch = false, serpResults = "", convId = convId, history = history)
+        if (hasFile && !isDocumentRequest(text)) {
+            val reply = understandFile(text, files, convId, history)
+            return Message(role = Role.ASSISTANT, content = reply.text, failed = reply.failed, modelName = langModelName,
+                thinkingTimeMs = System.currentTimeMillis() - startTime, reasoningContent = _liveReasoning.value)
+        }
         val model = requestModels().language
-        val supportsTools = supportsFunctionTools(model)
 
         // ---- 按需联网：开关只开放能力，是否检索由模型决定 ----
         // 工具类技能不浪费搜索（日历/文档/生图/文件）
-        val searchEnabled = _enableWebSearch.value && skill == Skill.TEXT
+        val searchEnabled = _enableWebSearch.value && !hasFile && !isCalendarRequest(text) && !isDocumentRequest(text)
         val needsSearch = searchEnabled && nativeSearchSupported(model)
         // 深度思考 ⊥ 联网搜索（用户点名两者完全独立）：wide 只看「双开」——
         // 单开深度思考=只推理不搜、单开搜索=一档搜索、双开才「更多轮更广」
@@ -2930,69 +2866,56 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // 模型已经拥有历史；追问由模型补齐，不机械拼上旧地区使新问题同时要求两个地区。
         val query = if (searchEnabled) text else ""
         // 有原生协议时开“自动判断”；否则暴露普通工具，先回复的同一次请求即可决定搜不搜。
-        // 只有不支持工具的接口需要一趟短 JSON 规划；规划失败也不能擅自强制搜索。
-        val planned = if (searchEnabled && !nativeOk && !supportsTools) planSearchWithModel(query, history) else null
         val deepThinking = model.supportsDeepThinking && deepThinkFor(_perConvSettings.value[convId], model)
-        val retrieved = planned?.let { retrieveSearch(query, deepThinking, it, convId) }
-        val serpRaw = retrieved?.let { it.text.ifEmpty { SearchPipeline.emptyBlock(query, it.notice) } }.orEmpty()
-        val serpResults = serpRaw
         val serpFallbackQuery = if (nativeOk) query else ""
 
-        if (supportsTools) {
-            // 纯闲聊不带工具（1.0.74 提速）：砍掉「要不要调工具」的决策开销与误调双轮
-            val tools = (if (isChitchat(text) && !hasImage && !hasFile) emptyList() else buildTools(hasImage, hasFile)) +
-                if (searchEnabled && !nativeOk && !isChitchat(text)) listOf(SearchIntent.toolDefinition) else emptyList()
-            var result = callDeepSeekApiStreaming(needsSearch, serpResults, tools, convId, history, serpFallbackQuery)
-            val searchCitations = mutableListOf<Pair<String, String>>()
-            var searchRequests = 0
-            // 最多两轮资料检索。普通问题不调工具，不多一次 API，也不访问搜索服务。
-            for (round in 0..1) {
-                if (!searchEnabled || result.toolCalls.none { it.name == SearchIntent.TOOL_NAME }) break
-                _liveContent.value = ""
-                val continuation = result.requestMessages.toMutableList()
-                continuation.add(toolAssistantMessage(result))
-                result.toolCalls.forEach { tool ->
-                    val toolResult = if (tool.name == SearchIntent.TOOL_NAME) {
-                        val intent = SearchIntent.fromArguments(tool.arguments)
-                        if (intent == null) "检索参数不完整，请给出具体 queries。"
-                        else if (searchRequests >= 2) "本轮检索预算已用完，请使用已有资料。" else {
-                            searchRequests++
-                            val outcome = retrieveSearch(query, deepThinking, intent, convId)
-                            searchCitations.addAll(outcome.entries.map { it.title to it.link })
-                            outcome.text.ifBlank { SearchPipeline.emptyBlock(query, outcome.notice) }
-                        }
-                    } else "本轮先完成检索。如仍需该工具，请在收到资料后再次调用。"
-                    continuation.add(mapOf("role" to "tool", "tool_call_id" to tool.id, "content" to toolResult))
-                }
-                val nextTools = if (round == 0) tools else tools.filterNot { tool ->
-                    (tool["function"] as? Map<*, *>)?.get("name") == SearchIntent.TOOL_NAME }
-                if (round == 1) continuation.add(mapOf("role" to "system", "content" to "本轮检索预算已用完，请综合现有相关资料直接回答，不再调用搜索。"))
-                result = callDeepSeekApiStreaming(tools = nextTools, convId = convId, history = history, continuationMessages = continuation)
+        // 纯闲聊不带工具（1.0.74 提速）：砍掉「要不要调工具」的决策开销与误调双轮
+        val imageAvailable = hasImage || com.freechat.data.ImageTaskRouting.hasReference(history)
+        val tools = (if (isChitchat(text) && !hasImage && !hasFile) emptyList() else buildTools(imageAvailable, hasFile)) +
+            if (searchEnabled && !nativeOk && !isChitchat(text)) listOf(SearchIntent.toolDefinition) else emptyList()
+        val allowedTools = if (com.freechat.data.ImageTaskRouting.informationOnly(text)) tools.filterNot {
+            (it["function"] as? Map<*, *>)?.get("name") in listOf("generate_image", "edit_image") } else tools
+        var result = callDeepSeekApiStreaming(needsSearch, "", allowedTools, convId, history, serpFallbackQuery)
+        val searchCitations = mutableListOf<Pair<String, String>>()
+        var searchRequests = 0
+        // 最多两轮资料检索。普通问题不调工具，不多一次 API，也不访问搜索服务。
+        for (round in 0..1) {
+            if (!searchEnabled || result.toolCalls.none { it.name == SearchIntent.TOOL_NAME }) break
+            _liveContent.value = ""
+            val continuation = result.requestMessages.toMutableList()
+            continuation.add(toolAssistantMessage(result))
+            result.toolCalls.forEach { tool ->
+                val toolResult = if (tool.name == SearchIntent.TOOL_NAME) {
+                    val intent = SearchIntent.fromArguments(tool.arguments)
+                    if (intent == null) "检索参数不完整，请给出具体 queries。"
+                    else if (searchRequests >= 2) "本轮检索预算已用完，请使用已有资料。" else {
+                        searchRequests++
+                        val outcome = retrieveSearch(query, deepThinking, intent, convId)
+                        searchCitations.addAll(outcome.entries.map { it.title to it.link })
+                        outcome.text.ifBlank { SearchPipeline.emptyBlock(query, outcome.notice) }
+                    }
+                } else "本轮先完成检索。如仍需该工具，请在收到资料后再次调用。"
+                continuation.add(mapOf("role" to "tool", "tool_call_id" to tool.id, "content" to toolResult))
             }
-            val elapsed = System.currentTimeMillis() - startTime
-            return if (result.toolCalls.isNotEmpty()) {
-                _liveContent.value = ""
-                val toolMessage = executeToolCall(result.toolCalls.first(), text, images, files, langModelName, visualModelName, elapsed, convId)
-                toolMessage.copy(searchSources = SearchPresentation.normalize(
-                    toolMessage.searchSources.orEmpty().map { it.title to it.url } +
-                        retrieved?.entries.orEmpty().map { it.title to it.link } + searchCitations + result.citations))
-            } else {
-                Message(
-                    role = Role.ASSISTANT, content = result.content,
-                    searchSources = SearchPresentation.normalize(retrieved?.entries.orEmpty().map { it.title to it.link } + searchCitations + result.citations),
-                    modelName = langModelName,
-                    thinkingTimeMs = elapsed, reasoningContent = result.reasoning
-                )
-            }
+            val nextTools = if (round == 0) allowedTools else allowedTools.filterNot { tool ->
+                (tool["function"] as? Map<*, *>)?.get("name") == SearchIntent.TOOL_NAME }
+            if (round == 1) continuation.add(mapOf("role" to "system", "content" to "本轮检索预算已用完，请综合现有相关资料直接回答，不再调用搜索。"))
+            result = callDeepSeekApiStreaming(tools = nextTools, convId = convId, history = history, continuationMessages = continuation)
+        }
+        val elapsed = System.currentTimeMillis() - startTime
+        return if (result.toolCalls.isNotEmpty()) {
+            _liveContent.value = ""
+            val toolMessage = executeToolCall(result.toolCalls.first(), text, images, files, langModelName, visualModelName, startTime, convId, history)
+            toolMessage.copy(searchSources = SearchPresentation.normalize(
+                toolMessage.searchSources.orEmpty().map { it.title to it.url } +
+                    searchCitations + result.citations))
         } else {
-            // XIAOMI 等不支持 tools → 关键字兜底（联网编排与上面同一段，不重复）
-            val message = executeSkill(
-                skill, text, images, files, langModelName, visualModelName, startTime,
-                needsSearch, serpResults, convId, history,
-                serpFallbackQuery = serpFallbackQuery
+            Message(
+                role = Role.ASSISTANT, content = result.content,
+                searchSources = SearchPresentation.normalize(searchCitations + result.citations),
+                modelName = langModelName,
+                thinkingTimeMs = elapsed, reasoningContent = result.reasoning
             )
-            return message.copy(searchSources = SearchPresentation.normalize(
-                message.searchSources.orEmpty().map { it.title to it.url } + retrieved?.entries.orEmpty().map { it.title to it.link }))
         }
     }
 
@@ -3004,49 +2927,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         files: List<PendingFile>,
         langModelName: String,
         visualModelName: String,
-        elapsed: Long,
-        convId: String
+        startTime: Long,
+        convId: String,
+        history: List<Message>
     ): Message {
         val args = tool.arguments
+        val imageTask = com.freechat.data.ImageTaskRouting.forTool(tool.name,
+            args.optString("prompt") ?: args.optString("question").orEmpty(), text, images.map { it.path }, history)
+        if (imageTask != null) return executeImageTask(imageTask, visualModelName, startTime, convId)
+        val elapsed = System.currentTimeMillis() - startTime
         return when (tool.name) {
-            "generate_image" -> {
-                val prompt = args.optString("prompt") ?: text
-                _isGeneratingImage.value = true
-                val result = imageResult(prompt)
-                val imageUrls = result.urls
-                Message(
-                    role = Role.ASSISTANT,
-                    content = result.error,
-                    modelName = visualModelName, thinkingTimeMs = elapsed, imageUrls = imageUrls,
-                    failed = imageUrls.isEmpty()
-                )
-            }
-            "edit_image" -> {
-                val prompt = args.optString("prompt") ?: text.ifBlank { "请优化这张图片" }
-                _isGeneratingImage.value = true
-                val encoded = encodeImagesForApi(images)
-                val refImage = encoded.firstOrNull()
-                val result = if (refImage != null) imageResult(prompt, refImage.first, refImage.second)
-                    else GenImages(emptyList(), com.freechat.i18n.LocaleManager.strings().sceneErrorReferences)
-                val imageUrls = result.urls
-                Message(
-                    role = Role.ASSISTANT,
-                    content = if (imageUrls.isNotEmpty()) "已根据你的要求处理图片：" else result.error,
-                    modelName = visualModelName, thinkingTimeMs = elapsed, imageUrls = imageUrls,
-                    failed = imageUrls.isEmpty()
-                )
-            }
-            "analyze_image" -> {
-                val prompt = args.optString("question") ?: "请详细描述这张图片的内容"
-                val encoded = encodeImagesForApi(images)
-                val result = if (encoded.isEmpty()) GenText("图片读取失败，请重试。", failed = true)
-                    else callVisionChat(encoded, prompt)
-                Message(
-                    role = Role.ASSISTANT, content = result.text, failed = result.failed,
-                    modelName = requestModels().vision?.displayName ?: "",
-                    thinkingTimeMs = elapsed
-                )
-            }
             "read_calendar" -> Message(role = Role.ASSISTANT, content = readCalendar(), modelName = "系统日历", thinkingTimeMs = elapsed)
             "generate_document" -> {
                 val type = args.optString("type") ?: "docx"
@@ -3079,106 +2969,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 关键字兜底执行（XIAOMI 等不支持 function calling 的模型） */
-    private suspend fun executeSkill(
-        skill: Skill,
-        text: String,
-        images: List<PendingImage>,
-        files: List<PendingFile>,
-        langModelName: String,
+    /** Direct requests, native calls and compatible calls share the configured image/vision models. */
+    private suspend fun executeImageTask(
+        task: com.freechat.data.ImageTaskRouting.Plan,
         visualModelName: String,
         startTime: Long,
-        needsSearch: Boolean,
-        serpResults: String,
-        convId: String,
-        history: List<Message>,
-        serpFallbackQuery: String = ""
-    ): Message = when (skill) {
-        Skill.IMAGE_EDIT -> {
-            val imagePrompt = text.ifBlank { "请优化这张图片" }
-            _isGeneratingImage.value = true
-            val encoded = encodeImagesForApi(images)
-            val refImage = encoded.firstOrNull()
-            val result = if (refImage != null) imageResult(imagePrompt, refImage.first, refImage.second)
-                else GenImages(emptyList(), com.freechat.i18n.LocaleManager.strings().sceneErrorReferences)
-            val imageUrls = result.urls
-            val elapsed = System.currentTimeMillis() - startTime
-            val replyContent = if (imageUrls.isNotEmpty()) {
-                "已根据你的要求处理图片："
-            } else result.error
-            Message(
-                role = Role.ASSISTANT, content = replyContent,
-                modelName = visualModelName,
-                thinkingTimeMs = elapsed, imageUrls = imageUrls,
-                failed = imageUrls.isEmpty()
-            )
-        }
-        Skill.VISION -> {
-            val visionPrompt = text.ifBlank { "请详细描述这张图片的内容" }
-            val encoded = encodeImagesForApi(images)
-            val result = if (encoded.isEmpty()) {
-                GenText("图片读取失败，请重试。", failed = true)
+        convId: String
+    ): Message = withContext(Dispatchers.IO) {
+        val vision = task.kind == com.freechat.data.ImageTaskRouting.Kind.VISION
+        if (!vision) _isGeneratingImage.value = true
+        try {
+            val references = com.freechat.data.SceneReferenceSelector.prepareSources(task.referenceSources)
+            ensureActive()
+            task.referenceMessageId?.let { id ->
+                val retained = loadMessages(convId).find { it.id == id && !it.failed && !it.isStreaming }
+                if (retained == null || task.referenceSources.isEmpty() ||
+                    task.referenceSources.any { it !in retained.imageUrls && it !in retained.imagePaths })
+                    throw com.freechat.data.SceneImageFailure.ReferenceFailure()
+            }
+            if (vision) {
+                val encoded = references.map { java.util.Base64.getEncoder().encodeToString(it.bytes) to it.mime }
+                val result = if (encoded.isEmpty()) GenText("图片读取失败，请重试。", failed = true)
+                    else callVisionChat(encoded, task.prompt.ifBlank { "请详细描述这张图片的内容" })
+                Message(role = Role.ASSISTANT, content = result.text, failed = result.failed,
+                    modelName = requestModels().vision?.displayName.orEmpty(),
+                    thinkingTimeMs = System.currentTimeMillis() - startTime, reasoningContent = _liveReasoning.value)
             } else {
-                callVisionChat(encoded, visionPrompt)
+                val result = imageResult(task.prompt, references)
+                Message(role = Role.ASSISTANT, content = result.error, imageUrls = result.urls,
+                    failed = result.urls.isEmpty(), modelName = visualModelName,
+                    thinkingTimeMs = System.currentTimeMillis() - startTime, imagePrompt = task.prompt,
+                    imageReferenceMessageId = task.referenceMessageId)
             }
-            val elapsed = System.currentTimeMillis() - startTime
-            Message(
-                role = Role.ASSISTANT, content = result.text, failed = result.failed,
-                modelName = requestModels().vision?.displayName ?: "",
-                thinkingTimeMs = elapsed, reasoningContent = _liveReasoning.value
-            )
-        }
-        Skill.IMAGE_GEN -> {
-            _isGeneratingImage.value = true
-            val result = imageResult(text)
-            val imageUrls = result.urls
-            val elapsed = System.currentTimeMillis() - startTime
-            val replyContent = if (imageUrls.isEmpty()) {
-                result.error
-            } else ""
-            Message(
-                role = Role.ASSISTANT, content = replyContent,
-                modelName = visualModelName,
-                thinkingTimeMs = elapsed, imageUrls = imageUrls,
-                failed = imageUrls.isEmpty()
-            )
-        }
-        Skill.CALENDAR -> {
-            val reply = readCalendar()
-            val elapsed = System.currentTimeMillis() - startTime
-            Message(role = Role.ASSISTANT, content = reply, modelName = "系统日历", thinkingTimeMs = elapsed)
-        }
-        Skill.DOCUMENT -> {
-            val doc = generateDocument(text, files)
-            val elapsed = System.currentTimeMillis() - startTime
-            val docFailed = doc.error != null || doc.path == null
-            val replyContent = when {
-                doc.error != null -> doc.error
-                doc.path != null -> "已为你生成「${doc.fileName}」，点击下方文件即可打开编辑。"
-                else -> "文档生成失败，请换个方式描述试试。"
-            }
-            Message(
-                role = Role.ASSISTANT, content = replyContent,
-                modelName = langModelName, thinkingTimeMs = elapsed,
-                attachmentPath = doc.path, attachmentName = doc.fileName,
-                failed = docFailed
-            )
-        }
-        Skill.FILE -> {
-            val reply = understandFile(text, files, convId, history)
-            val elapsed = System.currentTimeMillis() - startTime
-            Message(role = Role.ASSISTANT, content = reply.text, failed = reply.failed, modelName = langModelName,
-                thinkingTimeMs = elapsed, reasoningContent = _liveReasoning.value)
-        }
-        Skill.TEXT -> {
-            val result = callDeepSeekApiStreaming(needsSearch, serpResults, emptyList(), convId, history, serpFallbackQuery)
-            val elapsed = System.currentTimeMillis() - startTime
-            Message(
-                role = Role.ASSISTANT, content = result.content,
-                modelName = langModelName,
-                thinkingTimeMs = elapsed, reasoningContent = result.reasoning,
-                searchSources = SearchPresentation.normalize(result.citations)
-            )
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (e: Exception) {
+            Message(role = Role.ASSISTANT, content = sceneImageError(e), failed = true,
+                modelName = if (vision) requestModels().vision?.displayName.orEmpty() else visualModelName,
+                thinkingTimeMs = System.currentTimeMillis() - startTime, imagePrompt = task.prompt.takeUnless { vision },
+                imageReferenceMessageId = task.referenceMessageId.takeUnless { vision })
         }
     }
 
@@ -3282,7 +3110,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // —— CompanionReply 已抽进 freechat-core（见文件头 import）——
+    // —— 文本解析在 freechat-core；Android 包装额外保留工具调用所需的推理历史 ——
 
     // —— ProactiveSignal / ProactiveFire 已抽进 freechat-core（CompanionProactive.kt，见文件头 import）——
 
@@ -3416,7 +3244,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     timestamp = replyTimestamp?.plus(i) ?: System.currentTimeMillis(),
                     modelName = langModelName, mode = ChatMode.COMPANION,
                     thinkingTimeMs = System.currentTimeMillis() - startTime,
-                    searchSources = reply.sources
+                    searchSources = reply.sources,
+                    reasoningContent = if (i == 0) reply.reasoningContent else ""
                 ).let { separateCitationLinks(it, text) })
                 persistConversationMessages(convId, working)
                 if (i < toShow.size - 1) setConvTyping(convId, true)
@@ -3587,7 +3416,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val custom = settingsRepo.customModels.first()
             _customModels.value = custom
             settingsRepo.selectedModelId.first().takeIf { it.isNotEmpty() }?.let { id ->
-                modelsOfType(ModelType.LANGUAGE).find { it.id == id }?.let { _selectedModel.value = it }
+                ModelSelectionResolver.find(id, ModelType.LANGUAGE, modelsOfType(ModelType.LANGUAGE))?.let { _selectedModel.value = it }
             }
             settingsRepo.selectedVisualModelId.first().takeIf { it.isNotEmpty() }?.let { id ->
                 modelsOfType(ModelType.VISUAL).find { it.id == id }?.let { _selectedVisualModel.value = it }
@@ -3805,7 +3634,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             searchCallsAllowed = allowSearch
             val body = gson.toJson(mapOf(
                 "model" to model.id, "messages" to messages, "stream" to false, "temperature" to companionTemperature(character?.aiCreativity)
-            ) + deepThinkExtras(companionDeepThink(character, model)) + if (allowSearch)
+            ) + deepThinkExtras(companionDeepThink(character, model), model) + if (allowSearch)
                 mapOf("tools" to listOf(SearchIntent.toolDefinition), "tool_choice" to "auto") else emptyMap()).toRequestBody(JSON_MEDIA)
             val (respCode, rBody) = executeCompanionCall(Request.Builder().url(url)
                 .addHeader("Authorization", "Bearer $key")
@@ -3869,7 +3698,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        CompanionReply(parsed.emotion, bodyLines, parsed.proactive, searchSources)
+        CompanionReply(
+            com.freechat.core.CompanionReply(parsed.emotion, bodyLines, parsed.proactive, searchSources),
+            reply.optString("reasoning_content").orEmpty()
+        )
     }
 
     /**
@@ -4501,7 +4333,13 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 .filterNot { it in retained }.forEach { path ->
                     runCatching {
                         val file = File(path).canonicalFile
-                        if (file.toPath().startsWith(root)) file.delete()
+                        // 1.2.3+ 跨对话护栏：内容寻址的缓存图（img_<hash>.jpg）可能被
+                        // **别的对话**的引用着（同一张图发进两个对话很常见）——
+                        // retained 只数了本对话的保留行，盲删会把别的对话删瞎。
+                        // 出圈引用一律查全局判据；普通附件/原图键是本条消息独有的，照旧。
+                        val hash = com.freechat.sync.ImageSync.hashFromCacheName(file.name)
+                        val inUse = hash != null && com.freechat.sync.ImageSync.isReferencedLocally(hash)
+                        if (!inUse && file.toPath().startsWith(root)) file.delete()
                     }
                 }
         }
@@ -4696,14 +4534,12 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     }
 
     private val functionToolsUnsupportedUntil = mutableMapOf<String, Long>()
-    private fun supportsFunctionTools(model: ModelInfo): Boolean = model.provider != Provider.XIAOMI &&
+    private fun supportsFunctionTools(model: ModelInfo): Boolean =
         synchronized(functionToolsUnsupportedUntil) { (functionToolsUnsupportedUntil[model.apiBaseUrl + model.id] ?: 0L) <= System.currentTimeMillis() }
     private fun blockFunctionTools(model: ModelInfo) {
         synchronized(functionToolsUnsupportedUntil) { functionToolsUnsupportedUntil[model.apiBaseUrl + model.id] = System.currentTimeMillis() + 10 * 60_000L }
     }
-    private fun unsupportedTools(e: Exception): Boolean = e.message.orEmpty().let { message ->
-        message.contains("API error 400") && Regex("tools|tool_choice|function.call|function calling", RegexOption.IGNORE_CASE).containsMatchIn(message)
-    }
+    private fun unsupportedTools(e: Exception): Boolean = com.freechat.data.PlainToolProtocol.rejectedNativeTools(e.message.orEmpty())
 
     private fun toolAssistantMessage(result: LanguageResult): Map<String, Any?> = mapOf(
         "role" to "assistant", "content" to result.content.takeUnless { it == "(空回复)" },
@@ -4722,7 +4558,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             "{\"search\":true,\"queries\":[\"简短的主题关键词\"],\"required_groups\":[[\"地区别名\"],[\"领域同义词\"]],\"recent_days\":0,\"news\":false}。"
         val body = gson.toJson(mapOf("model" to model.id, "stream" to false, "temperature" to 0,
             "max_tokens" to 600, "messages" to (listOf(mapOf("role" to "system", "content" to instruction)) + context +
-                mapOf("role" to "user", "content" to text.take(1000)))) + deepThinkExtras(false)).toRequestBody(JSON_MEDIA)
+                mapOf("role" to "user", "content" to text.take(1000)))) + deepThinkExtras(false, model)).toRequestBody(JSON_MEDIA)
         return try {
             val request = Request.Builder().url(url).header("Authorization", "Bearer $key").post(body).build()
             val json = client.newBuilder().callTimeout(10, TimeUnit.SECONDS).readTimeout(9, TimeUnit.SECONDS).build()
@@ -4769,6 +4605,9 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         continuationMessages: List<Map<String, Any?>>? = null,
     ): LanguageResult = withContext(Dispatchers.IO) {
         val model = requestModels().language
+        val usePlainTools = !supportsFunctionTools(model)
+        val functionTools = if (usePlainTools) emptyList() else tools
+        val plainTools = if (usePlainTools && needsSearch) tools + SearchIntent.toolDefinition else tools
         // 按 provider 路由到对应端点与密钥
         val (apiUrl, apiKey) = when (model.provider) {
             Provider.XIAOMI -> "$XIAOMI_BASE_URL/chat/completions" to XIAOMI_API_KEY
@@ -4826,6 +4665,13 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         if (needsSearch || tools.any { (it["function"] as? Map<*, *>)?.get("name") == SearchIntent.TOOL_NAME })
             messagesJson.add(0, mapOf("role" to "system", "content" to SearchIntent.guidance))
         if (continuationMessages != null) { messagesJson.clear(); messagesJson.addAll(continuationMessages) }
+        messagesJson.removeAll { it["role"] == "system" && it["content"]?.toString()?.startsWith("【兼容工具协议】") == true }
+        if (usePlainTools) {
+            val compatible = com.freechat.data.PlainToolProtocol.compatibleMessages(messagesJson)
+            messagesJson.clear()
+            messagesJson.addAll(compatible)
+            if (plainTools.isNotEmpty()) messagesJson.add(0, mapOf("role" to "system", "content" to com.freechat.data.PlainToolProtocol.instruction(plainTools)))
+        }
 
         // Inject retrieved material as contextual evidence, not as executable instructions.
         if (serpResults.isNotEmpty()) {
@@ -4841,11 +4687,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             "stream" to true
         )
         // 深度思考（1.0.74）：关 = 尽力关推理（reasoning_effort/enable_thinking 通用参数，认识的端点生效）
-        requestBody.putAll(deepThinkExtras(model.supportsDeepThinking && deepThinkFor(_perConvSettings.value[convId], model)))
+        requestBody.putAll(deepThinkExtras(model.supportsDeepThinking && deepThinkFor(_perConvSettings.value[convId], model), model))
 
         // 原生服务也使用自动意图识别。MiMo 2026-09 文档的 force_search 是工具顶层字段，
         // DashScope 用 search_options.forced_search；两者均 false，绝不强制每个问题联网。
-        val searchViaNative = needsSearch && serpResults.isEmpty() && nativeSearchSupported(model) && _enableWebSearch.value
+        val searchViaNative = !usePlainTools && needsSearch && serpResults.isEmpty() && nativeSearchSupported(model) && _enableWebSearch.value
         if (searchViaNative) {
             requestBody.putAll(NativeSearchPolicy.parameters(model.provider == Provider.XIAOMI ||
                 model.apiBaseUrl.toHttpUrlOrNull()?.host == "api.xiaomimimo.com"))
@@ -4854,10 +4700,10 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         requestBody["temperature"] = _tempMode.value.apiValue
 
         // ★ Function calling：把工具暴露给模型，让模型自主判断用户意图
-        if (tools.isNotEmpty()) {
+        if (functionTools.isNotEmpty()) {
             @Suppress("UNCHECKED_CAST")
             val nativeTools = requestBody["tools"] as? List<Map<String, Any?>> ?: emptyList()
-            requestBody["tools"] = nativeTools + tools
+            requestBody["tools"] = nativeTools + functionTools
             requestBody["tool_choice"] = "auto"
         }
 
@@ -4941,11 +4787,14 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 }
 
                 val source = response.body?.source() ?: throw Exception("empty body")
+                val nonStreamingBody = if (response.body?.contentType()?.subtype?.contains("json") == true)
+                    response.peekBody(2 * 1024 * 1024).string() else null
                 advanceGeneration(convId, com.freechat.data.GenerationPhase.UNDERSTANDING)
                 var sseLineCount = 0
 
                 try {
                     while (!source.exhausted()) {
+                        if (nonStreamingBody != null) break
                         // 支持取消
                         if (!coroutineContext.isActive) {
                             call.cancel()
@@ -4989,7 +4838,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
                             if (content.isNotEmpty()) {
                                 sb.append(content)
-                                _liveContent.value = sb.toString()
+                                _liveContent.value = if (usePlainTools) com.freechat.data.PlainToolProtocol.visibleContent(sb.toString()) else sb.toString()
                                 // A search-enabled decision round can still return a tool call.
                                 // Do not announce its tentative prose as the final drafting stage.
                                 if (serpResults.isNotEmpty() ||
@@ -5036,7 +4885,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 if (sseLineCount == 0 && sb.isEmpty()) {
                     Log.w("FreeChat", "No SSE data received, trying non-streaming parse")
                     try {
-                        val fullBody = response.peekBody(2 * 1024 * 1024).string()
+                        val fullBody = nonStreamingBody.orEmpty()
                         if (fullBody.isNotBlank()) {
                             val json = JsonParser.parseString(fullBody).asJsonObject
                             if (json.has("error")) {
@@ -5046,12 +4895,13 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                             }
                             val choices = json.getAsJsonArray("choices")
                             if (choices != null && !choices.isEmpty) {
+                                sawDone = true
                                 val msg = choices[0].asJsonObject.getAsJsonObject("message")
                                 val content = msg.optString("content") ?: ""
                                 val reasoning = msg.optString("reasoning_content") ?: ""
                                 if (content.isNotEmpty()) {
                                     sb.append(content)
-                                    _liveContent.value = sb.toString()
+                                    _liveContent.value = if (usePlainTools) com.freechat.data.PlainToolProtocol.visibleContent(sb.toString()) else sb.toString()
                                 }
                                 if (model.supportsThinking && reasoning.isNotEmpty()) {
                                     reasoningSb.append(reasoning)
@@ -5062,7 +4912,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                                 if (tcs != null) {
                                     for (i in 0 until tcs.size()) {
                                         val tc = tcs.get(i).asJsonObject
-                                        val idx = tc.get("index")?.takeUnless { it.isJsonNull }?.asInt ?: 0
+                                        val idx = tc.get("index")?.takeUnless { it.isJsonNull }?.asInt ?: i
                                         val acc = accs.getOrPut(idx) { ToolCallAcc(idx) }
                                         tc.get("id")?.takeUnless { it.isJsonNull }?.asString?.let { acc.id = it }
                                         val fn = tc.getAsJsonObject("function")
@@ -5074,6 +4924,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                         }
                     } catch (e: Exception) {
                         Log.e("FreeChat", "Non-streaming fallback failed", e)
+                        throw e
                     }
                 }
 
@@ -5098,7 +4949,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         // 搜索结果重跑的机会（尤其严格网关拒收 enable_search 报 400 的情形），兜不动再抛。
         // 原来这里直接 throw lastIoError，兜底块根本没机会跑。
 
-        val finalContent = sb.toString().ifEmpty { "(空回复)" }
+        val plainCall = if (usePlainTools) com.freechat.data.PlainToolProtocol.parse(sb.toString(), plainTools) else null
+        val finalContent = if (plainCall != null) "" else sb.toString().ifEmpty { "(空回复)" }
         val finalReasoning = if (model.supportsThinking)
             com.freechat.data.ReasoningContinuity.join(previousReasoning, reasoningSb.toString()) else ""
 
@@ -5112,7 +4964,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 }.getOrElse { JsonObject() }
                 ToolCall(acc.name, argsJson, acc.id.ifBlank { "call_${System.nanoTime()}_${acc.index}" })
             }
-        }
+        } + listOfNotNull(plainCall?.let { ToolCall(it.name, it.arguments) })
 
         // 引用/usage 用来确认真实执行，而非决定是否强制重搜。只有服务端明确搜索报错才降级。
         val failedHard = apiFailure != null || (!sawDone && sb.isEmpty() && reasoningSb.isEmpty())
@@ -5154,16 +5006,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         // 兜底不动的失败照旧抛给上层（briefApiError 落聊天记录）——
         // 不许把 API 错误伪装成「(空回复)」蒙混过关
         apiFailure?.let { failure ->
-            if (continuationMessages == null && tools.any { (it["function"] as? Map<*, *>)?.get("name") == SearchIntent.TOOL_NAME } && unsupportedTools(failure)) {
+            if (functionTools.isNotEmpty() && unsupportedTools(failure)) {
                 blockFunctionTools(model)
-                val query = history.lastOrNull { it.role == Role.USER }?.content.orEmpty()
-                val intent = planSearchWithModel(query, history)
-                val outcome = intent?.let { retrieveSearch(query,
-                    model.supportsDeepThinking && deepThinkFor(_perConvSettings.value[convId], model), it, convId) }
-                return@withContext callDeepSeekApiStreaming(serpResults = outcome?.let { it.text.ifBlank { SearchPipeline.emptyBlock(query, it.notice) } }.orEmpty(),
-                    convId = convId, history = history, continuationMessages = messagesJson).let {
-                    it.copy(citations = it.citations + outcome?.entries.orEmpty().map { entry -> entry.title to entry.link })
-                }
+                _liveContent.value = ""
+                return@withContext callDeepSeekApiStreaming(needsSearch, tools = tools, convId = convId, history = history,
+                    serpFallbackQuery = serpFallbackQuery, continuationMessages = messagesJson)
             }
             throw failure
         }
@@ -5227,22 +5074,21 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 }
             }
             try {
-                val prompt = withContext(Dispatchers.IO) {
-                    com.freechat.data.SceneImagePrompt.build(character, history, memoryManager.load(convId), globalMemories, conversationRules)
-                }
-                val references = withContext(Dispatchers.IO) {
-                    if (character.appearanceImagePaths.any { it.isNotBlank() })
+                val prepared = withContext(Dispatchers.IO) {
+                    if (character.appearanceImagePaths.any { it.isNotBlank() } || character.enhancedSceneContinuity)
                         advanceGeneration(convId, com.freechat.data.GenerationPhase.IMAGE_REFERENCES)
-                    character.appearanceImagePaths.filter { it.isNotBlank() }.distinct().take(3).map { path ->
-                        try {
-                            val file = File(path)
-                            if (!file.isFile || file.length() == 0L || file.length() > 16L * 1024 * 1024) throw com.freechat.data.SceneImageFailure.ReferenceFailure()
-                            com.freechat.data.ImageApiRequest.Reference(file.readBytes(), detectMime(path))
-                        } catch (e: Exception) { throw com.freechat.data.SceneImageFailure.ReferenceFailure() }
-                    }
+                    SceneReferenceSelector.prepare(character, history, MessageDeletion.deletedIds(convId))
                 }
-                val urls = callDoubaoImageGen(prompt, modelOverride = model, preservePrompt = true, strict = true,
-                    sceneReferences = references)
+                val urls = callDoubaoImageGen("", modelOverride = model, preservePrompt = true, strict = true,
+                    sceneRequestFactory = {
+                        // Preparation may involve downloads. Never treat its old snapshot as retention proof.
+                        val freshHistory = loadMessages(convId)
+                        val references = SceneReferenceSelector.revalidate(prepared, freshHistory, MessageDeletion.deletedIds(convId))
+                        com.freechat.data.SceneImagePrompt.build(character, freshHistory, memoryManager.load(convId),
+                            globalMemories, conversationRules,
+                            characterReferenceCount = references.count { it.sceneMessageId == null },
+                            sceneReferenceCount = references.count { it.sceneMessageId != null }) to references.map { it.reference }
+                    })
                 ensureActive()
                 if (urls.isEmpty()) throw com.freechat.data.ApiFailure(200, "empty_image_result")
                 persistConversationMessages(convId, loadMessages(convId) + Message(id = replyId, role = Role.ASSISTANT,
@@ -5306,8 +5152,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     private data class GenImages(val urls: List<String>, val error: String = "")
 
     /** Standard and companion modes use the same diagnosis; never guess that a network error is unsafe content. */
-    private suspend fun imageResult(prompt: String, reference: String? = null, mime: String = "image/jpeg"): GenImages = try {
-        GenImages(callDoubaoImageGen(prompt, reference, mime, strict = true))
+    private suspend fun imageResult(prompt: String, references: List<com.freechat.data.ImageApiRequest.Reference>): GenImages = try {
+        GenImages(callDoubaoImageGen(prompt, preservePrompt = true, strict = true, sceneReferences = references))
     } catch (error: CancellationException) {
         throw error
     } catch (error: Exception) {
@@ -5322,6 +5168,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         preservePrompt: Boolean = false,
         strict: Boolean = false,
         sceneReferences: List<com.freechat.data.ImageApiRequest.Reference> = emptyList(),
+        sceneRequestFactory: (() -> Pair<String, List<com.freechat.data.ImageApiRequest.Reference>>)? = null,
     ): List<String> = withContext(Dispatchers.IO) {
         val visualModel = modelOverride ?: requestModels().visual
         val modelId = visualModel.id
@@ -5334,7 +5181,9 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             .ifBlank { prompt })
 
         try {
-            val references = sceneReferences.ifEmpty {
+            ensureActive()
+            val sceneRequest = sceneRequestFactory?.invoke()
+            val references = sceneRequest?.second ?: sceneReferences.ifEmpty {
                 referenceImageBase64?.let { listOf(com.freechat.data.ImageApiRequest.Reference(
                     Base64.decode(it, Base64.DEFAULT), referenceImageMime)) }.orEmpty()
             }
@@ -5350,7 +5199,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             } else {
                 "$DOUBAO_BASE_URL/images/generations" to DOUBAO_API_KEY
             }
-            val body = com.freechat.data.ImageApiRequest.body(modelId, imagePrompt, seedream, references)
+            val body = com.freechat.data.ImageApiRequest.body(modelId, sceneRequest?.first ?: imagePrompt, seedream, references)
+            ensureActive()
             val progressConvId = standardGenerationConvId.orEmpty()
             val progressSerial = convGenerationSerials[progressConvId]
             advanceGeneration(progressConvId, com.freechat.data.GenerationPhase.IMAGE_CONNECTING)
@@ -5463,10 +5313,13 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 }
 
                 val source = response.body?.source() ?: return@withContext GenText("图片分析返回为空。", failed = true)
+                val nonStreamingBody = if (response.body?.contentType()?.subtype?.contains("json") == true)
+                    response.peekBody(2 * 1024 * 1024).string() else null
                 val sb = StringBuilder()
 
                 try {
                     while (!source.exhausted()) {
+                        if (nonStreamingBody != null) break
                         if (!coroutineContext.isActive) break
                         val line = source.readUtf8Line() ?: continue
                         if (!line.startsWith("data: ")) continue
@@ -5496,7 +5349,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 val finalContent = sb.toString().ifEmpty {
                     // 非流式回退
                     try {
-                        val fullBody = response.peekBody(2 * 1024 * 1024).string()
+                        val fullBody = nonStreamingBody.orEmpty()
                         val json = JsonParser.parseString(fullBody).asJsonObject
                         val choices = json.getAsJsonArray("choices")
                         choices?.get(0)?.asJsonObject?.getAsJsonObject("message")?.get("content")?.asString ?: "(空回复)"
@@ -5506,7 +5359,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 Log.d("FreeChat", "══ Vision OK: ${finalContent.length} chars")
                 GenText(finalContent, failed = finalContent.isBlank() || finalContent == "(空回复)")
             }
-        } catch (e: Exception) {
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (e: Exception) {
             Log.e("FreeChat", "══ Vision ${e.javaClass.simpleName}: ${e.message}")
             GenText("图片分析失败：${e.message?.take(100) ?: "未知错误"}", failed = true)
         }
@@ -5914,7 +5768,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         val body = gson.toJson(mapOf(
             "model" to model.id, "messages" to prompt,
             "stream" to false, "temperature" to 0.1, "max_tokens" to 300
-        ) + deepThinkExtras(false)).toRequestBody(JSON_MEDIA)
+        ) + deepThinkExtras(false, model)).toRequestBody(JSON_MEDIA)
 
         return try {
             val resp = client.newCall(Request.Builder().url(url)
@@ -5941,6 +5795,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     // 读写全部委托给 LocalStore（进程级一把锁 + 原子写 + 写监听）。
     // 这里刻意不自己 File.writeText：那是同步引擎和前台互相覆盖的入口。
     private fun saveConversations() {
+        _conversations.value = _conversations.value.filterNot { com.freechat.data.ConversationDeletion.contains(it.id) }
         _conversations.value.forEach(MessageDeletion::register)
         LocalStore.writeText(conversationsFile, gson.toJson(_conversations.value))
     }
@@ -5950,7 +5805,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             val type = object : TypeToken<List<Conversation>>() {}.type
             val list = gson.fromJson<List<Conversation>>(text, type) ?: emptyList()
             // 迁移旧单值字段（形象图/开场白）到新列表字段，不丢老数据
-            list.map { conv -> conv.healed().also(MessageDeletion::register) }
+            list.filterNot { com.freechat.data.ConversationDeletion.contains(it.id) }.map { conv -> conv.healed().also(MessageDeletion::register) }
         } else emptyList()
     } catch (_: Exception) { emptyList() }
 
@@ -5963,7 +5818,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         LocalStore.writeText(messagesFile(convId), gson.toJson(applyFavoriteOverrides(MessageDeletion.messages(convId, msgs))))
     }
 
-    private fun loadMessages(convId: String): List<Message> = try {
+    private fun loadMessages(convId: String): List<Message> = if (com.freechat.data.ConversationDeletion.contains(convId)) emptyList() else try {
         val text = LocalStore.readText(messagesFile(convId))
         if (text != null) {
             val type = object : TypeToken<List<Message>>() {}.type
@@ -6023,6 +5878,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
     /** 按对话持久化消息 + 刷新侧滑栏元数据；若该对话正是当前显示对话，则同步更新显示缓冲（否则只落盘） */
     private fun persistConversationMessages(convId: String, rawMsgs: List<Message>) {
+        if (com.freechat.data.ConversationDeletion.contains(convId)) return
         // 这份列表多半是「开跑时抓的快照 + 新回复」，里面用户的收藏状态可能是旧的；
         // 套一次用户意图覆盖表，免得把用户生成期间改的收藏悄悄抹掉
         val msgs = applyFavoriteOverrides(Merge.mergeMessages(loadMessages(convId), rawMsgs, MessageDeletion.deletedIds(convId)))
@@ -6107,6 +5963,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         val msgs = _messages.value
         if (msgs.isEmpty()) return
         val convId = _currentConversationId.value ?: UUID.randomUUID().toString()
+        if (com.freechat.data.ConversationDeletion.contains(convId)) return
         // 保留原对话的创建时间与最后聊天时间；只有真实发消息（touchCurrentConversation）才刷新时间，
         // 避免「仅点开对话」就刷新时间导致侧滑栏乱跳
         val existing = _conversations.value.firstOrNull { it.id == convId }
@@ -6273,7 +6130,10 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             append("以用户主要使用的语言回复，遇到其他语言的专有名词或引用时保留原文即可。")
         }
 
-        val capabilityBlock = if (hasTools) {
+        val capabilityBlock = "【FreeChat 实际配置的能力】\n" +
+            "当前语言模型：${models.language.displayName}；生图/修图由独立的生图模型 ${models.visual.displayName} 执行。" +
+            "识图模型：${models.vision?.displayName ?: "尚未配置（识图时需用户配置）"}。切换语言模型不会关闭这些客户端能力。\n" +
+            if (hasTools) {
             "【工具调用——如何完成任务】\n" +
             "你拥有一组工具（函数），可完成生图、修图、识图、读日历、生成文档、读取文件等能力。\n" +
             "1. 当用户明确要求完成某项能力时，直接调用对应工具，不要用文字描述来代替调用\n" +
@@ -6282,12 +6142,9 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             "4. 调用工具后系统会直接把结果展示给用户，你无需重复转述结果\n" +
             "5. 上下文衔接：用户常对之前的结果提出追问或修改（如生图后说「不要大头照要全身照」「换背景」「再画一张」，或对文档说「改一下标题」），必须结合上文对话理解用户意图、继续调用对应工具，绝不能当作孤立的纯文字问题牛头不对马嘴地回答"
         } else {
-            "【你的能力——生成图片】\n" +
-            "你具备生成图片的能力，由 FreeChat 内置的图像引擎（Doubao Seedream）自动完成。\n" +
-            "当用户要求生成或绘制图片时（如「画一只猫」「帮我生成一张海报」），你负责：\n" +
-            "1. 用自然友好的语气回应，如「好的，这就为你画」，绝不说「我无法生成图片」「我是文字模型不能画图」这类话\n" +
-            "2. 图片由系统自动生成并展示，你无需输出图片链接或代码\n" +
-            "3. 不要建议用户改用其他绘图工具（Midjourney、DALL-E 等），因为你自己就能生成"
+            "明确的生图/修图请求由 FreeChat 调用已配置的生图模型，结果由客户端展示。" +
+            "本轮普通对话未提供可执行工具，不要把‘正在画图’的文字当作已执行生图，不要编造图片链接。" +
+            "用户只是询问能力时正常介绍；不要因自己只输出文本就否认客户端的生图能力。"
         }
 
         // ★ 全局记忆：用户自定义的基本信息 / 回复要求，注入系统提示词以提高适配度

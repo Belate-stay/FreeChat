@@ -43,6 +43,7 @@ import com.freechat.ui.animation.MotionIconButton as IconButton
 import com.freechat.ui.animation.MotionTextButton as TextButton
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,6 +64,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.freechat.BuildConfig
+import com.freechat.data.AppUpdateChecker
+import com.freechat.data.ModelSelectionResolver
+import java.io.File
 import com.freechat.R
 import com.freechat.i18n.AppLanguage
 import com.freechat.i18n.AppStrings
@@ -113,7 +117,7 @@ import com.freechat.util.saveBitmapToGallery
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
 
-private enum class SubScreen { LANGUAGE_MODEL, VISUAL_MODELS, VOICE_MODELS, AI_MEMORY, FONT, INPUT_BOX, AUTHOR, ICON, FEEDBACK, MY_FEEDBACK, MY_SHARES }
+private enum class SubScreen { LANGUAGE_MODEL, VISUAL_MODELS, VOICE_MODELS, AI_MEMORY, FONT, INPUT_BOX, ABOUT_FREECHAT, AUTHOR, ICON, FEEDBACK, MY_FEEDBACK, MY_SHARES }
 
 /** 设置页磨砂玻璃的 HazeState，通过 CompositionLocal 提供给所有 SettingsRow（含二级页） */
 internal val LocalSettingsHazeState = staticCompositionLocalOf<HazeState?> { null }
@@ -192,9 +196,32 @@ fun SettingsScreen(
     var showQrSaveSheet by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val iconManager = remember(context) { com.freechat.data.LauncherIconManager(context) }
-    var selectedIcon by remember { mutableStateOf(iconManager.requestedIcon()) }
     val activeIcon = remember { iconManager.activeIcon() }
+    var selectedIcon by rememberSaveable { mutableStateOf(activeIcon) }
     var savingIcon by remember { mutableStateOf(false) }
+    var showIconRestartConfirm by rememberSaveable { mutableStateOf(false) }
+    val saveIconAndRestart: () -> Unit = {
+        if (!savingIcon && selectedIcon != activeIcon) {
+            savingIcon = true
+            scope.launch {
+                val target = selectedIcon
+                val saved = withContext(Dispatchers.IO) { iconManager.request(target) }
+                if (saved) {
+                    try {
+                        viewModel.prepareForIconRestart()
+                        com.freechat.IconRestartActivity.launch(context)
+                    } catch (_: Exception) {
+                        withContext(Dispatchers.IO) { iconManager.request(activeIcon) }
+                        Toast.makeText(context, s.appIconSaveFailed, Toast.LENGTH_LONG).show()
+                        savingIcon = false
+                    }
+                } else {
+                    Toast.makeText(context, s.appIconSaveFailed, Toast.LENGTH_SHORT).show()
+                    savingIcon = false
+                }
+            }
+        }
+    }
     val feedbackStore = remember(context) { com.freechat.data.FeedbackDraftStore(context) }
     var feedbackDraft by remember { mutableStateOf(feedbackStore.load()) }
 
@@ -245,6 +272,7 @@ fun SettingsScreen(
         when (subScreen) {
             null -> onBack()
             SubScreen.MY_FEEDBACK -> subScreen = SubScreen.FEEDBACK
+            SubScreen.AUTHOR -> subScreen = SubScreen.ABOUT_FREECHAT // 作者页只从「关于FreeChat」进，返回回聚合页
             else -> subScreen = null
         }
     }
@@ -405,7 +433,7 @@ fun SettingsScreen(
                             colors) {
                             Switch(checked = selectedModel.deepThinkingDefault && selectedModel.supportsDeepThinking,
                                 modifier = Modifier.semantics { contentDescription = s.deepThinkingMode },
-                                onCheckedChange = { viewModel.setDeepThinkDefaultForModel(selectedModel.id, selectedModel.modelType, it) },
+                                onCheckedChange = { viewModel.setDeepThinkDefaultForModel(ModelSelectionResolver.selectionKey(selectedModel), selectedModel.modelType, it) },
                                 enabled = selectedModel.supportsDeepThinking, colors = switchColors(colors))
                         }
                     }) {
@@ -627,32 +655,16 @@ fun SettingsScreen(
                 SectionLabel(Icons.Filled.Info, s.sectionAbout)
                 SettingsRow {
                     Column {
-                        // 版本（右侧箭头进入更新日志二级页）
+                        // 「关于FreeChat」聚合页（1.1.10）：logo + 版本号 + 检查更新 + 更新日志/关于作者/用户协议三个入口
                         Row(
-                            Modifier.fillMaxWidth().clickable { onOpenChangelog() }
+                            Modifier.fillMaxWidth().clickable { subScreen = SubScreen.ABOUT_FREECHAT }
                                 .padding(horizontal = 16.dp, vertical = 12.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(s.version, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                            Text(s.aboutFreeChat, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("Version ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary)
-                                Spacer(Modifier.width(2.dp))
-                                Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                        HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
-                        Row(
-                            // 原来是直接跳 GitHub。现在改成进「关于作者」二级页 ——
-                            // 一跳走，用户就离开了 App，想问的问题一个都看不到（仓库地址在那一页里照样点得到）
-                            Modifier.fillMaxWidth().clickable { subScreen = SubScreen.AUTHOR }
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(s.author, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Belate", style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary)
                                 Spacer(Modifier.width(2.dp))
                                 Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
                             }
@@ -684,15 +696,6 @@ fun SettingsScreen(
                                 Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
                             }
                         }
-                        HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
-                        Row(
-                            Modifier.fillMaxWidth().clickable { onOpenAgreement() }.padding(horizontal = 16.dp, vertical = 12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(s.userAgreement, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                            Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
-                        }
                     }
                 }
 
@@ -706,11 +709,18 @@ fun SettingsScreen(
                     .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                     .then(if (screen == SubScreen.FEEDBACK) Modifier.imePadding().navigationBarsPadding() else Modifier)
                     .verticalScroll(rememberScrollState())
-                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
+                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp),
+                        bottom = if (screen == SubScreen.ICON) 112.dp else 32.dp)
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 when (screen) {
+                    SubScreen.ABOUT_FREECHAT -> AboutFreeChatPage(
+                        colors = colors, s = s,
+                        onOpenChangelog = onOpenChangelog,
+                        onOpenAgreement = onOpenAgreement,
+                        onOpenAuthor = { subScreen = SubScreen.AUTHOR }
+                    )
                     SubScreen.LANGUAGE_MODEL -> LanguageModelPage(viewModel, colors, s, onAdd = { onOpenModelEditor(ModelType.LANGUAGE, null) }, onEdit = { onOpenModelEditor(ModelType.LANGUAGE, it) })
                     SubScreen.VISUAL_MODELS -> VisualModelsPage(viewModel, colors, s, onAddVisual = { onOpenModelEditor(ModelType.VISUAL, null) }, onAddVision = { onOpenModelEditor(ModelType.VISION, null) }, onEdit = { onOpenModelEditor(it.modelType, it) })
                     SubScreen.VOICE_MODELS -> VoiceModelsPage(viewModel, colors, s, onAddTts = { onOpenModelEditor(ModelType.TTS, null) }, onAddAsr = { onOpenModelEditor(ModelType.ASR, null) }, onEdit = { onOpenModelEditor(it.modelType, it) })
@@ -745,15 +755,7 @@ fun SettingsScreen(
                     }
                     SubScreen.AUTHOR -> AuthorPage(colors, s, isDark = isDark, onQrLongPress = { showQrSaveSheet = true }, onOpenAuthorWords = onOpenAuthorWords)
                     SubScreen.ICON -> IconPickerPage(selectedIcon, activeIcon, savingIcon, onSelect = { icon ->
-                        if (!savingIcon && icon != selectedIcon) {
-                            savingIcon = true
-                            scope.launch {
-                                val saved = withContext(Dispatchers.IO) { iconManager.request(icon) }
-                                if (saved) selectedIcon = icon
-                                else Toast.makeText(context, s.appIconSaveFailed, Toast.LENGTH_SHORT).show()
-                                savingIcon = false
-                            }
-                        }
+                        if (!savingIcon) selectedIcon = icon
                     }, s = s)
                     SubScreen.FEEDBACK -> FeedbackPage(feedbackDraft, onTextChange = {
                         feedbackDraft = it
@@ -783,6 +785,7 @@ fun SettingsScreen(
         ) {
             HeaderIconButton(onClick = {
                 if (subScreen == SubScreen.MY_FEEDBACK) subScreen = SubScreen.FEEDBACK
+                else if (subScreen == SubScreen.AUTHOR) subScreen = SubScreen.ABOUT_FREECHAT
                 else if (subScreen != null) subScreen = null
                 else onBack()
             }) {
@@ -796,6 +799,7 @@ fun SettingsScreen(
                     SubScreen.AI_MEMORY -> s.aiMemory
                     SubScreen.FONT -> s.font
                     SubScreen.INPUT_BOX -> s.inputBox
+                    SubScreen.ABOUT_FREECHAT -> s.aboutFreeChat
                     SubScreen.AUTHOR -> s.authorAboutTitle
                     SubScreen.ICON -> s.appIcon
                     SubScreen.FEEDBACK -> s.feedbackTitle
@@ -813,6 +817,40 @@ fun SettingsScreen(
                 HeaderTextButton(onClick = { subScreen = SubScreen.MY_FEEDBACK }) {
                     Text(s.feedbackMy, style = MaterialTheme.typography.bodyMedium, color = colors.Primary)
                 }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = subScreen == SubScreen.ICON && selectedIcon != activeIcon,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = FreeChatAnimation.sheetEnter(), exit = FreeChatAnimation.sheetExit()
+        ) {
+            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp)) {
+                com.freechat.ui.animation.MotionButton(
+                    onClick = {
+                        if (viewModel.hasAnyActiveGeneration()) showIconRestartConfirm = true
+                        else saveIconAndRestart()
+                    },
+                    enabled = !savingIcon,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.Primary, contentColor = colors.selectedText)
+                ) { Text(if (savingIcon) s.appIconRestarting else s.save) }
+            }
+        }
+
+        SheetPanel(
+            visible = showIconRestartConfirm,
+            onDismiss = { showIconRestartConfirm = false; selectedIcon = activeIcon },
+            title = s.appIcon,
+            colors = colors, isDark = isDark, advancedMaterial = advancedMaterial, hazeState = hazeState,
+            confirmLabel = s.appIconRestartNow, confirmEnabled = !savingIcon,
+            onConfirm = { showIconRestartConfirm = false; saveIconAndRestart() }
+        ) {
+            Text(s.appIconRestartWarning, color = colors.TextSecondary)
+            SheetActionRow(s.appIconDoNotChange, colors, link = true) {
+                showIconRestartConfirm = false
+                selectedIcon = activeIcon
             }
         }
 
@@ -1220,7 +1258,8 @@ private fun LanguageModelPage(
     AddModelButton(onAdd, colors, s)
     ModelListDivider(colors)
     languageModels.forEach { model ->
-        ModelItemRow(model, model.id == selectedModel.id, { viewModel.selectLanguageModel(model) }, onEdit, colors)
+        ModelItemRow(model, ModelSelectionResolver.selectionKey(model) == ModelSelectionResolver.selectionKey(selectedModel),
+            { viewModel.selectLanguageModel(model) }, onEdit, colors)
     }
 }
 
@@ -1471,6 +1510,111 @@ private fun FontPage(
     }
 }
 
+// ============ 关于 FreeChat（聚合页：logo + 版本 + 检查更新 + 三个入口）============
+/**
+ * 1.1.10 新增：原来散在设置页的「更新日志 / 关于作者 / 用户协议与使用条款」三项
+ * 集成进「关于FreeChat」二级页；顶部 logo + 版本号 + 居中「检查更新」按钮，
+ * 联网读官网 download 目录的 latest.json，比对包名与编译版本号后下载安装包并拉起安装。
+ */
+@Composable
+private fun AboutFreeChatPage(
+    colors: com.freechat.ui.theme.FreeChatColors,
+    s: AppStrings,
+    onOpenChangelog: () -> Unit,
+    onOpenAgreement: () -> Unit,
+    onOpenAuthor: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var updateStatus by remember { mutableStateOf<String?>(null) }
+    var checking by remember { mutableStateOf(false) }
+
+    /** 检查 →（有更新）下载 → 安装包校验（包名/编译版本号一致）→ 拉起系统安装器 */
+    val checkUpdate: () -> Unit = {
+        if (!checking) {
+            checking = true
+            updateStatus = s.updateChecking
+            scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    val latest = AppUpdateChecker.fetchLatest(BuildConfig.APPLICATION_ID)
+                        ?: return@withContext Result.failure<String>(IllegalStateException("no manifest"))
+                    if (!AppUpdateChecker.needsUpdate(BuildConfig.VERSION_CODE.toLong(), latest)) {
+                        Result.success("latest")
+                    } else {
+                        val file = File(context.cacheDir, "freechat_update.apk")
+                        runCatching {
+                            AppUpdateChecker.download(latest.apkUrl, file)
+                            val pkg = AppUpdateChecker.archivePackageName(context.packageManager, file.absolutePath)
+                            val code = AppUpdateChecker.archiveVersionCode(context.packageManager, file.absolutePath)
+                            if (code == null || !AppUpdateChecker.archiveMatches(latest, pkg, code))
+                                error("archive mismatch")
+                            context.startActivity(AppUpdateChecker.installIntent(context, file))
+                            Result.success("install")
+                        }.getOrElse { Result.failure(it) }
+                    }
+                }
+                updateStatus = when {
+                    result.getOrNull() == "latest" -> s.updateLatest
+                    result.getOrNull() == "install" -> s.updateInstalling
+                    result.exceptionOrNull()?.message == "archive mismatch" -> s.updateVerifyFailed
+                    else -> s.updateFailed
+                }
+                checking = false
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // 主 logo（简F）
+        Image(
+            painter = painterResource(R.drawable.freechat_icon_blue_f),
+            contentDescription = "FreeChat",
+            modifier = Modifier.size(112.dp).clip(RoundedCornerShape(28.dp))
+        )
+        Spacer(Modifier.height(14.dp))
+        Text("Version ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary)
+        Spacer(Modifier.height(22.dp))
+        Button(
+            onClick = checkUpdate,
+            enabled = !checking,
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = colors.Primary, contentColor = colors.selectedText)
+        ) {
+            Text(if (checking) s.updateChecking else s.checkUpdate, style = MaterialTheme.typography.bodyLarge)
+        }
+        updateStatus?.let {
+            Spacer(Modifier.height(10.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = colors.TextTertiary)
+        }
+
+        Spacer(Modifier.height(32.dp))
+        SettingsRow {
+            Column {
+                AboutEntryRow(s.changelog, colors) { onOpenChangelog() }
+                HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
+                AboutEntryRow(s.authorAboutTitle, colors) { onOpenAuthor() }
+                HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
+                AboutEntryRow(s.userAgreement, colors) { onOpenAgreement() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutEntryRow(label: String, colors: com.freechat.ui.theme.FreeChatColors, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable { onClick() }.padding(horizontal = 16.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+    }
+}
+
 // ============ 关于作者 ============
 
 /**
@@ -1620,7 +1764,7 @@ private fun AuthorPage(
 
     AuthorLink(
         label = s.authorWebAddress,
-        url = "https://118.178.227.178/",
+        url = "https://freechater.com/",
         note = s.authorWebNote,
         colors = colors,
         onOpen = open

@@ -18,6 +18,41 @@ data class ChangelogEntry(
 object ChangelogData {
     val entries: List<ChangelogEntry> = listOf(
         ChangelogEntry(
+            version = "Version 1.1.10",
+            date = "2026-10-09",
+            sections = listOf(
+                ChangelogSection("拟人优化", listOf(
+                    "新增 “增强同元延续”功能，同时将近几条生成的场景图上传参考，提高对话内连续生成场景图的元素统一性和延续性。（该功能为Beta版本，可能欠缺稳定或存在bug）",
+                    "适配 微信聊天 模式下的对话接入微信后的emoji表情的识别与回复。"
+                )),
+                ChangelogSection("渲染优化", listOf(
+                    "优化 图片生成占位动效，提升页面动态质感。",
+                    "优化 语音输入动画，提升局部动态灵动感。"
+                )),
+                ChangelogSection("新增功能", listOf(
+                    "新增 “自定义语音音色”及相关功能，支持根据提示词/上传音频学习并还原音色作为语音输出。（该功能为Beta版本，可能欠缺稳定或存在bug）"
+                )),
+                ChangelogSection("体验优化", listOf(
+                    "新增 “设置项跳转”按钮，模拟设置页面可快速跳过角色设定部分，直达设置项页面。",
+                    "优化 内置语言模型换为\"DeepSeek-V4.1-Flash\"，大幅提高回复速度。",
+                    "优化 更换图标的重启逻辑。",
+                    "优化 对话内图片预览页面的多张图片切换效果。",
+                    "优化 云端同步体验与显示适配，数据同步更及时，图片显示更完善。"
+                )),
+                ChangelogSection("漏洞修补", listOf(
+                    "修复 主题色字体闪烁的问题。",
+                    "修复 切换主题色强制返回的切换失败问题。",
+                    "修复 生成图片时重复显示的问题。",
+                    "修复 部分语言模型无法调用生图模型的问题。"
+                )),
+                ChangelogSection("其他更新", listOf(
+                    "更新 用户协议与使用条款。",
+                    "优化 “关于”页面的显示逻辑，提供在线检测获取更新功能。",
+                    "更新 官网链接改为 https://freechater.com/（ICP备案已过审）"
+                ))
+            )
+        ),
+        ChangelogEntry(
             version = "Version 1.1.0",
             date = "2026-10-07",
             sections = listOf(

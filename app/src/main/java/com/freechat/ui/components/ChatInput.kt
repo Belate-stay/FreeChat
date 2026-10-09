@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,7 +31,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -38,18 +38,15 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -91,6 +88,7 @@ import com.freechat.data.VoiceLevelRecorder
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.InputStyle
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.LocalMotionEnabled
 import androidx.compose.ui.draw.alpha
 import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.inputBtnIcon
@@ -108,11 +106,13 @@ import dev.chrisbanes.haze.HazeState
 import com.freechat.ui.theme.materialHaze as hazeEffect
 import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeTint
-import kotlin.math.PI
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 // 最短录音长度：16kHz/16bit 单声道 = 32000 字节/秒，0.25s ≈ 8000 字节
 private const val MIN_PCM_BYTES = 8000
@@ -173,6 +173,7 @@ fun ChatInput(
     onVoiceInput: (String) -> Unit = {},
     onRecognizeVoice: suspend (ByteArray) -> String? = { null },
     onRecordingChanged: (Boolean) -> Unit = {},
+    voiceSessionKey: String? = null,
     hazeState: HazeState? = null,
     isCompanion: Boolean = false,
     /**
@@ -309,7 +310,9 @@ fun ChatInput(
     // State correctness does not depend on an animation-end callback (including animation scale 0).
     LaunchedEffect(justSent) { if (justSent) { kotlinx.coroutines.delay(120); justSent = false } }
 
+    val emojiAvailable = com.freechat.data.CompanionFeaturePolicy.supportsEmojiInput(isCompanion, narrativeSingleSend)
     var showEmojiPicker by remember { mutableStateOf(false) }
+    LaunchedEffect(emojiAvailable) { if (!emojiAvailable) showEmojiPicker = false }
     // 全屏输入卡片：原输入框超过 3 行自动弹出，或长按输入框弹「全屏输入」选项后手动弹出
     var expanded by remember { mutableStateOf(false) }
     // 长按那一下要「吃掉」主输入框自己的选字手势，理由见下面 blockSelection 的注释
@@ -385,20 +388,29 @@ fun ChatInput(
     val recorder = remember { VoiceLevelRecorder() }
     val scope = rememberCoroutineScope()
     var isRecording by remember { mutableStateOf(false) }
+    var recognitionJob by remember { mutableStateOf<Job?>(null) }
+    var finishingCapture by remember { mutableStateOf(false) }
+    var voiceAnchorHeld by remember { mutableStateOf(false) }
+    val recordingChanged by rememberUpdatedState(onRecordingChanged)
+    val normalBottomSpace = (keyboardHeightDp + 8.dp).coerceAtLeast(36.dp)
+    var recordingBottomSpace by remember { mutableStateOf(normalBottomSpace) }
     // 上滑取消的弧线：记录手指在窗口中的坐标（非 null 表示处于「移出语音键 → 松手取消」状态）
     var cancelFingerWinPos by remember { mutableStateOf<Offset?>(null) }
     // 语音键左上角在窗口中的坐标（用于把手指局部坐标换算成窗口坐标）
     var voiceBtnTopLeftWin by remember { mutableStateOf(Offset.Zero) }
+    val microphoneCenter = remember { mutableStateOf(Offset.Zero) }
+
+    fun cancelRecording() {
+        recognitionJob?.cancel()
+        recorder.cancel()
+        isRecording = false
+        cancelFingerWinPos = null
+        recordingChanged(false)
+    }
 
     // 组件销毁时兜底停止录音并释放（切页/返回/切后台等场景，避免 AudioRecord 泄漏或线程悬挂）
-    DisposableEffect(Unit) {
-        onDispose {
-            if (isRecording) {
-                recorder.stop()
-                isRecording = false
-                onRecordingChanged(false)
-            }
-        }
+    DisposableEffect(voiceSessionKey) {
+        onDispose { cancelRecording() }
     }
 
     // 切后台（ON_PAUSE）时主动停止录音：Compose 不会因切后台触发 onDispose，
@@ -406,21 +418,18 @@ fun ChatInput(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE && isRecording) {
-                recorder.stop()
-                isRecording = false
-                cancelFingerWinPos = null
-                onRecordingChanged(false)
-            }
+            if (event == Lifecycle.Event.ON_PAUSE) cancelRecording()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // 输入框收起动画：按住录音时 0→1，松手 1→0，非线性"灵动"曲线
-    val collapse by animateFloatAsState(
+    val motionEnabled = LocalMotionEnabled.current
+    val collapse = animateFloatAsState(
         targetValue = if (isRecording) 1f else 0f,
-        animationSpec = FreeChatAnimation.voiceCollapseTween,
+        animationSpec = if (!motionEnabled) snap() else if (isRecording)
+            FreeChatAnimation.voiceCollapseTween else FreeChatAnimation.voiceRestoreTween,
         label = "voice_collapse"
     )
 
@@ -432,7 +441,7 @@ fun ChatInput(
         ActivityResultContracts.RequestPermission()
     ) { _ -> /* 授予后用户再次长按即可录音 */ }
 
-    val startRecording: () -> Boolean = {
+    val startRecording: () -> Boolean = start@{
         val granted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
@@ -441,36 +450,66 @@ fun ChatInput(
             keyboardController?.hide()
             focusManager.clearFocus()
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            false
-        } else {
-            // 录音开始前收起键盘并清除焦点，冻结 IME 状态——避免录音中键盘高度变化导致
-            // 取消弧线锚点错位，以及部分 OEM 上麦克风与 IME 同时工作冲突
-            keyboardController?.hide()
-            focusManager.clearFocus()
-            isRecording = true
-            recorder.start()
-            onRecordingChanged(true)
-            true
+            return@start false
         }
+        if (finishingCapture) return@start false
+        if (!recorder.start()) return@start false
+        // Freeze the microphone's vertical anchor while the IME leaves.
+        recognitionJob?.cancel()
+        recordingBottomSpace = normalBottomSpace
+        voiceAnchorHeld = true
+        showEmojiPicker = false
+        keyboardController?.hide()
+        focusManager.clearFocus()
+        isRecording = true
+        recordingChanged(true)
+        true
     }
 
     // 松手：cancelled=true 表示手指移出了语音键（丢弃音频），否则识别发送
     val finishRecording: (Boolean) -> Unit = { cancelled ->
-        val pcm = recorder.stop()
         isRecording = false
         cancelFingerWinPos = null
-        onRecordingChanged(false)
-        if (!cancelled && pcm.size >= MIN_PCM_BYTES) {
-            scope.launch {
-                val wav = MiMoAsr.pcmToWav(pcm)
-                val text = onRecognizeVoice(wav)
-                onVoiceInput(text ?: "")
+        recordingChanged(false)
+        if (cancelled) {
+            recorder.cancel()
+        } else {
+            finishingCapture = true
+            recognitionJob = scope.launch {
+                try {
+                    val pcm = withContext(Dispatchers.IO) { recorder.stop() }
+                    finishingCapture = false
+                    if (pcm.size >= MIN_PCM_BYTES) {
+                        val wav = withContext(Dispatchers.Default) { MiMoAsr.pcmToWav(pcm) }
+                        val recognized = onRecognizeVoice(wav)
+                        ensureActive()
+                        onVoiceInput(recognized ?: "")
+                    }
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } finally {
+                    finishingCapture = false
+                }
             }
         }
     }
 
-    // 输入框上移 + 更强阴影，强化「悬浮半空」感
-    val bottomSpace = (keyboardHeightDp + 8.dp).coerceAtLeast(36.dp)
+    val currentStartRecording = rememberUpdatedState(startRecording)
+    val currentFinishRecording = rememberUpdatedState(finishRecording)
+    LaunchedEffect(isRecording, motionEnabled) {
+        if (!isRecording && voiceAnchorHeld) {
+            if (motionEnabled) kotlinx.coroutines.delay(FreeChatAnimation.voiceRestoreTween.durationMillis.toLong())
+            voiceAnchorHeld = false
+        }
+    }
+    // 保持按住时的坐标；松手后随输入框舒展平滑回到键盘收起后的位置，不跳一下。
+    val restoringBottomSpace = animateDpAsState(
+        targetValue = if (isRecording) recordingBottomSpace else normalBottomSpace,
+        animationSpec = if (!voiceAnchorHeld || isRecording || !motionEnabled) snap() else
+            tween(FreeChatAnimation.voiceRestoreTween.durationMillis, easing = FreeChatAnimation.voiceRestoreTween.easing),
+        label = "voice_anchor_restore"
+    )
+    val bottomSpace = if (voiceAnchorHeld) restoringBottomSpace.value else normalBottomSpace
 
     // 生成中：右侧按键是否为「终止键」。
     //  · 标准模式：一直是终止键（原来的行为）
@@ -516,45 +555,46 @@ fun ChatInput(
                 .background(colors.inputBtnFill)
                 .onGloballyPositioned { coords ->
                     voiceBtnTopLeftWin = coords.positionInWindow()
+                    microphoneCenter.value = voiceBtnTopLeftWin + Offset(coords.size.width / 2f, coords.size.height / 2f)
                 }
                 .then(
                     // 单发模式生成中：即使输入框里已经有字，这个键也必须是终止键，
                     // 所以这里先把 showStopKey 排除掉，走下面的 clickable 分支
                     if (isEmpty && !isLoading && !showStopKey) {
                         // 空输入框：按住录音，移出语音键出现取消弧线，松手位置决定发送/取消
-                        Modifier.pointerInput(Unit) {
+                        Modifier.pointerInput(voiceSessionKey) {
                             awaitEachGesture {
                                 try {
                                     val down = awaitFirstDown(requireUnconsumed = false)
-                                    down.consume()
-                                    if (!startRecording()) return@awaitEachGesture
+                                    val held = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                                    held.consume()
+                                    if (!currentStartRecording.value()) return@awaitEachGesture
                                     var fingerOutside = false
-                                    var fingerWinPos = Offset.Zero
-                                    val center = Offset(size.width / 2f, size.height / 2f)
-                                    val leavePx = with(density) { (20.dp + 8.dp).toPx() } // 语音键半径 + 余量
+                                    var releasedNormally = false
+                                    val slop = with(density) { 8.dp.toPx() }
                                     while (true) {
                                         val event = awaitPointerEvent()
                                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                        // UP 自身也有坐标：不能沿用上一帧 MOVE，否则快速滑出松手会误发送。
+                                        fingerOutside = !VoiceInputMotion.isInsideButton(
+                                            change.position.x, change.position.y, size.width.toFloat(), size.height.toFloat(), slop)
                                         if (!change.pressed) {
+                                            releasedNormally = change.changedToUp()
                                             change.consume()
                                             break
                                         }
+                                        if (change.isConsumed) break
                                         // move 也 consume：让抽屉检测器看到 isConsumed 自取消，锁住侧滑
                                         change.consume()
-                                        val dist = (change.position - center).getDistance()
-                                        fingerOutside = dist > leavePx
-                                        fingerWinPos = voiceBtnTopLeftWin + change.position
-                                        cancelFingerWinPos = if (fingerOutside) fingerWinPos else null
+                                        cancelFingerWinPos = if (fingerOutside) voiceBtnTopLeftWin + change.position else null
                                     }
                                     cancelFingerWinPos = null
-                                    finishRecording(fingerOutside)
+                                    if (isRecording) currentFinishRecording.value(!releasedNormally || fingerOutside)
                                 } finally {
                                     // 手势被取消（dispose/返回/切后台）时兜底清理，避免录音线程泄漏
                                     cancelFingerWinPos = null
                                     if (isRecording) {
-                                        recorder.stop()
-                                        isRecording = false
-                                        onRecordingChanged(false)
+                                        cancelRecording()
                                     }
                                 }
                             }
@@ -582,6 +622,19 @@ fun ChatInput(
             .offset { IntOffset(0, offsetYState.value.roundToInt()) }
             .fillMaxWidth()
     ) {
+        // matchParentSize 不参与父布局测量：频谱只覆盖屏幕底部，不推动聊天记录或语音键。
+        Box(Modifier.matchParentSize()) {
+            AnimatedVisibility(
+                visible = isRecording,
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 12.dp).height(144.dp),
+                enter = if (motionEnabled) fadeIn(FreeChatAnimation.voiceBarsEnter) +
+                    slideInVertically(tween(320, delayMillis = 180, easing = FreeChatAnimation.arrivalEase)) { it / 3 } else EnterTransition.None,
+                exit = if (motionEnabled) fadeOut(FreeChatAnimation.voiceBarsExit) else ExitTransition.None
+            ) {
+                VoiceSpectrumBars(recorder.spectrum, isDark, Modifier.fillMaxSize())
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -716,11 +769,7 @@ fun ChatInput(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .graphicsLayer {
-                            scaleX = 1f - collapse
-                            alpha = 1f - collapse
-                            transformOrigin = TransformOrigin(1f, 0.5f)
-                        }
+                        .voiceDroplet(collapse, microphoneCenter)
                         .glassProbeBounds(glassProbe)
                         .floatingSurface(hazeState, isDark, inputShape, backdropDarkness = glassDarkness)
                         .padding(horizontal = 10.dp, vertical = 8.dp)
@@ -889,8 +938,8 @@ fun ChatInput(
                                 }
                             }
 
-                            // 拟人档的 emoji 键：文字行是纯输入区，它挪到下行（与 + 键同侧）
-                            if (isCompanion) {
+                            // 仅微信聊天有 emoji：叙事两档不显示，也不能打开面板。
+                            if (emojiAvailable) {
                                 Spacer(Modifier.width(4.dp))
                                 Box(
                                     modifier = Modifier
@@ -918,24 +967,6 @@ fun ChatInput(
                     }
                 }
 
-                // 波形：录音时从右侧展开（与简洁样式同一套收起/展开语言）
-                Box(
-                    modifier = Modifier
-                        .matchParentSize()
-                        .graphicsLayer {
-                            scaleX = collapse
-                            alpha = collapse
-                            transformOrigin = TransformOrigin(1f, 0.5f)
-                        }
-                ) {
-                    GradientWaveform(
-                        levelFlow = recorder.level,
-                        isDark = isDark,
-                        colors = colors,
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp)
-                    )
-                }
-
                 // 语音/发送圆钮：叠在卡片底行右端（内容整体收起时不跟着走，松手取消始终按得到）
                 VoiceSendButton(
                     Modifier
@@ -955,11 +986,7 @@ fun ChatInput(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .graphicsLayer {
-                            scaleX = 1f - collapse
-                            alpha = 1f - collapse
-                            transformOrigin = TransformOrigin(1f, 0.5f)
-                        }
+                        .voiceDroplet(collapse, microphoneCenter)
                         .glassProbeBounds(glassProbe)
                         .floatingSurface(hazeState, isDark, inputShape, backdropDarkness = glassDarkness)
                 ) {
@@ -1097,8 +1124,8 @@ fun ChatInput(
                             }
                         }
 
-                        // emoji 按钮（仅拟人模式显示，输入框内右侧，与左侧 + 键对称）
-                        if (isCompanion) {
+                        // emoji 按钮（仅拟人的微信聊天档，与左侧 + 键对称）
+                        if (emojiAvailable) {
                             Box(
                                 modifier = Modifier
                                     .size(40.dp)
@@ -1120,23 +1147,6 @@ fun ChatInput(
                     }
                 }
 
-                // 波形：录音时从右侧展开，渐变波浪线条实时响应音量
-                Box(
-                    modifier = Modifier
-                        .matchParentSize()
-                        .graphicsLayer {
-                            scaleX = collapse
-                            alpha = collapse
-                            transformOrigin = TransformOrigin(1f, 0.5f)
-                        }
-                ) {
-                    GradientWaveform(
-                        levelFlow = recorder.level,
-                        isDark = isDark,
-                        colors = colors,
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp)
-                    )
-                }
             }
 
             Spacer(Modifier.width(8.dp))
@@ -1147,7 +1157,7 @@ fun ChatInput(
 
         // ──── emoji 面板（输入框下方，替代键盘位置；展开/收起与键盘丝滑衔接）────
         AnimatedVisibility(
-            visible = showEmojiPicker,
+            visible = emojiAvailable && showEmojiPicker,
             enter = FreeChatAnimation.expandEnter(),
             exit = FreeChatAnimation.expandExit()
         ) {
@@ -1168,7 +1178,7 @@ fun ChatInput(
                             ) {
                                 rowEmojis.forEach { em ->
                                     Box(
-                                        modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).clickable { text += em },
+                                        modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).clickable { if (emojiAvailable) text += em },
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(em, fontSize = 22.sp)
@@ -1505,127 +1515,4 @@ private class FixedPositionProvider(private val pos: Offset) : PopupPositionProv
         val y = pos.y.roundToInt().coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
         return IntOffset(x, y)
     }
-}
-
-/**
- * 渐变波浪波形：底层彩色光斑加色光晕 + 上层 3 条谐波叠加的彩色波浪线。
- * 相位用真实 dt 变速（惯性/呼吸感），drawWithCache 缓存 Path（仅振幅变化才重建，消除掉帧主因）。
- */
-@Composable
-private fun GradientWaveform(
-    levelFlow: StateFlow<Float>,
-    isDark: Boolean,
-    colors: FreeChatColors,
-    modifier: Modifier = Modifier
-) {
-    val raw by levelFlow.collectAsState()
-    val amplitude by animateFloatAsState(raw, FreeChatAnimation.voiceLevelTween, label = "wave_amp")
-
-    val TAU = 2f * PI.toFloat()
-    var phase0 by remember { mutableFloatStateOf(0f) }
-    var phase1 by remember { mutableFloatStateOf(0f) }
-    var phase2 by remember { mutableFloatStateOf(0f) }
-    // 变速相位：真实 dt + 速度随时间/音量变速 → 惯性/呼吸感，而非匀速流水线
-    LaunchedEffect(Unit) {
-        var last = 0L
-        while (true) {
-            withFrameNanos { now ->
-                val dt = ((now - last).coerceAtLeast(0L)) / 1e9f
-                last = now
-                val breath = 0.5f + 0.5f * sin(now / 1e9f * 0.35f)
-                val vol = 0.55f + 0.45f * amplitude
-                phase0 = (phase0 + 1.00f * breath * vol * dt) % TAU
-                phase1 = (phase1 + 0.72f * breath * vol * dt) % TAU
-                phase2 = (phase2 + 1.35f * breath * vol * dt) % TAU
-            }
-        }
-    }
-
-    // 主题分流调色（深色高亮、浅色更深更饱和，融合背景不突兀）
-    val palette = if (isDark) listOf(
-        Color(0xFF9D6BFF), Color(0xFF4DA6FF), Color(0xFF3EE6C8), Color(0xFFFFB84D), Color(0xFFFF6BA0)
-    ) else listOf(
-        Color(0xFF6A3DE8), Color(0xFF1F6FD0), Color(0xFF0FAE9A), Color(0xFFE8890B), Color(0xFFE0447C)
-    )
-    val glowBlend = if (isDark) BlendMode.Plus else BlendMode.Screen
-
-    Box(modifier = modifier.drawWithCache {
-        val w = size.width
-        val h = size.height
-        val centerY = h / 2f
-        val amp = (h * 0.44f) * (0.14f + 0.86f * amplitude)
-        // 基础波长随音量：小声波密（频率高）、大声波疏（大波浪）
-        val baseL = w * (0.85f + 0.95f * amplitude)
-        val wavelengths = floatArrayOf(baseL * 0.80f, baseL * 1.00f, baseL * 1.25f)
-        // 每条波振幅递减（层次感）
-        val ampMuls = floatArrayOf(1.00f, 0.72f, 0.48f)
-
-        // 三条波：谐波叠加（整数倍频率 → 周期=各自波长，平移循环无缝）
-        val paths = (0 until 3).map { i ->
-            val l = wavelengths[i]
-            val k = 2f * PI.toFloat() / l
-            Path().apply {
-                val step = 6f
-                var x = 0f
-                var first = true
-                val len = w + l
-                while (x <= len) {
-                    val shape = sin(x * k) * 0.62f +
-                        sin(x * 2f * k + 1.7f) * 0.26f +
-                        sin(x * 3f * k + 2.3f) * 0.12f
-                    val y = centerY + amp * ampMuls[i] * shape
-                    if (first) { moveTo(x, y); first = false } else lineTo(x, y)
-                    x += step
-                }
-            }
-        }
-
-        // 光斑（光晕打底）：4 个彩色柔光斑，加色混合，缓慢漂移
-        val blobs = listOf(
-            Triple(0.22f, 0.38f, palette[0]),
-            Triple(0.62f, 0.55f, palette[1]),
-            Triple(0.42f, 0.28f, palette[2]),
-            Triple(0.80f, 0.45f, palette[3])
-        )
-
-        onDrawBehind {
-            val glowAlpha = 0.06f + 0.30f * amplitude
-            // 光晕打底层
-            blobs.forEachIndexed { i, (fx, fy, c) ->
-                val cx = w * (fx + 0.06f * sin(phase0 * 0.40f + i * 1.7f))
-                val cy = h * (fy + 0.08f * sin(phase1 * 0.30f + i * 2.3f))
-                val r = h * 0.95f
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(c.copy(alpha = 0.28f * glowAlpha), c.copy(alpha = 0f)),
-                        center = Offset(cx, cy),
-                        radius = r
-                    ),
-                    radius = r,
-                    center = Offset(cx, cy),
-                    blendMode = glowBlend
-                )
-            }
-            // 波浪层：缓存 Path 平移循环（每帧只 3 次 drawPath，复用缓存）
-            for (i in 0 until 3) {
-                val l = wavelengths[i]
-                val offset = (when (i) {
-                    0 -> phase0; 1 -> phase1; else -> phase2
-                } / TAU) * l
-                val c0 = palette[i % palette.size]
-                val c1 = palette[(i + 2) % palette.size]
-                translate(left = -offset) {
-                    drawPath(
-                        path = paths[i],
-                        brush = Brush.horizontalGradient(
-                            0f to c0.copy(alpha = 0.85f),
-                            0.5f to c1.copy(alpha = 0.95f),
-                            1f to c0.copy(alpha = 0.85f)
-                        ),
-                        style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
-                    )
-                }
-            }
-        }
-    })
 }

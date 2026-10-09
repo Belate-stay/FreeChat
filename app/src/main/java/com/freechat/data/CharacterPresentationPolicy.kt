@@ -27,6 +27,7 @@ object CharacterPresentationPolicy {
         languageModelId = draft.languageModelId,
         visionModelId = draft.visionModelId,
         visualModelId = draft.visualModelId,
+        enhancedSceneContinuity = draft.enhancedSceneContinuity,
         deepThinkingMode = draft.deepThinkingMode,
         enableWebSearch = draft.enableWebSearch,
     )

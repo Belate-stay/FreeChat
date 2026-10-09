@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 「检查更新」下载 APK 后拉起系统安装器（API 26+ 走 ACTION_VIEW 必备） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
@@ -139,6 +141,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity-alias>
+
+        <activity
+            android:name=".IconRestartActivity"
+            android:process=":icon_restart"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.freechat.icon_restart"
+            android:theme="@style/Theme.FreeChat.Restart" />
 
         <service
             android:name=".ReplyService"

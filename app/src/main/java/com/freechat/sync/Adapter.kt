@@ -103,6 +103,17 @@ object Adapter {
 
     fun markDirty(key: String) = mark(key)
 
+    /** A deletion must not depend on an old diff snapshot or on which child files happen to exist. */
+    fun markConversationDeleted(id: String, imageHashes: Set<String> = emptySet()) {
+        val keys = listOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET).map { objKey(it, id) } +
+            imageHashes.map { objKey(SyncKind.IMG, it) }
+        synchronized(this) {
+            keys.forEach { dirtyVersions.changed(it); dirty.add(it) }
+        }
+        persistQueue()
+        notifyDirty()
+    }
+
     fun dirtyVersion(key: String): Long = synchronized(this) { dirtyVersions.current(key) }
 
     fun unmarkDirty(key: String, expectedVersion: Long? = null) {
@@ -270,6 +281,12 @@ object Adapter {
         // 说了就是「这条对话没定制」，跟云端本来就没有的东西一样，白跑一趟
         for (id in PerConvStore.load().keys) keys.add(objKey(SyncKind.PCSET, id))
         keys.add(objKey(SyncKind.SETTINGS, SyncKind.SETTINGS_ID))
+        // 1.2.3+ 图片补缺（G5）：内容寻址缓存里**现有的**图都算本机存量。
+        // 以前 IMG 不在补缺宇宙里 —— 历史上推送失败过的图（413 配额满/进程被杀）
+        // 永远等不到重排，云端就一直缺着，其他端看到的是缺图占位。
+        // 只数缓存文件（文件名自带指纹）；没有缓存的引用不进清单 ——
+        // 推送侧对「缓存没了但还引用着」另有护栏，绝不会拿去立墓碑。
+        for (h in ImageSync.localCacheHashes()) keys.add(objKey(SyncKind.IMG, h))
         return keys
     }
 
@@ -284,7 +301,6 @@ object Adapter {
         synchronized(this) {
             convSnapshot = conversations
             perConvSnapshot = per
-            dirty.clear()
             dirty.addAll(localAllKeys(conversations))
         }
         persistQueue()

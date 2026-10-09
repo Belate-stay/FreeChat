@@ -14,6 +14,8 @@ import java.util.concurrent.Executors
  *   GET  /health           → {ok:true}
  *   POST /companion/reply  → {convId, userText[, messages, batchId]} 生成一轮并写回同步库
  *                          → {slept, silence, emotion, segments, messageIds}
+ *     内部微信通道还带 X-FreeChat-Channel: wechat 与 wechatBinding:{userId,boundAt}；
+ *     只接受回环来源，随后核对同步库的当前绑定。App 代理重建请求头，客户端 JSON 无法开启此许可。
  *   GET  /companion/buffer?convId= → {bufferMs}  该对话角色的回复缓冲窗口（0=关，微信通道攒消息用）
  *   POST /companion/cancel → {batchId}  通道层判这批不发了：弃写 / 已落库未发出的清掉半截
  *
@@ -47,6 +49,13 @@ fun main() {
         try {
             val raw = ex.requestBody.readBytes().toString(Charsets.UTF_8)
             val body = JsonParser.parseString(raw).asJsonObject
+            val channelHeader = ex.requestHeaders.getFirst(WechatBinding.CHANNEL_HEADER)
+            val loopbackPeer = ex.remoteAddress.address.isLoopbackAddress
+            val wechatBinding = WechatBinding.fromTrustedRequest(body, channelHeader, loopbackPeer)
+            if (loopbackPeer && channelHeader == "wechat" && wechatBinding == null) {
+                respond(ex, 400, """{"error":"bad_request"}""")
+                return@createContext
+            }
             val convId = body.get("convId")?.asString.orEmpty()
             val userText = body.get("userText")?.asString.orEmpty()
             val userMessageId = body.get("userMessageId")?.takeIf { it.isJsonPrimitive }?.asString
@@ -66,7 +75,8 @@ fun main() {
                 return@createContext
             }
             val result = kotlinx.coroutines.runBlocking {
-                brain.reply(convId, userText, userMessageId, skipUserWrite, batchId, messages)
+                brain.reply(convId, userText, userMessageId, skipUserWrite, batchId, messages,
+                    wechatBinding = wechatBinding)
             }
             val out = JsonObject()
             out.addProperty("slept", result.slept)

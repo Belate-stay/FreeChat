@@ -6,6 +6,10 @@ import com.freechat.model.Message
 
 /** Both the UI and the operation guard use the same boundary, including migrated profiles. */
 object CompanionFeaturePolicy {
+    /** Emoji is a messaging feature, not a narrative creation feature. */
+    fun supportsEmojiInput(isCompanion: Boolean, narrativeSingleSend: Boolean): Boolean =
+        isCompanion && !narrativeSingleSend
+
     fun sceneDeletionIds(rows: List<Message>, messageId: String): Set<String> =
         rows.firstOrNull { it.id == messageId && it.sceneVisualization && it.role == com.freechat.model.Role.ASSISTANT }
             ?.let { setOf(it.id) }.orEmpty()

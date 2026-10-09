@@ -96,6 +96,7 @@ fun ChatBubble(
     isFavorited: Boolean = false,
     highlightKeyword: String? = null,
     highlightColor: Color? = null,
+    imageGallery: List<PreviewImage> = emptyList(),
     // ===== 多选：操作栏的 分享/删除/收藏 不再是「直接执行」，而是「进入多选」的入口 =====
     multiSelectEnabled: Boolean = false,
     onEnterMultiSelect: ((MultiSelectAction) -> Unit)? = null,
@@ -111,6 +112,10 @@ fun ChatBubble(
     val s = LocalStrings.current
     val isUser = message.role == Role.USER
     val isCompanion = message.mode == com.freechat.model.ChatMode.COMPANION
+    // 旧消息也可能已存了原图+缓存两格；只在图片列表变化时后台规范化，重组不读图文件。
+    val generatedImages by produceState(emptyList<String>(), message.imageUrls) {
+        value = withContext(Dispatchers.IO) { ImageDisplayPolicy.generatedImages(message) }
+    }
     val display = remember(message.content, message.searchSources, message.answerLinksRequested) {
         SearchPresentation.forDisplay(message.content, message.searchSources, message.answerLinksRequested)
     }
@@ -132,7 +137,6 @@ fun ChatBubble(
     val sourceLinkColor = readableLinkBlue()
     val scale = LocalFontScale.current  // 字号联动：气泡宽度随字号缩放
     var fullscreenImage by remember { mutableStateOf<String?>(null) }
-    var fullscreenIsLocal by remember { mutableStateOf(false) }
     var thumbnailRect by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
     // 按 URL 记录每张生成图片的屏幕位置，展开动画从正确的缩略图位置弹出
     val thumbnailRects = remember { mutableMapOf<String, androidx.compose.ui.geometry.Rect>() }
@@ -160,10 +164,11 @@ fun ChatBubble(
 
     // ===== 全屏图片预览 =====
     if (fullscreenImage != null) {
+        val selectedImage = PreviewImage(message.id, fullscreenImage!!)
+        val previewImages = imageGallery.takeIf { selectedImage in it } ?: listOf(selectedImage)
         ImagePreviewDialog(
-            imageSource = if (fullscreenIsLocal) File(fullscreenImage!!) else fullscreenImage!!,
-            isLocal = fullscreenIsLocal,
-            downloadRef = fullscreenImage!!,
+            images = previewImages,
+            initialIndex = previewImages.indexOf(selectedImage),
             originRect = thumbnailRect,
             onDismiss = { fullscreenImage = null }
         )
@@ -203,7 +208,6 @@ fun ChatBubble(
                                         .clickable {
                                             thumbnailRect = thumbnailRects[path]
                                             fullscreenImage = path
-                                            fullscreenIsLocal = true
                                         },
                                     contentScale = ContentScale.Crop,
                                     targetMaxDim = 1024
@@ -404,9 +408,9 @@ fun ChatBubble(
                 if (ImageDisplayPolicy.hasMissingResult(message)) MissingGeneratedImageNotice()
 
                 // 生图结果 — 点击可全屏预览
-                if (message.imageUrls.orEmpty().isNotEmpty()) {
+                if (generatedImages.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
-                    message.imageUrls.forEach { url ->
+                    generatedImages.forEach { url ->
                         key(url) {
                             GeneratedImage(url, Modifier.padding(vertical = 4.dp)
                                 .onGloballyPositioned { coords ->
@@ -416,7 +420,6 @@ fun ChatBubble(
                                 }) {
                                 thumbnailRect = thumbnailRects[url]
                                 fullscreenImage = url
-                                fullscreenIsLocal = ImageDisplayPolicy.isLocal(url)
                             }
                         }
                     }
@@ -602,19 +605,18 @@ private fun MessageAttribution(model: String, timeMs: Long, colors: FreeChatColo
 // ========== 全屏图片预览 — 从缩略图展开/缩回 + 手势缩放 ==========
 @Composable
 private fun ImagePreviewDialog(
-    imageSource: Any,
-    isLocal: Boolean,
-    downloadRef: String,
+    images: List<PreviewImage>,
+    initialIndex: Int,
     originRect: androidx.compose.ui.geometry.Rect?,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    FullScreenImagePreview(imageSource, isLocal, downloadRef, originRect,
-        onDownload = {
+    FullScreenImagePreview(images, initialIndex, originRect,
+        onDownload = { image ->
             scope.launch {
-                if (isLocal) saveLocalImage(context, downloadRef)
-                else downloadImage(context, downloadRef)
+                if (image.isLocal) saveLocalImage(context, image.source)
+                else downloadImage(context, image.source)
             }
         }, onDismiss = onDismiss)
 }

@@ -14,7 +14,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import com.freechat.util.DocumentParser
 import com.freechat.util.AttachmentImport
-import com.freechat.ui.components.ImageParticleMotion
+import com.freechat.ui.components.ImageDotMotion
 import com.freechat.sync.Merge
 import kotlin.math.abs
 import org.junit.Assert.*
@@ -30,21 +30,20 @@ class Beta992RegressionTest {
     private fun model(id: String, type: ModelType = ModelType.LANGUAGE) =
         ModelInfo(id, id, Provider.CUSTOM, modelType = type, apiBaseUrl = "https://qa.invalid", apiKey = "qa-dummy")
 
-    @Test fun quietImagePlaceholderUsesSmallParticlesWithoutEdgeClippingOrBusyTrails() {
-        val particles = ImageParticleMotion.create()
-        assertTrue("Keep the image placeholder a restrained field", particles.size <= 48)
-        assertTrue(particles.all { it.radius <= 1.6f })
-        for (p in particles) for (step in 0..400) {
+    @Test fun quietImagePlaceholderUsesAnOrderedFieldWithoutBusyTrails() {
+        assertEquals("Keep the image placeholder an orderly dot field", 20, ImageDotMotion.Columns)
+        assertTrue(ImageDotMotion.MaxRadius < .5f)
+        for (column in 0 until ImageDotMotion.Columns) for (step in 0..400) {
             val t = step * .5f
-            assertTrue(p.x(t) in .02f.. .98f)
-            assertTrue(p.y(t) in .02f.. .98f)
-            assertTrue(abs(p.x(t + .016f) - p.x(t)) < .002f)
-            assertTrue(abs(p.y(t + .016f) - p.y(t)) < .002f)
+            val x = (column + .5f) / ImageDotMotion.Columns
+            val radius = ImageDotMotion.frame(t).radius(x, .5f)
+            assertTrue(radius in ImageDotMotion.MinRadius..ImageDotMotion.MaxRadius)
+            assertTrue(abs(radius - ImageDotMotion.frame(t + .016f).radius(x, .5f)) < .004f)
         }
         val placeholder = source("ui/components/ImageGenerationPlaceholder.kt")
         assertFalse("No animated comet trails", placeholder.contains("for (step in 1..4)"))
         assertFalse("Image loading has no rotating thinking orb", placeholder.contains("ThinkingOrb"))
-        assertTrue(placeholder.contains("repeatOnLifecycle"))
+        assertTrue(placeholder.contains("rememberRenderSeconds(active = visible)"))
     }
 
     @Test fun inheritedSlotsResolveTheLatestGlobalSelectionWithoutSavingASnapshot() {

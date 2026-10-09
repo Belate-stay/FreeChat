@@ -28,14 +28,8 @@ import java.util.concurrent.TimeUnit
  */
 object ApiClient {
 
-    /**
-     * 服务器地址。
-     *
-     * 证书是 Let's Encrypt 签给**这个 IP** 的（SAN 里是 IP 不是域名，6 天寿命、每天自动续期）。
-     * 安卓要验通它得信任 **ISRG Root X1** —— 那是 Android 7.1.1(API 25) 才进系统信任库的，
-     * 而这个 App 的 minSdk 是 26，够了。（真要支持 Android 7.0 及以前，这里会整体连不上。）
-     */
-    const val BASE = "https://118.178.227.178/api"
+    /** 官方账号与同步服务器；域名已过审，使用域名的 HTTPS 证书。 */
+    const val BASE = "https://freechater.com/api"
 
     private val JSON = "application/json; charset=utf-8".toMediaType()
 

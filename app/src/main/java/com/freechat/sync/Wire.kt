@@ -230,15 +230,18 @@ object Wire {
             // （ImageSync 顺手把压缩载荷落缓存，SyncEngine 的 IMG 推送按 hash 去重上传）。
             // 路径出不了设备，但「是哪张图」出得去 —— 与头像 avatarHash 同一哲学。
             obj.add("imagePaths", JsonArray().apply {
-                m.imagePaths.forEach { ImageSync.ensureCached(it)?.let { r -> add(r) } }
+                // G2（1.2.3+）：转不动**保留原值**，绝不丢格 —— 丢格=这张图在
+                // 其他端的这份消息里凭空消失。原值（本机路径）别的设备解析不了
+                // 就显示缺图占位，至少「有过一张图」这件事还在。
+                m.imagePaths.map { ImageSync.ensureCached(it) ?: it }.distinct().forEach { add(it) }
             })
             obj.add("imageUrls", JsonArray().apply {
-                m.imageUrls.forEach { u ->
+                m.imageUrls.map { u ->
                     when {
-                        u.startsWith("http://") || u.startsWith("https://") -> add(u)
-                        else -> ImageSync.ensureCached(u)?.let { add(it) }   // 本机路径/data: 图 → 引用
+                        u.startsWith("http://") || u.startsWith("https://") -> u
+                        else -> ImageSync.ensureCached(u) ?: u   // 本机路径/data: 图 → 引用；转不动留原值
                     }
-                }
+                }.distinct().forEach { add(it) }
             })
             obj.addProperty("attachmentPath", null as String?)
             obj.addProperty("quotedImagePath", null as String?)
@@ -262,24 +265,22 @@ object Wire {
         val localById = local.associateBy { it.id }
         // 1.0.99.3 图片上云：`img:<hash>` 引用就地解成缓存路径（收端下载已在 SyncEngine
         // 的 IMG 分支落过缓存；缓存缺失时引用原样透传，UI 当坏图占位，下次同步自动补）。
-        fun resolveRefs(list: List<String>): List<String> =
-            list.map { if (ImageSync.isRef(it)) ImageSync.resolveToPath(it) else it }
         return remote.map { m ->
             val heal = m.healed()
             val mine = localById[heal.id]
             if (mine == null) heal.copy(
-                imagePaths = resolveRefs(heal.imagePaths),
+                imagePaths = ImageSync.canonicalEntries(heal.imagePaths),
                 attachmentPath = null,
                 quotedImagePath = null,
-                imageUrls = resolveRefs(heal.imageUrls.filter {
+                imageUrls = ImageSync.canonicalEntries(heal.imageUrls.filter {
                     it.startsWith("http://") || it.startsWith("https://") || ImageSync.isRef(it)
                 })
             ) else heal.copy(
-                imagePaths = mine.imagePaths,
+                imagePaths = ImageSync.canonicalEntries(heal.imagePaths + mine.imagePaths),
                 attachmentPath = mine.attachmentPath,
                 quotedImagePath = mine.quotedImagePath,
-                // 网络地址两边都留着；本机路径原本就在 mine.imageUrls 里，取并集不丢
-                imageUrls = (resolveRefs(heal.imageUrls) + mine.imageUrls).distinct()
+                // 按图片身份取并集：同一原图/缓存/引用只占一格，本机原图优先。
+                imageUrls = ImageSync.canonicalEntries(heal.imageUrls + mine.imageUrls)
             )
         }
     }
