@@ -10,15 +10,49 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.ScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 
 /** Outgoing pages remain drawn during fading, but must not handle navigation events. */
 internal val LocalPageActive = compositionLocalOf { true }
+
+/**
+ * 页面飞行中（进出转场进行时，1.1.28）。掉帧治理：飞行期双页并存，设置页几十张卡各自跑
+ * 24dp 全分辨率 haze 是最大开销——飞行期卡片材质临时降级为实色（见 frostedCard），
+ * 落位恢复。翻转只发生在转场起止各一次，不是每帧；用户拍板「不要严格现有的视觉动画效果」。
+ */
+internal val LocalPageFlight = compositionLocalOf { false }
+
+/**
+ * 滚动位置持久记忆（1.1.26.7）：ScrollState 本体随页面销毁，值实时回写 [saved]（key = 页面名），
+ * 重建时按 key 恢复原位——全屏旁路（更新日志/用户协议/作者的话/模型编辑/AI语音）不再回顶。
+ * 「从哪点进去还回到哪」；侧滑进设置时调用方清空 [saved] 即统一回顶部。
+ */
+@Composable
+fun rememberPersistentScrollState(key: String, saved: MutableMap<String, Int>): ScrollState {
+    val state = remember(key) { ScrollState(saved[key] ?: 0) }
+    LaunchedEffect(state) {
+        snapshotFlow { state.value }.collect { saved[key] = it }
+    }
+    return state
+}
+
+/** Settings are task entry points, not reading bookmarks, including interrupted page transitions. */
+@Composable
+fun rememberTopOnEntryScrollState(): ScrollState {
+    val state = remember { ScrollState(0) }
+    val active = LocalPageActive.current
+    LaunchedEffect(active) { if (active) state.scrollTo(0) }
+    return state
+}
 
 internal fun pageTranslation(state: EnterExitState, forward: Boolean, distancePx: Float): Float {
     val distance = distancePx.coerceAtLeast(0f) * if (forward) 1f else -1f
@@ -48,6 +82,11 @@ fun <T> PageMotion(
     val enabled = LocalMotionEnabled.current
     val parentActive = LocalPageActive.current
     val pages = updateTransition(targetState, label = label)
+    // 转场起止各翻一次的「飞行中」信号（不逐帧），给卡片材质降级用
+    val flying = remember { androidx.compose.runtime.mutableStateOf(false) }
+    LaunchedEffect(pages) {
+        snapshotFlow { pages.isRunning }.collect { flying.value = it }
+    }
     pages.AnimatedContent(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopStart,
@@ -64,7 +103,10 @@ fun <T> PageMotion(
             else if (targetState == EnterExitState.Visible) FreeChatAnimation.overlayFadeIn
             else FreeChatAnimation.pageFadeOutFast
         }) { state -> if (state == EnterExitState.Visible) 1f else 0f }
-        CompositionLocalProvider(LocalPageActive provides (parentActive && page == pages.targetState)) {
+        CompositionLocalProvider(
+            LocalPageActive provides (parentActive && page == pages.targetState),
+            LocalPageFlight provides flying.value
+        ) {
             Box(Modifier.fillMaxSize().graphicsLayer {
                 translationX = travel.value
                 alpha = opacity.value

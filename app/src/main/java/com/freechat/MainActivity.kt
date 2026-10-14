@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.res.ResourcesCompat
 import com.freechat.ui.animation.PageMotion
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -52,6 +53,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.TileMode
@@ -81,6 +85,7 @@ import com.freechat.model.HeaderBarStyle
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.components.DrawerContent
 import kotlin.math.roundToInt
+import com.freechat.ui.components.NoticeDialog
 import com.freechat.ui.components.SheetPanel
 import com.freechat.model.ColorTheme
 import com.freechat.ui.screens.ChangelogScreen
@@ -102,7 +107,7 @@ import com.freechat.ui.screens.VoiceDebugScreen
 import com.freechat.ui.screens.ModelEditorScreen
 import com.freechat.ui.screens.AccountScreen
 import com.freechat.ui.screens.AgreementScreen
-import com.freechat.ui.screens.AgreementGateDialog
+import com.freechat.ui.screens.AgreementGatePage
 import com.freechat.ui.theme.FreeChatTheme
 import com.freechat.ui.theme.Aurora
 import com.freechat.ui.theme.LiquidBackdrop
@@ -153,6 +158,12 @@ class MainActivity : ComponentActivity() {
                 ResourcesCompat.getFont(this@MainActivity, R.font.notosanscjkmedium)
                 ResourcesCompat.getFont(this@MainActivity, R.font.hysongyunlanghei)
             }
+        }
+
+        // App 启动信标（1.1.21.4）：进软件就报一次到（登录与否都报，未注册也是人头）。
+        // 后台跑、失败静默——统计不能打扰使用。收集实现收在非开源包（1.1.30 红线加固）。
+        lifecycleScope.launch {
+            com.freechat.dev.DevHooks.onAppLaunch(applicationContext)
         }
 
         // 通知权限（Android 13+）：首次进入申请，允许后 AI 后台回复才能发系统通知
@@ -224,6 +235,13 @@ class MainActivity : ComponentActivity() {
                     android.widget.Toast.LENGTH_LONG).show() }
             }
             val hasAgreedTerms by chatViewModel.hasAgreedTerms.collectAsState()
+            // 1.1.26.4：勾选须知+确定并继续 = 进入软件。进入之前不检测、不弹任何启动提醒；
+            // 查看《用户协议与使用条款》不算进入（人还在须知页里）。
+            // 强制弹的门也要能关：同意后把闩摘掉（hasAgreedTerms 管不到它）。
+            var forceAgreementGate by remember {
+                mutableStateOf(com.freechat.dev.DevMode.testAgreement(this@MainActivity))
+            }
+            val appEntered = hasAgreedTerms == true && !forceAgreementGate
             val conversations by chatViewModel.conversations.collectAsState()
             val currentConvId by chatViewModel.currentConversationId.collectAsState()
             val searchQuery by chatViewModel.searchQuery.collectAsState()
@@ -231,6 +249,8 @@ class MainActivity : ComponentActivity() {
             val favorites by chatViewModel.favorites.collectAsState()
             // 多选状态：标题栏「已选择 x 项」也读它
             val multiSelect by chatViewModel.multiSelect.collectAsState()
+            // 改写提示词态（1.1.26.9）：非空 = 页面锁定，横拖拽侧滑手势一并停用
+            val editingPromptId by chatViewModel.editingPromptId.collectAsState()
             val favoriteConvIds = remember(favorites) { favorites.map { it.conversation.id }.toSet() }
 
             val isDark = when (themeMode) {
@@ -282,6 +302,31 @@ class MainActivity : ComponentActivity() {
 
             var currentScreen by remember { mutableStateOf(Screen.CHAT) }
             var drawerOpen by remember { mutableStateOf(false) }
+            // 1.1.20：更新提醒「去更新」的深链闩 —— 进设置页直达「关于FreeChat」
+            var settingsOpenAbout by remember { mutableStateOf(false) }
+            // 1.1.21：「作者的话」详情页原路返回的深链闩 —— 直达设置内的「作者」三级页
+            var settingsOpenAuthor by remember { mutableStateOf(false) }
+            // 1.1.26.7：模型编辑/添加页原路返回的深链闩 —— 直达来源模型列表二级页（不再跳过它直回设置主页）
+            var settingsOpenModelList by remember { mutableStateOf<ModelType?>(null) }
+            // 1.1.26.7：设置滚动位置记忆提升到这里（key=页面名，值=滚动像素）——
+            // 跨全屏旁路（更新日志/用户协议/作者的话/模型编辑/AI语音）不丢，「从哪点进去还回到哪」；
+            // 侧滑进设置时清空 = 统一回顶部（用户拍板）。
+            val settingsScrolls = remember { mutableMapOf<String, Int>() }
+            // 1.1.26.7：收藏列表滚动态同款提升 —— 收藏详情返回列表原位；侧滑进收藏 = 回顶部
+            var favoritesListState by remember {
+                mutableStateOf(androidx.compose.foundation.lazy.LazyListState(0, 0))
+            }
+            // 1.1.21：三个详情页（更新日志/用户协议/作者的话）的「原路返回」——
+            // 从哪级点进来的回哪级，不再跳过聚合页直回设置（2026-10-11 用户点名「不能跳页」）。
+            // 系统返回键与页头箭头共用这两个动作，两条路永远同归。
+            val backToAboutPage = {
+                currentScreen = Screen.SETTINGS
+                settingsOpenAbout = true
+            }
+            val backToAuthorPage = {
+                currentScreen = Screen.SETTINGS
+                settingsOpenAuthor = true
+            }
             var isDragging by remember { mutableStateOf(false) }
             // 「点对话后等竖条滑完再关抽屉」那笔待办（见 onSelectConversation）
             var pendingDrawerClose by remember { mutableStateOf<Job?>(null) }
@@ -356,6 +401,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // 分享包导入完成：跳回主对话（对话切换已在 importShareJson 内做完）
+            LaunchedEffect(Unit) {
+                chatViewModel.shareImportNav.collect { id ->
+                    if (id != null) {
+                        chatViewModel.consumeShareImportNav()
+                        currentScreen = Screen.CHAT
+                    }
+                }
+            }
+
             // ──── 新对话过渡动画 ────
             var newChatRevealTrigger by remember { mutableIntStateOf(0) }
             var characterSetupInitial by remember { mutableStateOf<CharacterProfile?>(null) }
@@ -397,8 +452,45 @@ class MainActivity : ComponentActivity() {
             // 只在有侧滑页弹层打开时才挂 hazeSource：没有消费者的时候挂了也是白录一整屏
             // （Haze 的源节点不看 blurEnabled，画了就录），白给 GPU 加活。
             val overlayHazeState = rememberHazeState()
+            // 1.1.20：启动提醒弹窗（冲突副本/检查更新）。开着时模糊源也要激活 ——
+            // 它和弹层共用 overlayHazeState；副本提醒优先弹，更新提醒排它后面，一次一张
+            val copyNoticeCount by chatViewModel.conflictCopyNotice.collectAsState()
+            val updateNotice by chatViewModel.updateNotice.collectAsState()
+            // 1.1.26.4：进入软件后**一次最多弹一个**——两个都中时轮流来（上次弹过的让位，
+            // 另一个下次启动再弹），这次弹过就到此为止，绝不点完这个又弹那个（去更新/去清理
+            // 是两个不同页面，连环弹只会让人不知道该干嘛）。
+            val lastLaunchNotice by chatViewModel.lastLaunchNotice.collectAsState()
+            var noticePicked by remember { mutableStateOf<String?>(null) }
+            // 新功能推荐导览（1.1.31）：更新后首次进入弹一次（版本号记账）；
+            // 开发者「新功能推荐弹窗测试」开启 = 每次进入都弹。与启动提醒互斥（一次只弹一个）。
+            var featureRecVisible by remember { mutableStateOf(false) }
+            LaunchedEffect(appEntered) {
+                if (!appEntered) return@LaunchedEffect
+                val prefs = getSharedPreferences("feature_rec", android.content.Context.MODE_PRIVATE)
+                if (com.freechat.dev.DevMode.testFeatureRec(this@MainActivity) ||
+                    prefs.getInt("last_shown", 0) < com.freechat.BuildConfig.VERSION_CODE
+                ) {
+                    kotlinx.coroutines.delay(700)
+                    featureRecVisible = true
+                }
+            }
+            val noticeCandidate = if (!appEntered || noticePicked != null || featureRecVisible) null
+                else com.freechat.data.NoticePolicy.pickLaunchNotice(
+                    copyPending = copyNoticeCount > 0,
+                    updatePending = updateNotice != null,
+                    lastShown = lastLaunchNotice
+                )
+            val noticePick = noticePicked ?: noticeCandidate
+            LaunchedEffect(noticeCandidate) {
+                if (noticePicked == null && noticeCandidate != null) {
+                    noticePicked = noticeCandidate
+                    chatViewModel.markLaunchNotice(noticeCandidate)
+                }
+            }
+            val copyNoticeVisible = noticePick == "copy" && copyNoticeCount > 0
+            val updateNoticeVisible = noticePick == "update" && updateNotice != null
             val drawerSheetOpen = drawerRenameTarget != null || drawerDeleteTarget != null ||
-                drawerBatchDeleteTargets != null
+                drawerBatchDeleteTargets != null || copyNoticeVisible || updateNoticeVisible
 
             // 驱动动画 — 打开用 Spring，关闭用快速 Tween 消除后摇
             androidx.compose.runtime.LaunchedEffect(drawerOpen, isDragging) {
@@ -418,7 +510,7 @@ class MainActivity : ComponentActivity() {
                         currentScreen = Screen.SETTINGS
                     }
                     currentScreen == Screen.CHANGELOG -> {
-                        currentScreen = Screen.SETTINGS
+                        backToAboutPage()
                     }
                     currentScreen == Screen.SETTINGS -> {
                         currentScreen = Screen.CHAT; drawerOpen = true
@@ -427,19 +519,23 @@ class MainActivity : ComponentActivity() {
                         currentScreen = Screen.CHAT
                     }
                     currentScreen == Screen.CHARACTER_SETUP -> {
+                        chatViewModel.clearShareDraft() // 放弃创建：暂存的分享包内容不留到下个角色
                         currentScreen = Screen.NEW_CHAT_MODE
                     }
                     currentScreen == Screen.NEW_CHAT_MODE -> {
                         currentScreen = Screen.CHAT
                     }
                     currentScreen == Screen.MODEL_EDITOR -> {
-                        currentScreen = if (modelEditorFromChat) Screen.CHAT else Screen.SETTINGS
+                        currentScreen = if (modelEditorFromChat) Screen.CHAT else {
+                            settingsOpenModelList = modelEditorType
+                            Screen.SETTINGS
+                        }
                     }
                     currentScreen == Screen.AGREEMENT -> {
-                        currentScreen = Screen.SETTINGS
+                        backToAboutPage()
                     }
                     currentScreen == Screen.AUTHOR_WORDS -> {
-                        currentScreen = Screen.SETTINGS
+                        backToAuthorPage()
                     }
                     currentScreen == Screen.ACCOUNT -> {
                         currentScreen = Screen.CHAT
@@ -465,6 +561,16 @@ class MainActivity : ComponentActivity() {
             // 语言变更时重新应用 Locale
             LaunchedEffect(appLanguage) {
                 LocaleManager.applyLocale(this@MainActivity, appLanguage)
+            }
+
+            // 1.1.26.4：进入软件才做启动检测（检查更新/冲突副本）；开发者测试开关同理押后到进入之后
+            LaunchedEffect(appEntered) {
+                if (!appEntered) return@LaunchedEffect
+                chatViewModel.onAppEntered()
+                // 非开源弹窗测试接线（1.1.26.2）：测试态强制弹，不论真实条件；
+                // 测试弹窗不写「永不提醒/3 天冷却」，正常检测与弹出一字不动。
+                if (com.freechat.dev.DevMode.testUpdate(this@MainActivity)) chatViewModel.forceUpdateNotice()
+                if (com.freechat.dev.DevMode.testCopy(this@MainActivity)) chatViewModel.forceCopyNotice()
             }
 
             androidx.compose.runtime.CompositionLocalProvider(LocalStrings provides currentStrings, LocalAdvancedMaterial provides advancedMaterial, LocalMaterialProgress provides materialProgress, LocalHeaderCardProgress provides headerCardProgress, LocalLiquidMode provides liquidActive, LocalLiquidProgress provides liquidProgress, LocalLiquidPalette provides liquidColors, LocalLiquidClock provides liquidClock, LocalLiquidFrame provides liquidFrame) {
@@ -528,8 +634,9 @@ class MainActivity : ComponentActivity() {
                                         renderEffect = blurEffectCache[(blurProgress * blurSteps + 0.5f).toInt()]
                                     }
                                 }
-                                .pointerInput(currentScreen) {
-                                    if (currentScreen == Screen.CHAT) {
+                                // key 带上改写态（1.1.26.9）：进入/退出改写时手势重装，锁住横拖拽出侧滑页
+                                .pointerInput(currentScreen, editingPromptId) {
+                                    if (currentScreen == Screen.CHAT && editingPromptId == null) {
                                         detectHorizontalDragGestures(
                                             onDragStart = { isDragging = true; coroutineScope.launch { drawerOffset.snapTo(drawerOffset.value) } },
                                             onDragEnd = {
@@ -569,7 +676,9 @@ class MainActivity : ComponentActivity() {
                 onOpenDrawer = { drawerOpen = true },
                 onOpenNewRules = { currentScreen = Screen.NEW_RULES },
                 onOpenModelEditor = { type, editing ->
-                    if (com.freechat.data.ModelAccessPolicy.canEdit(editing)) {
+                    if (com.freechat.data.ModelAccessPolicy.canEdit(editing) ||
+                        com.freechat.dev.DevMode.canEditBuiltIn(this@MainActivity)
+                    ) {
                         // Custom model shortcut returns to chat; built-ins have no editor route.
                         modelEditorType = type
                         modelEditorEditing = editing
@@ -614,7 +723,9 @@ class MainActivity : ComponentActivity() {
                     currentScreen = Screen.CHANGELOG
                 },
                 onOpenModelEditor = { type, editing ->
-                    if (com.freechat.data.ModelAccessPolicy.canEdit(editing)) {
+                    if (com.freechat.data.ModelAccessPolicy.canEdit(editing) ||
+                        com.freechat.dev.DevMode.canEditBuiltIn(this@MainActivity)
+                    ) {
                         modelEditorType = type
                         modelEditorEditing = editing
                         modelEditorFromChat = false
@@ -626,6 +737,15 @@ class MainActivity : ComponentActivity() {
                 },
                 onOpenAuthorWords = {
                     currentScreen = Screen.AUTHOR_WORDS
+                },
+                openAboutOnLaunch = settingsOpenAbout,
+                openAuthorOnLaunch = settingsOpenAuthor,
+                openModelListOnLaunch = settingsOpenModelList,
+                levelScrolls = settingsScrolls,
+                onAboutConsumed = {
+                    settingsOpenAbout = false
+                    settingsOpenAuthor = false
+                    settingsOpenModelList = null
                 }
             )
             // 返回回侧栏（跟收藏一致）—— 账号入口在抽屉里，不在了设置页；
@@ -643,24 +763,30 @@ class MainActivity : ComponentActivity() {
                 }
             )
             Screen.CHANGELOG -> ChangelogScreen(
-                onBack = { currentScreen = Screen.SETTINGS }
+                onBack = backToAboutPage
             )
             Screen.MODEL_EDITOR -> ModelEditorScreen(
                 viewModel = chatViewModel,
                 modelType = modelEditorType ?: ModelType.LANGUAGE,
                 editing = modelEditorEditing,
                 isDark = isDark,
-                onBack = { currentScreen = if (modelEditorFromChat) Screen.CHAT else Screen.SETTINGS }
+                onBack = {
+                    currentScreen = if (modelEditorFromChat) Screen.CHAT else {
+                        settingsOpenModelList = modelEditorType
+                        Screen.SETTINGS
+                    }
+                }
             )
             Screen.AGREEMENT -> AgreementScreen(
-                onBack = { currentScreen = Screen.SETTINGS }
+                onBack = backToAboutPage
             )
             Screen.AUTHOR_WORDS -> AuthorWordsScreen(
-                onBack = { currentScreen = Screen.SETTINGS }
+                onBack = backToAuthorPage
             )
             Screen.FAVORITES -> FavoritesScreen(
                 viewModel = chatViewModel,
                 isDark = isDark,
+                listState = favoritesListState,
                 onBack = {
                     currentScreen = Screen.CHAT
                     drawerOpen = true
@@ -715,7 +841,10 @@ class MainActivity : ComponentActivity() {
             Screen.CHARACTER_SETUP -> CharacterSetupScreen(
                 viewModel = chatViewModel,
                 isDark = isDark,
-                onBack = { currentScreen = if (characterSetupInitial != null) Screen.CHAT else Screen.NEW_CHAT_MODE },
+                onBack = {
+                    chatViewModel.clearShareDraft() // 放弃创建：暂存的分享包内容不留到下个角色
+                    currentScreen = if (characterSetupInitial != null) Screen.CHAT else Screen.NEW_CHAT_MODE
+                },
                 onCreate = { profile ->
                     if (characterSetupInitial != null) {
                         val oldProfile = characterSetupInitial!!
@@ -735,6 +864,10 @@ class MainActivity : ComponentActivity() {
                             chatViewModel.updateCurrentCharacter(enriched)
                             currentScreen = Screen.CHAT
                         }
+                    } else if (chatViewModel.hasShareDraft()) {
+                        // 分享包导入后的「创建角色」（1.1.26.3）：消息/记忆已暂存，直接成建不走
+                        // 学习页（导入内容要保进度）；跳 Chat 由 shareImportNav 事件统一处理
+                        chatViewModel.createFromShareDraft(profile)
                     } else {
                         // 首次创建：进加载页，AI 深度学习人设再开始聊天
                         learningUpdating = false
@@ -882,16 +1015,12 @@ class MainActivity : ComponentActivity() {
                                     if (advancedMaterial) {
                                         if (liquidActive) Modifier else Modifier.background(colors.Background)
                                     } else {
+                                        // 1.1.26.8：非高级材质 = 没有悬浮/磨砂概念，抽屉必须是实体背景板
+                                        // 做内容隔离 —— 炫彩下也不再盖 α≈0.07 的 veil（透明抽屉会让列表与
+                                        // 悬浮元素穿帮叠字，用户点名「没有可读性」）。炫彩想露就只在高级材质那支露。
                                         Modifier
                                             .clip(RoundedCornerShape(topEnd = 22.dp, bottomEnd = 22.dp))
-                                            .then(
-                                                // 高级材质下抽屉内容本身是不透明的模糊源，不需要罩色；
-                                                // 非高级材质下抽屉是透明的，盖一层极淡的玻璃色（drawerVeil 的 α≈0.07），
-                                                // 只留一丝「这是一层抽屉」的暗示 —— 早先这里是 60% 不透明，
-                                                // 于是抽屉与 Chat 页在接缝处成了两块颜色，看着就是裂痕。
-                                                if (liquidActive) Modifier.background(liquidColors.drawerVeil)
-                                                else Modifier.background(colors.Surface)
-                                            )
+                                            .background(colors.Surface)
                                     }
                                 )
                                 .pointerInput(drawerOpen) {
@@ -955,10 +1084,12 @@ class MainActivity : ComponentActivity() {
         exitSelectKey = drawerExitSelectKey,
         onOpenSettings = {
             drawerOpen = false
+            settingsScrolls.clear() // 侧滑进设置统一回顶部（用户拍板口径）
             pendingRevealScreen = Screen.SETTINGS
         },
         onOpenFavorites = {
             drawerOpen = false
+            favoritesListState = androidx.compose.foundation.lazy.LazyListState(0, 0) // 侧滑进收藏统一回顶部
             pendingRevealScreen = Screen.FAVORITES
         },
         onOpenAccount = {
@@ -1004,25 +1135,44 @@ class MainActivity : ComponentActivity() {
                     // 判据写成 `== false` 而不是 `!`：hasAgreedTerms 是三态
                     // （null = 还没从 DataStore 读出来）。老用户冷启动时它是 null 那几十毫秒，
                     // 用 `!` 会把这当成「没同意」先闪一下协议浮层再消失（1.0.53 修）。
+                    //
+                    // 非开源弹窗测试接线（1.1.26.2）：勾了「用户协议弹窗测试」
+                    // 就每次启动都弹（不再局限于首次），真实首次判定照旧，互不干扰。
                     // =============================================
-                    when (hasAgreedTerms) {
+                    when {
                         // null：DataStore 还没读出结果。只铺一层不透明底色挡着 ——
                         // 老用户不会闪协议，新用户也不会先闪一下主界面再弹协议。
-                        null -> Box(Modifier.fillMaxSize().pageBackground(colors.Background))
-                        false -> {
-                            // 主界面正常渲染（已在上方），协议以悬浮窗形式叠加
+                        hasAgreedTerms == null -> Box(Modifier.fillMaxSize().pageBackground(colors.Background))
+                        hasAgreedTerms == false || forceAgreementGate -> {
+                            // 1.1.26.4：使用须知=全屏页面（不再是悬浮弹窗）；看完整协议不算进入
                             var showFullAgreement by remember { mutableStateOf(false) }
-                            if (showFullAgreement) {
-                                AgreementScreen(onBack = { showFullAgreement = false })
-                            } else {
-                                AgreementGateDialog(
-                                    onAgree = { chatViewModel.agreeTerms() },
-                                    onOpenAgreement = { showFullAgreement = true },
-                                    colors = colors
-                                )
+                            // 协议门↔完整协议页互跳走 pageTransition（1.1.26 动画补缺），不再整页硬切。
+                            AnimatedContent(
+                                targetState = showFullAgreement,
+                                transitionSpec = {
+                                    FreeChatAnimation.pageTransition(
+                                        forward = targetState,
+                                        distancePx = with(density) {
+                                            com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.roundToPx()
+                                        }
+                                    )
+                                },
+                                label = "agreementGate"
+                            ) { fullAgreement ->
+                                if (fullAgreement) {
+                                    AgreementScreen(onBack = { showFullAgreement = false })
+                                } else {
+                                    AgreementGatePage(
+                                        onAgree = {
+                                            forceAgreementGate = false
+                                            chatViewModel.agreeTerms()
+                                        },
+                                        onOpenAgreement = { showFullAgreement = true }
+                                    )
+                                }
                             }
                         }
-                        true -> Unit
+                        else -> Unit
                     }
 
                     // =============================================
@@ -1030,6 +1180,20 @@ class MainActivity : ComponentActivity() {
                     //   1.0.49 按用户要求整条撤掉：卡片、启动闩、DataStore 记录、文案全删。
                     //   设置里的「版本更新」页还在（那是另一回事，用户看改动走那一页）。
                     // =============================================
+
+                    // 6.5 新功能推荐导览（1.1.31）：全屏一页、真实组件自动演示；播放期锁定交互，
+                    //     结束才亮「立即体验」。与启动提醒互斥（noticeCandidate 已让位）。
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = featureRecVisible,
+                        enter = FreeChatAnimation.dialogEnter(),
+                        exit = FreeChatAnimation.dialogExit()
+                    ) {
+                        com.freechat.ui.components.FeatureRecPage(onDone = {
+                            getSharedPreferences("feature_rec", android.content.Context.MODE_PRIVATE)
+                                .edit().putInt("last_shown", com.freechat.BuildConfig.VERSION_CODE).apply()
+                            featureRecVisible = false
+                        })
+                    }
 
                     // =============================================
                     // 7. 侧滑页那三个对话弹层（重命名 / 删除 / 批量删除）
@@ -1132,6 +1296,48 @@ class MainActivity : ComponentActivity() {
                             )
                         )
                     }
+
+                    // =============================================
+                    // 8.（1.1.20）启动提醒弹窗：冲突副本清理 / 检查更新
+                    //    居中磨砂卡片 + 背景高斯模糊（见 NoticeDialog 头注）。
+                    //    「去清理」= 开侧滑页就结束 —— 删不删、删哪些全由用户自己定；
+                    //    「去更新」= 进设置-关于FreeChat，下载安装走那页已有的「检查更新」按钮。
+                    // =============================================
+                    NoticeDialog(
+                        visible = copyNoticeVisible,
+                        title = currentStrings.copyNoticeTitle,
+                        body = currentStrings.copyNoticeBody,
+                        confirmLabel = currentStrings.copyNoticeConfirm,
+                        dismissLabel = currentStrings.cancel,
+                        checkboxLabel = currentStrings.copyNoticeNever,
+                        colors = colors,
+                        isDark = isDark,
+                        advancedMaterial = advancedMaterial,
+                        hazeState = overlayHazeState,
+                        onConfirm = { never ->
+                            chatViewModel.dismissCopyNotice(never)
+                            drawerOpen = true
+                        },
+                        onDismiss = { never -> chatViewModel.dismissCopyNotice(never) }
+                    )
+                    NoticeDialog(
+                        visible = updateNoticeVisible,
+                        title = currentStrings.updateNoticeTitle(updateNotice?.versionName ?: ""),
+                        body = currentStrings.updateNoticeBody,
+                        confirmLabel = currentStrings.updateNoticeConfirm,
+                        dismissLabel = currentStrings.cancel,
+                        checkboxLabel = currentStrings.updateNoticeSnooze,
+                        colors = colors,
+                        isDark = isDark,
+                        advancedMaterial = advancedMaterial,
+                        hazeState = overlayHazeState,
+                        onConfirm = { snooze ->
+                            chatViewModel.dismissUpdateNotice(snooze)
+                            currentScreen = Screen.SETTINGS
+                            settingsOpenAbout = true
+                        },
+                        onDismiss = { snooze -> chatViewModel.dismissUpdateNotice(snooze) }
+                    )
                 }
             }
             } // CompositionLocalProvider
@@ -1156,6 +1362,9 @@ private fun ChatDrawerTitle(
 ) {
     val titleProgress = (drawerOffset.value / drawerWidthPx).coerceIn(0f, 1f)
 
+    // 1.1.26.8：非高级材质时标题垫实体背景板做内容隔离（板随抽屉滑出渐显；高级材质下保持悬浮无板）
+    val titlePlateAlpha = if (com.freechat.ui.theme.LocalAdvancedMaterial.current) 0f else titleProgress
+
     // 位置插值：52dp(chat) → 16dp(drawer)
     val titleXDp = 52f + (16f - 52f) * titleProgress
     val titleColor = lerp(colors.TextPrimary, colors.Primary, titleProgress)
@@ -1167,22 +1376,40 @@ private fun ChatDrawerTitle(
             .fillMaxWidth()
             .statusBarsPadding()
     ) {
-        Text(
-            titleText,
-            fontSize = titleFontSize,
-            letterSpacing = 2.sp,
-            fontWeight = FontWeight.SemiBold,
-            fontFamily = titleFont,
-            color = titleColor,
-            maxLines = 1,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        // 标题文案切换（多选「已选择 x 项」等）走 contentReplacement（1.1.26 动画补缺），不再闪换。
+        AnimatedContent(
+            targetState = titleText,
+            transitionSpec = { FreeChatAnimation.contentReplacement() },
+            label = "chatDrawerTitle",
             modifier = Modifier
                 .widthIn(max = (LocalConfiguration.current.screenWidthDp - titleXDp - 144f * (1f - titleProgress) - 8f).coerceAtLeast(64f).dp)
                 .graphicsLayer {
                     translationX = with(density) { titleXDp.dp.toPx() }
                     translationY = with(density) { 18.dp.toPx() }
+                    alpha = 1f
                 }
-        )
+                .drawBehind {
+                    // 实体垫板：1.1.26.8 内容隔离——列表滑动不与标题叠字
+                    if (titlePlateAlpha > 0.01f) {
+                        drawRect(
+                            color = colors.Surface.copy(alpha = titlePlateAlpha),
+                            topLeft = Offset(-12f, -6f),
+                            size = Size(this.size.width + 24f, this.size.height + 12f)
+                        )
+                    }
+                }
+        ) { text ->
+            Text(
+                text,
+                fontSize = titleFontSize,
+                letterSpacing = 2.sp,
+                fontWeight = FontWeight.SemiBold,
+                fontFamily = titleFont,
+                color = titleColor,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+        }
     }
 }
 

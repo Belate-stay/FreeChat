@@ -8,7 +8,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
-import androidx.compose.foundation.rememberScrollState
+import com.freechat.ui.animation.jellyOverscroll
+import com.freechat.ui.animation.rememberTopOnEntryScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -176,7 +177,9 @@ fun NewRulesScreen(
                 // 必须在 verticalScroll **之前**给：这样缩的是视口本身，内容才滚得上得来；
                 // 给在后面只是往滚动内容尾巴上添一段留白，视口还是被键盘压着的那一整屏。
                 .imePadding()
-                .verticalScroll(rememberScrollState())
+                // 果冻边界冗余（1.1.26.6）：顶/底继续拖跟手位移带阻尼，松手回弹
+                .jellyOverscroll()
+                .verticalScroll(rememberTopOnEntryScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -635,7 +638,7 @@ private fun ModelPickerOptions(
         SheetOption(
             selected = !followGlobal && selected != null && ModelSelectionResolver.selectionKey(m) == ModelSelectionResolver.selectionKey(selected),
             title = m.displayName,
-            subtitle = com.freechat.i18n.localizedModelDesc(m, s),
+            subtitle = com.freechat.ui.components.modelDescTwoLines(com.freechat.i18n.localizedModelDesc(m, s)),
             colors = colors,
             // 模型名是"代码感"的字符串，沿用原来的等宽字体
             monoTitle = true,

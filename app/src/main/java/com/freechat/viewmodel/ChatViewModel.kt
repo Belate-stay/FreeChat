@@ -13,6 +13,7 @@ import android.provider.CalendarContract
 import android.util.Base64
 import android.util.Log
 import com.freechat.data.MiMoAsr
+import com.freechat.ui.animation.AnimationReplay
 import com.freechat.core.CompanionMood
 import com.freechat.data.CompanionApiReply as CompanionReply
 import com.freechat.core.CompanionRhythm
@@ -32,6 +33,7 @@ import androidx.lifecycle.viewModelScope
 import com.freechat.BuildConfig
 import com.freechat.ReplyService
 import com.freechat.data.AppJson
+import com.freechat.data.ImageAspect
 import com.freechat.data.LocalStore
 import com.freechat.data.MessageDeletion
 import com.freechat.data.healed
@@ -44,6 +46,7 @@ import com.freechat.sync.Session
 import com.freechat.data.MemoryManager
 import com.freechat.data.ModelCatalog
 import com.freechat.data.PerConvStore
+import com.freechat.data.ShareExport
 import com.freechat.data.ModelSelectionResolver
 import com.freechat.data.RequestModels
 import com.freechat.data.AttachmentContext
@@ -89,6 +92,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import com.freechat.model.HeaderBarStyle
@@ -213,6 +218,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _multiSelect = MutableStateFlow(MultiSelectState())
     val multiSelect: StateFlow<MultiSelectState> = _multiSelect.asStateFlow()
 
+    // ========== 改写提示词目标（1.1.26.9 页面上锁）==========
+    // 非空 = 正在改写这条消息：标题栏/抽屉/新建全禁用。放 VM 同多选一理——
+    // 要读它的是 MainActivity（抽屉拖拽手势）与 ChatScreen 两棵平行子树。
+    private val _editingPromptId = MutableStateFlow<String?>(null)
+    val editingPromptId: StateFlow<String?> = _editingPromptId.asStateFlow()
+
+    fun setEditingPrompt(id: String?) {
+        _editingPromptId.value = id
+    }
+
     private val _isLoading = MutableStateFlow(false)
     private val convGenerationPhases = java.util.concurrent.ConcurrentHashMap<String, com.freechat.data.GenerationPhase>()
     private val _generationPhase = MutableStateFlow(com.freechat.data.GenerationPhase.IDLE)
@@ -225,6 +240,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val convGenerationReplyIds = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val _generationReplyId = MutableStateFlow<String?>(null)
     val generationReplyId: StateFlow<String?> = _generationReplyId.asStateFlow()
+    private val convGenerationModels = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val convImageGenerations = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val _generationModelName = MutableStateFlow("")
+    val generationModelName: StateFlow<String> = _generationModelName.asStateFlow()
+
+    private fun setGenerationModel(convId: String, name: String, image: Boolean = false) {
+        convGenerationModels[convId] = name
+        if (image) convImageGenerations.add(convId)
+        if (_currentConversationId.value == convId) {
+            _generationModelName.value = name
+            _isGeneratingImage.value = image
+        }
+    }
 
     private fun advanceGeneration(convId: String, phase: com.freechat.data.GenerationPhase, expectedSerial: Long? = null) {
         if (convId.isBlank()) return
@@ -448,6 +476,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _showThinking = MutableStateFlow(false)
     val showThinking: StateFlow<Boolean> = _showThinking.asStateFlow()
 
+    // 1.1.29.8：默认折叠思考过程（思考中展开，回复开流自动折起）；仅显示思考过程开启时可见
+    private val _collapseThinking = MutableStateFlow(true)
+    val collapseThinking: StateFlow<Boolean> = _collapseThinking.asStateFlow()
+
     private val _appLanguage = MutableStateFlow(AppLanguage.SYSTEM)
     val appLanguage: StateFlow<AppLanguage> = _appLanguage.asStateFlow()
 
@@ -469,6 +501,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // ===== ASR 语音识别（无内置，用户自行添加）=====
     private val _asrModel = MutableStateFlow("")
     val asrModel: StateFlow<String> = _asrModel.asStateFlow()
+    /** 1.1.29.2 ①：删过「FreeChat简介说明」对话=知识库整体停用（生成期同步读，@Volatile） */
+    @Volatile
+    private var introDeletedLatch = false
+
+    /**
+     * 1.1.29.1 ①：粒子粉碎退场信号——重生成/重回复（含图片重生成）删除的既有消息碎成粒子
+     * 自由落体（用户主动删除不走这条，保持原动画）。携带被删 id，ChatScreen 按最后一帧位置起爆。
+     */
+    private val _shatterRequests = MutableSharedFlow<List<String>>(extraBufferCapacity = 8)
+    val shatterRequests: SharedFlow<List<String>> = _shatterRequests
+
+    private fun shatterThenDelete(convId: String, ids: Set<String>) {
+        if (ids.isNotEmpty()) _shatterRequests.tryEmit(ids.toList())
+        deleteMessageIds(convId, ids)
+    }
 
     private val _ttsVoice = MutableStateFlow("mimo_default")
     val ttsVoice: StateFlow<String> = _ttsVoice.asStateFlow()
@@ -523,10 +570,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // 最后一次看过「更新了什么」的版本号（空 = 没看过；与当前版本号不等就弹一次）
 
     private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
-    // Empty standard rows with a deletion ledger are sync metadata, not leftover sidebar chats.
-    val conversations: StateFlow<List<Conversation>> = _conversations
-        .map { rows -> rows.filter { it.messageCount > 0 || it.mode == ChatMode.COMPANION || it.deletedMessageIds.isEmpty() } }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    // 1.1.26.8 用户拍板：删空消息 ≠ 删对话。消息删光的行（含删除台账）也是真对话——
+    // 里面可能带着用户设定的新规则或角色卡，必须留在侧滑页，点进去以空对话显示。
+    // 旧过滤（0 消息+有台账=同步元数据藏掉）误伤了这条路径，连拟人行 mode 被写成 STANDARD 也会中招。
+    val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
 
     private val _currentConversationId = MutableStateFlow<String?>(null)
     val currentConversationId: StateFlow<String?> = _currentConversationId.asStateFlow()
@@ -616,9 +663,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         com.freechat.data.BuiltInLanguageModel.create(BuildConfig.DEEPSEEK_API_KEY)
     )
     private val builtInVisualModels = listOf(
-        ModelInfo("ep-20260629143810-ffvjl", "Doubao-Seedream-5.0-Lite", Provider.DOUBAO, "Volcano Engine轻量级生图模型，作者自用API，不保证随时在线，可适当白嫖。", modelType = ModelType.VISUAL, isBuiltIn = true)
+        ModelInfo("ep-20260629143810-ffvjl", "Doubao-Seedream-5.0-Lite", Provider.DOUBAO, "Volcano Engine 轻量级生图模型，${com.freechat.data.BuiltInLanguageModel.RED_TAIL}", modelType = ModelType.VISUAL, isBuiltIn = true),
+        // 1.1.26.1：OpenAI 兼容 images 端点（中转站），键入 BuildConfig 不落编辑页——用户只能选不能看。
+        ModelInfo("gpt-image-2.5", "ChatGPT-Image-2.5", Provider.CUSTOM, "OpenAI 旗舰生图模型，${com.freechat.data.BuiltInLanguageModel.RED_TAIL}",
+            modelType = ModelType.VISUAL, apiBaseUrl = "https://qiuqiutoken.net/",
+            apiKey = BuildConfig.CHATGPT_IMAGE_KEY, isBuiltIn = true)
     )
+    // 1.1.28：音色设计/音色复刻不进模型池（哪儿都不显示，只在「自定义语音」页经常量 id 调用）——池只留 STOCK
     private val builtInTtsModels = BuiltInVoiceModel.createAll(BuildConfig.MIMO_TTS_KEY)
+        .filter { it.id == BuiltInVoiceModel.STOCK_ID }
+    // 1.1.28 新增内置识图/语音识别：识图=DeepSeek（与语言模型共用 Key），ASR=MiMo（与语音合成共用 Key）
+    private val builtInVisionModels = listOf(
+        com.freechat.data.BuiltInLanguageModel.createVision(BuildConfig.DEEPSEEK_API_KEY)
+    )
+    private val builtInAsrModels = listOf(
+        BuiltInVoiceModel.createAsr(BuildConfig.MIMO_TTS_KEY)
+    )
+
+    // 1.1.28 默认模型（没显式选择时的落点；老用户生图默认由 SettingsRepository v3 迁移钉旧值）
+    private val DEFAULT_VISUAL_MODEL_ID = "gpt-image-2.5"
+    private val DEFAULT_VISION_MODEL_ID = "deepseek-flash-vision"
 
     /** Legacy storage key: only deepThinkingDefault is consumed as a usage preference. */
     private val _builtInParams = MutableStateFlow<Map<String, ModelInfo>>(emptyMap())
@@ -627,11 +691,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val base = when (type) {
             ModelType.LANGUAGE -> builtInLanguageModels
             ModelType.VISUAL -> builtInVisualModels
+            ModelType.VISION -> builtInVisionModels
             ModelType.TTS -> builtInTtsModels
+            ModelType.ASR -> builtInAsrModels
             else -> emptyList()
         }
         return base.map { b ->
             com.freechat.data.ModelAccessPolicy.withUsagePreference(b, params["${b.modelType}|${b.id}"])
+                // 非开源：开发者编辑的外观覆盖（无覆盖时原样返回，正常用户零影响）
+                .let { com.freechat.dev.DevMode.applyBuiltInOverride(getApplication(), it) }
         }
     }
 
@@ -642,6 +710,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (!target.isBuiltIn || !target.supportsDeepThinking) return
         val k = "${target.modelType}|${target.id}"
         _builtInParams.value = _builtInParams.value + (k to target.copy(deepThinkingDefault = on))
+        viewModelScope.launch { settingsRepo.saveBuiltInModelParams(_builtInParams.value) }
+        refreshSelectedFromCatalog()
+    }
+
+    /**
+     * 非开源区放行的内置模型编辑（1.1.26.5）：外观覆盖走独立通道
+     * 独立通道（不动 withUsagePreference——Beta96/Beta1104 契约），能力位/密钥仍以内置定义为准。
+     */
+    fun updateBuiltInModel(model: ModelInfo) {
+        if (!model.isBuiltIn) return
+        com.freechat.dev.DevMode.saveBuiltInOverride(getApplication(), model)
+        // 条目同时落 built_in_model_params 触发列表重建（它只会被当 deepThink 偏好读，无副作用）
+        val k = "${model.modelType}|${model.id}"
+        _builtInParams.value = _builtInParams.value + (k to model)
         viewModelScope.launch { settingsRepo.saveBuiltInModelParams(_builtInParams.value) }
         refreshSelectedFromCatalog()
     }
@@ -670,17 +752,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         builtInList(ModelType.VISUAL, params) + customs.filter { it.modelType == ModelType.VISUAL }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInVisualModels)
 
-    val visionModels: StateFlow<List<ModelInfo>> = _customModels.map { customs ->
-        customs.filter { it.modelType == ModelType.VISION }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val visionModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams) { customs, params ->
+        builtInList(ModelType.VISION, params) + customs.filter { it.modelType == ModelType.VISION }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInVisionModels)
 
     val ttsModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams) { customs, params ->
         builtInList(ModelType.TTS, params) + customs.filter { it.modelType == ModelType.TTS }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInTtsModels)
 
-    val asrModels: StateFlow<List<ModelInfo>> = _customModels.map { customs ->
-        customs.filter { it.modelType == ModelType.ASR }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val asrModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams) { customs, params ->
+        builtInList(ModelType.ASR, params) + customs.filter { it.modelType == ModelType.ASR }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInAsrModels)
 
     // TTS 音色列表（MiMo 预设音色）
     val ttsVoices = listOf(
@@ -808,6 +890,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     if (_currentConversationId.value == convId) _messages.value = merged
                     refreshConvMessageCount(convId, merged.size)
                 }
+                if (_currentConversationId.value == convId) recoverLegacyImages(convId, _messages.value)
             }
         }
 
@@ -879,18 +962,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             combine(settingsRepo.selectedVisualModelId, _customModels, _builtInParams) { savedId, _, _ -> savedId }
                 .collect { savedId ->
+                    // 1.1.28 默认生图=ChatGPT-Image-2.5（老用户没选过的由 v3 迁移钉回旧默认，见 SettingsRepository）
                     _selectedVisualModel.value = modelsOfType(ModelType.VISUAL).find { it.id == savedId }
+                        ?: mergedBuiltIn(ModelType.VISUAL).find { it.id == DEFAULT_VISUAL_MODEL_ID }
                         ?: mergedBuiltIn(ModelType.VISUAL).first()
                 }
         }
         viewModelScope.launch {
             combine(settingsRepo.selectedVisionModelId, _customModels, _builtInParams) { savedId, _, _ -> savedId }
                 .collect { savedId ->
+                    // 1.1.28：内置识图进池；没显式选过的默认=内置 DeepSeek 识图（新加入的设置项遵守默认）
                     _selectedVisionModel.value = modelsOfType(ModelType.VISION).find { it.id == savedId }
+                        ?: modelsOfType(ModelType.VISION).find { it.id == DEFAULT_VISION_MODEL_ID }
                 }
         }
         viewModelScope.launch {
             settingsRepo.asrModel.collect { id -> _asrModel.value = id }
+        }
+        viewModelScope.launch {
+            settingsRepo.introDeleted.collect { deleted -> introDeletedLatch = deleted }
         }
         viewModelScope.launch {
             settingsRepo.hasAgreedTerms.collect { agreed -> _hasAgreedTerms.value = agreed }
@@ -922,6 +1012,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             settingsRepo.showThinking.collect { show -> _showThinking.value = show }
+        }
+        viewModelScope.launch {
+            settingsRepo.collapseThinking.collect { v -> _collapseThinking.value = v }
         }
         viewModelScope.launch {
             settingsRepo.showSearchSources.collect { show -> _showSearchSources.value = show }
@@ -1002,14 +1095,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // 白白全推一遍。
             Adapter.primeConvSnapshot(convs)
             refreshFavorites()
-            // 1.0.99.3：启动即清存量「冲突副本」套娃（同步轮里还有一道，见 SyncEngine）
-            cleanupStaleConflictCopies()
+            // 1.1.20：启动检测「冲突副本」并弹提醒（不自动删，用户自己决定 —— 见 detectConflictCopies）。
+            // 1.1.26.4：进入软件（协议勾选确认）后才算数——没进软件不检测不弹
+            if (appEnteredOnce) detectConflictCopies()
         }
         viewModelScope.launch {
             _perConvSettings.value = withContext(Dispatchers.IO) { loadPerConvSettings() }
             perConvReady = true
         }
         viewModelScope.launch { seedBuiltInAssistant() }
+        viewModelScope.launch { seedBuiltInIntro() }
     }
 
     /**
@@ -1103,6 +1198,59 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         settingsRepo.saveClaudeSeeded(true)
     }
 
+    /**
+     * 内置对话「FreeChat简介说明」（1.1.29，用户工单①）——固定 id 的普通对话，预置作者那条
+     * 「FreeChat 简介」问答的 12 条聊天记录（[com.freechat.data.BuiltInIntro]，消息 id/时间戳原样内嵌，
+     * 完全还原作者视角下的显示：思考过程、信息源、模型脚注都在）。
+     *
+     * 和 seedBuiltInAssistant 的差别只有两处：**不改新规则、不注入提示词**（所以连
+     * `builtInAssistant` 标记都不打 —— 它就是一条普通对话），其余待遇一样：默认置顶、
+     * 删除即永不再来（`intro_deleted` 闩随设置同步）。固定 id 让多设备播种天然幂等：
+     * 同 id 并入同一对象，不会生出双胞胎。
+     */
+    private suspend fun seedBuiltInIntro() {
+        awaitSettingsLoaded()
+        if (settingsRepo.introDeleted.first()) return
+        val onDisk = withContext(Dispatchers.IO) { loadConversations() }
+        if (onDisk.any { it.id == com.freechat.data.BuiltInIntro.CONV_ID }) return
+        // 盘上没有但云端有：等一轮同步让它先落盘（登录态下），免得播种后又被同步的删除/旧版顶掉
+        if (com.freechat.sync.Session.peekAuth() != null) {
+            var waited = 0
+            while (com.freechat.sync.SyncEngine.status.value.lastSyncAt <= 0L && waited < 20_000) {
+                kotlinx.coroutines.delay(500)
+                waited += 500
+            }
+            val fresh = withContext(Dispatchers.IO) { loadConversations() }
+            if (fresh.any { it.id == com.freechat.data.BuiltInIntro.CONV_ID }) {
+                // 云端那条已落盘 —— 只补内存态，别拿内存旧列表回写磁盘
+                if (_conversations.value.none { it.id == com.freechat.data.BuiltInIntro.CONV_ID }) {
+                    _conversations.value = sortConversations(fresh)
+                }
+                return
+            }
+        }
+        val intro = com.freechat.data.BuiltInIntro.conversation()
+        val msgs = withContext(Dispatchers.IO) {
+            runCatching {
+                gson.fromJson(
+                    com.freechat.data.BuiltInIntro.MESSAGES_JSON,
+                    object : com.google.gson.reflect.TypeToken<List<Message>>() {}.type
+                ) as List<Message>
+            }.getOrElse { emptyList() }
+        }
+        // 等同步期间盘上可能新增了别的对话 —— 写盘前重读一遍，别拿陈旧快照把它们盖掉
+        val merged = withContext(Dispatchers.IO) { loadConversations() + intro }
+        withContext(Dispatchers.IO) {
+            saveMessages(intro.id, msgs)
+            LocalStore.writeText(conversationsFile, gson.toJson(merged))
+        }
+        // 置顶走设置里的集合（排序和 isPinned 都从它取），只给字段赋值是没用的
+        val pinned = settingsRepo.pinnedConversationIds.first() + intro.id
+        settingsRepo.savePinnedIds(pinned)
+        pinnedIds.value = pinned
+        _conversations.value = sortConversations(merged)
+    }
+
     override fun onCleared() {
         // 只在还是自己的时候摘 —— 配置变更会重建 ViewModel，旧的那个不该把新的摘掉
         Relay.uninstall(syncRelay)
@@ -1159,6 +1307,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 requested = per?.showThinking ?: global,
                 deepEnabled = (character?.deepThinkingMode ?: deepThinkFor(per, model)) && model.supportsDeepThinking,
                 supported = model.supportsThinking,
+                companion = conversations.find { it.id == convId }?.mode == ChatMode.COMPANION,
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
@@ -1310,6 +1459,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _showThinking.value = enabled
         viewModelScope.launch { settingsRepo.saveShowThinking(enabled) }
     }
+    fun setCollapseThinking(enabled: Boolean) {
+        _collapseThinking.value = enabled
+        viewModelScope.launch { settingsRepo.saveCollapseThinking(enabled) }
+    }
     fun setShowSearchSources(enabled: Boolean) {
         _showSearchSources.value = enabled
         viewModelScope.launch { settingsRepo.saveShowSearchSources(enabled) }
@@ -1395,19 +1548,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { settingsRepo.saveHasAgreedTerms(true) }
     }
 
-    // 设置页主列表滚动位置（跨页返回保持，如进更新日志/AI语音页返回不回顶部）
-    private val _settingsScrollPosition = MutableStateFlow(0)
-    val settingsScrollPosition: StateFlow<Int> = _settingsScrollPosition.asStateFlow()
-    fun saveSettingsScrollPosition(pos: Int) {
-        _settingsScrollPosition.value = pos
-    }
-
-    // 聊天页滚动位置（按对话 id 记录，跨页面切换返回后恢复到原位置，杀后台即清空）
-    private val _chatScrollPositions = MutableStateFlow<Map<String, Pair<Int, Int>>>(emptyMap())
-    val chatScrollPositions: StateFlow<Map<String, Pair<Int, Int>>> = _chatScrollPositions.asStateFlow()
-    fun saveChatScrollPosition(convId: String, index: Int, offset: Int) {
-        _chatScrollPositions.value = _chatScrollPositions.value + (convId to (index to offset))
-    }
+    // Presentation memory lasts for this app session only. Settings deliberately have no entry.
+    val chatSessionState = com.freechat.ui.components.ChatSessionState()
 
     // 引用消息：按对话隔离（每 convId 一份），切换对话互不干扰、切回保留（像草稿一样绑定对话缓存）
     private val _quotedMessages = MutableStateFlow<Map<String, Message>>(emptyMap())
@@ -1437,7 +1579,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun effectiveAsrModelId(convId: String?): String {
         val over = convId?.let { _perConvSettings.value[it]?.asrModelId }
-        return if (!over.isNullOrBlank() && modelsOfType(ModelType.ASR).any { it.id == over }) over else _asrModel.value
+        // 1.1.28：没显式选过（空串）= 用内置 MiMo 语音识别默认项
+        return if (!over.isNullOrBlank() && modelsOfType(ModelType.ASR).any { it.id == over }) over
+        else _asrModel.value.ifBlank { com.freechat.data.BuiltInVoiceModel.ASR_ID }
     }
 
     /** 朗读某条 AI 消息（合成 + 播放；内置 MiMo / 用户自定义 OpenAI TTS）。用**这条对话**的语音模型 */
@@ -1486,7 +1630,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     /** 按住说话语音识别（用**这条对话**的 ASR 模型；无模型返回 null） */
     suspend fun recognizeVoiceInput(wav: ByteArray): String? {
         val asr = currentAsrModel(_currentConversationId.value) ?: return null
-        return transcribeAudioOpenAi(asr, wav)
+        // 内置 MiMo 识别只认 chat/completions + input_audio（实测 /v1/audio/transcriptions 是 404 ——
+        // 1.1.28 就是调错了端点才「松手没反应」）；自定义模型仍走 OpenAI 标准 multipart
+        return if (asr.isBuiltIn) transcribeAudioMiMo(asr, wav) else transcribeAudioOpenAi(asr, wav)
+    }
+
+    /** 内置 MiMo 语音识别：音频作 input_audio 进 chat/completions 消息，回复正文即转写文本 */
+    private suspend fun transcribeAudioMiMo(model: ModelInfo, wav: ByteArray): String? = withContext(Dispatchers.IO) {
+        try {
+            val (url, key) = customEndpoint(model, "/v1/chat/completions")
+            val audioB64 = java.util.Base64.getEncoder().encodeToString(wav)
+            val body = gson.toJson(mapOf(
+                // API 侧只认小写 API id（mimo-v2.5-asr），显示名 MiMo-V2.5-ASR 会报错
+                "model" to com.freechat.data.BuiltInVoiceModel.ASR_API_ID,
+                "messages" to listOf(mapOf(
+                    "role" to "user",
+                    "content" to listOf(mapOf(
+                        "type" to "input_audio",
+                        "input_audio" to mapOf("data" to audioB64, "format" to "wav")
+                    ))
+                ))
+            )).toRequestBody(JSON_MEDIA)
+            val responseText = client.newCall(Request.Builder().url(url)
+                .addHeader("Authorization", "Bearer $key")
+                .post(body).build()).awaitText(maxBytes = 131_072)
+            val json = JsonParser.parseString(responseText).asJsonObject
+            json.getAsJsonArray("choices")?.firstOrNull()?.asJsonObject
+                ?.getAsJsonObject("message")?.get("content")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("FreeChat", "transcribeAudioMiMo failed", e)
+            null
+        }
     }
 
     /** 自定义模型语音合成（OpenAI /v1/audio/speech） */
@@ -1609,6 +1785,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _currentCharacter.value = conversation.characterProfile
         _messages.value = loadMessages(conversation.id)
         syncDisplayGenerationState(conversation.id)
+        recoverLegacyImages(conversation.id, _messages.value)
+    }
+
+    private fun recoverLegacyImages(convId: String, rows: List<Message>) {
+        val links = rows.flatMap { it.imageUrls }.distinct().filter { it.startsWith("https://") || it.startsWith("http://") }
+        if (links.isEmpty()) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                links.forEach { url ->
+                    ensureActive()
+                    runCatching { com.freechat.data.GeneratedImageStore.recover(url, client) }
+                        .onFailure { Log.w("FreeChat", "Legacy image recovery ${it.javaClass.simpleName}") }
+                }
+            }
+            if (_currentConversationId.value == convId) _messages.value = loadMessages(convId)
+        }
     }
 
     fun deleteConversation(conversation: Conversation) {
@@ -1630,22 +1822,105 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         refreshFavorites()
     }
 
+    // ===== 1.1.20：启动提醒（冲突副本 / 检查更新）=====
+    // 2026-10-10 用户改口径：**不再主动替用户删冲突副本**（1.0.99.3 的自动清理已撤），
+    // 改为检测到就弹提醒，用户自己去侧滑页决定删不删、删哪些；更新同理只提醒不代下。
+
+    /** 冲突副本数量（0 = 不弹）。仅登录用户会被置上 —— 本地用户的数据有没有冲突无从判定。 */
+    private val _conflictCopyNotice = MutableStateFlow(0)
+    val conflictCopyNotice: StateFlow<Int> = _conflictCopyNotice.asStateFlow()
+
+    /** 有新版本可更新时非空；弹窗里的版本号取自它。 */
+    private val _updateNotice = MutableStateFlow<com.freechat.data.AppLatest?>(null)
+    val updateNotice: StateFlow<com.freechat.data.AppLatest?> = _updateNotice.asStateFlow()
+
     /**
-     * 1.0.99.3：清理存量「冲突副本」套娃（见 [com.freechat.sync.ConflictCopyCleanup]）。
-     *
-     * 启动加载完对话就跑 —— 用户打开 App 那一刻屏幕就干净，不用等同步轮。
-     * **有聊天记录的副本一律不删**；删除走 [deleteConversations] 完整路径
-     * （图片/消息/记忆/新规则/收藏全清 + 落盘触发同步 diff 推墓碑）。
+     * 「进入软件」才算数（1.1.26.4）：协议勾选+确定后才做启动检测——检查更新/冲突副本都押后。
+     * 两条到达路径互为兜底：进入早于对话加载→这里检不到副本，加载完会再检；反之亦然。
      */
-    private suspend fun cleanupStaleConflictCopies() {
-        val convs = _conversations.value
-        val stale = withContext(Dispatchers.IO) {
-            com.freechat.sync.ConflictCopyCleanup.staleCopies(convs) { c ->
-                runCatching { loadMessages(c.id).isNotEmpty() }.getOrDefault(false)
+    private var appEnteredOnce = false
+
+    fun onAppEntered() {
+        if (appEnteredOnce) return
+        appEnteredOnce = true
+        checkForUpdate()
+        viewModelScope.launch { detectConflictCopies() }
+    }
+
+    /** 上次启动弹的是哪个提醒（copy/update）——两个都中时轮流来，不饿死其中一个 */
+    val lastLaunchNotice: StateFlow<String> = settingsRepo.lastLaunchNotice
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    fun markLaunchNotice(kind: String) {
+        viewModelScope.launch { settingsRepo.saveLastLaunchNotice(kind) }
+    }
+
+    /**
+     * 启动时检测冲突副本（见 [com.freechat.sync.ConflictCopyCleanup.copyCount]）。
+     * 勾过「永不提醒」或没登录都不报；这次没清干净，下次启动还会再报。
+     */
+    private suspend fun detectConflictCopies() {
+        if (!Session.isLoggedIn()) return
+        if (settingsRepo.copyNoticeNever.first()) return
+        val n = com.freechat.sync.ConflictCopyCleanup.copyCount(_conversations.value)
+        if (n > 0) _conflictCopyNotice.value = n
+    }
+
+    /** 关掉副本提醒。勾了「永不提醒」就写进盘里，以后永远不弹（不论还有没有副本）。 */
+    fun dismissCopyNotice(never: Boolean) {
+        val forced = copyNoticeForced
+        copyNoticeForced = false
+        _conflictCopyNotice.value = 0
+        // 开发者测试弹窗勾「永不提醒」不落盘——不能让测试把真实提醒永久关掉
+        if (never && !forced) viewModelScope.launch { settingsRepo.saveCopyNoticeNever(true) }
+    }
+
+    // 非开源弹窗测试态（1.1.26.2）：被强制弹过的提醒不写「永不提醒/冷却」
+    private var copyNoticeForced = false
+
+    /** 强制弹冲突副本提醒（不论是否真有副本），用于开发者测试渲染效果。 */
+    fun forceCopyNotice() {
+        copyNoticeForced = true
+        _conflictCopyNotice.value = 1
+    }
+
+    /**
+     * 检查更新（所有用户，联网就查；**不下载** —— 「去更新」只跳到设置-关于FreeChat，
+     * 下载安装走那一页已经写好的「检查更新」按钮）。勾过「近期不再提醒」3 天内不查不弹。
+     */
+    fun checkForUpdate() {
+        viewModelScope.launch {
+            if (!com.freechat.data.NoticePolicy.updateReminderDue(
+                    settingsRepo.updateSnoozeAt.first(), System.currentTimeMillis()
+                )
+            ) return@launch
+            val latest = withContext(Dispatchers.IO) {
+                com.freechat.data.AppUpdateChecker.fetchLatest(BuildConfig.APPLICATION_ID)
+            } ?: return@launch
+            if (com.freechat.data.AppUpdateChecker.needsUpdate(BuildConfig.VERSION_CODE.toLong(), latest)) {
+                _updateNotice.value = latest
             }
-        }.toSet()
-        if (stale.isEmpty()) return
-        deleteConversations(convs.filter { it.id in stale })
+        }
+    }
+
+    /** 关掉更新提醒。勾了「近期不再提醒」就记下时刻，3 天内不再弹（见 [com.freechat.data.NoticePolicy]）。 */
+    fun dismissUpdateNotice(snooze: Boolean) {
+        val forced = updateNoticeForced
+        updateNoticeForced = false
+        _updateNotice.value = null
+        // 开发者测试弹窗勾「近期不再提醒」不落盘——不能让测试把真实提醒冷却 3 天
+        if (snooze && !forced) viewModelScope.launch { settingsRepo.saveUpdateSnoozeAt(System.currentTimeMillis()) }
+    }
+
+    // 非开源弹窗测试态（1.1.26.2）：被强制弹过的提醒不写「永不提醒/冷却」
+    private var updateNoticeForced = false
+
+    /** 强制弹更新提醒（不论是否真有新版本），用于开发者测试渲染效果。 */
+    fun forceUpdateNotice() {
+        updateNoticeForced = true
+        _updateNotice.value = com.freechat.data.AppLatest(
+            BuildConfig.APPLICATION_ID, "Beta 9.9.9", 999999L, com.freechat.data.AppUpdateChecker.LATEST_URL
+        )
     }
 
     /** 删除单个对话的实际清理逻辑（不含落盘与收藏夹刷新，见 [deleteConversation] / [deleteConversations]） */
@@ -1656,6 +1931,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // 而这两件事该有完全不同的下场：丢了要补回来，删了就得永远消失（见 seedBuiltInAssistant）。
         if (conversation.builtInAssistant == com.freechat.data.BuiltInAssistant.KEY) {
             viewModelScope.launch { settingsRepo.saveClaudeDeleted(true) }
+        }
+        // 内置「FreeChat简介说明」被亲手删了 —— 同样永不再种（1.1.29）
+        if (conversation.id == com.freechat.data.BuiltInIntro.CONV_ID) {
+            viewModelScope.launch { settingsRepo.saveIntroDeleted(true) }
         }
         // 删除对话时取消其在途生成（若有），避免后台 job 再写回已删除的对话
         cancelConversationGeneration(conversation.id)
@@ -1730,10 +2009,183 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun exportCharacterJson(profile: CharacterProfile): String = gson.toJson(profile.toExport())
 
     /** 从 JSON 导入角色（解析失败 / 缺角色名返回 null） */
-    fun importCharacterFromJson(json: String): CharacterProfile? = try {
-        val exp = gson.fromJson(json, CharacterExport::class.java) ?: return null
-        if (exp.name.isBlank()) null else exp.toProfile()
+    fun importCharacterFromJson(json: String): CharacterProfile? =
+        com.freechat.data.ShareExport.parseLegacyCharacter(json)
+
+    // ========== 拟人角色 分享导出/导入 ==========
+
+    /** 导入完成后让 MainActivity 跳主对话并切过去（一次性事件，消费后清空） */
+    private val _shareImportNav = MutableStateFlow<String?>(null)
+    val shareImportNav: StateFlow<String?> = _shareImportNav.asStateFlow()
+    fun consumeShareImportNav() { _shareImportNav.value = null }
+
+    /**
+     * 生成分享包 JSON（1.1.26.3 子选项化）。角色设定/提示词必选恒带；头像、形象参考图按子项勾选；
+     * 对话记录勾了就带文字消息（必选），场景图子项勾了才把视觉行按原位置嵌进消息序列；记忆按勾选。
+     */
+    fun exportShareJson(profile: CharacterProfile, options: ShareExport.Options): String? {
+        if (!options.any) return null
+        val convId = _currentConversationId.value
+        val conv = convId?.let { id -> _conversations.value.find { it.id == id } }
+        val shell = ShareExport.ShareConversation(
+            id = convId.orEmpty(),
+            title = conv?.title ?: profile.name,
+            mode = conv?.mode?.ordinal ?: ChatMode.COMPANION.ordinal,
+            createdAt = conv?.createdAt ?: System.currentTimeMillis(),
+            updatedAt = conv?.updatedAt ?: System.currentTimeMillis(),
+            profile = profile.toExport(),
+            // 存活集：loadMessages / memoryManager.load 已过 MessageDeletion 墓碑
+            messages = if (options.chats && convId != null) {
+                loadMessages(convId).mapNotNull { m ->
+                    val scene = if (options.sceneImages && m.sceneVisualization) {
+                        sceneImageOf(m)?.let { ShareExport.ShareImage(it, "image/jpeg") }
+                    } else null
+                    ShareExport.toShareMessage(m, scene)
+                }
+            } else emptyList(),
+            deletedMessageIds = conv?.deletedMessageIds ?: emptyList(),
+            deletedVisualMessageIds = conv?.deletedVisualMessageIds ?: emptyList()
+        )
+        val mems: List<ShareExport.ShareMemory> = if (options.memories && convId != null) {
+            listOf(
+                ShareExport.ShareMemory(
+                    convId = convId,
+                    entries = memoryManager.load(convId),
+                    mood = _perConvSettings.value[convId]
+                )
+            )
+        } else emptyList()
+        val avatarB64 = if (options.avatar) readImageB64(profile.avatarPath) else null
+        val norm = profile.normalized()
+        val images: List<ShareExport.ShareImage> = if (options.appearance) {
+            norm.appearanceImagePaths.mapIndexedNotNull { i, p ->
+                readImageB64(p)?.let {
+                    ShareExport.ShareImage(it, "image/jpeg", norm.appearanceImageDescs.getOrElse(i) { "" })
+                }
+            }
+        } else emptyList()
+        val persona = ShareExport.personaFrom(profile, avatarB64, images)
+        return ShareExport.build(options, profile.name, persona, listOf(shell), mems)
+    }
+
+    /** 视觉行的场景图字节：本地路径在 imagePaths/imageUrls 里都有可能出现，逐个找能读到的 */
+    private fun sceneImageOf(m: Message): String? =
+        (m.imagePaths + m.imageUrls).firstNotNullOfOrNull { readImageB64(it) }
+
+    private fun readImageB64(path: String): String? = if (path.isBlank()) null else try {
+        val f = java.io.File(path)
+        if (f.exists()) ShareExport.encodeBase64(f.readBytes()) else null
     } catch (_: Exception) { null }
+
+    private fun writeShareImage(b64: String, prefix: String): String? = try {
+        val bytes = ShareExport.decodeBase64(b64) ?: return null
+        // 带 prefix 的新文件名避开 avatar_*.jpg / appearance_*.jpg 的现有命名
+        val f = java.io.File(LocalStore.filesDir(), "${prefix}_${System.currentTimeMillis()}_${bytes.size}.jpg")
+        f.writeBytes(bytes)
+        f.absolutePath
+    } catch (_: Exception) { null }
+
+    /**
+     * 导入分享包的暂存区（1.1.26.3）：导入**不直接建对话**——图片落盘、消息/记忆暂存，
+     * 返回角色档案给模拟设置页回填；用户调节完点「创建角色」才由 [createFromShareDraft] 成建。
+     */
+    private data class ShareImportDraft(
+        val messages: List<Message>,
+        val title: String,
+        val mode: ChatMode,
+        val createdAt: Long,
+        val updatedAt: Long,
+        val deletedMessageIds: List<String>,
+        val deletedVisualMessageIds: List<String>,
+        val memories: List<MemoryEntry>,
+        val mood: PerConvSettings?
+    )
+
+    private var shareDraft: ShareImportDraft? = null
+
+    fun hasShareDraft(): Boolean = shareDraft != null
+
+    /** 放弃暂存（退出创建流程/改走普通导入时调，防旧暂存粘到下一个角色上） */
+    fun clearShareDraft() { shareDraft = null }
+
+    /**
+     * 解析分享包进暂存区。消息 id 原样保留（记忆 sourceMessageIds 依赖它）；
+     * 场景图在这里落盘（导出时勾了才会在文件里）。解析失败返回 null，暂存区不动。
+     */
+    fun importShareToDraft(json: String): CharacterProfile? {
+        val pkg = ShareExport.parse(json) ?: return null
+        return try {
+            val avatarPath = ShareExport.personaAvatar(pkg.persona)?.let { writeShareImage(it, "avatar_import") }.orEmpty()
+            // 形象图与描述按下标成对落盘，写失败的位整对丢弃（否则 paths/descs 错位）
+            val appearancePairs = ShareExport.personaImages(pkg.persona).mapNotNull { img ->
+                writeShareImage(img.data, "appearance_import")?.let { it to img.desc }
+            }
+            val profile = ShareExport.personaToProfile(
+                pkg.persona,
+                pkg.conversations.firstOrNull()?.profile,
+                avatarPath,
+                appearancePairs.map { it.first },
+                appearancePairs.map { it.second }
+            ) ?: return null
+
+            val c = pkg.conversations.firstOrNull()
+            val messages = c?.messages.orEmpty().mapNotNull { s ->
+                val scenePath = s.sceneImage?.data?.let { writeShareImage(it, "scene_import") }
+                // 视觉行没图就没意义（导不出就丢这一行），文字行原样进
+                if (s.sceneVisualization && scenePath == null) null
+                else ShareExport.toMessage(s, scenePath.orEmpty())
+            }
+            val mems = pkg.memories.orEmpty()
+            shareDraft = ShareImportDraft(
+                messages = messages,
+                title = c?.title.orEmpty(),
+                mode = ChatMode.entries.getOrElse(c?.mode ?: 0) { ChatMode.COMPANION },
+                createdAt = c?.createdAt ?: System.currentTimeMillis(),
+                updatedAt = c?.updatedAt ?: System.currentTimeMillis(),
+                deletedMessageIds = c?.deletedMessageIds.orEmpty(),
+                deletedVisualMessageIds = c?.deletedVisualMessageIds.orEmpty(),
+                memories = mems.flatMap { it.entries },
+                mood = mems.firstNotNullOfOrNull { it.mood }
+            )
+            profile
+        } catch (_: Exception) { null }
+    }
+
+    /**
+     * 从暂存区成建（「创建角色」的分享包分支）：消息/记忆按导入文件里的勾选原样落库，
+     * 人设用表单最终版（用户可能又调过）；不走学习页（导入内容要保进度）。成功返回新对话 id。
+     */
+    fun createFromShareDraft(character: CharacterProfile): String? {
+        val draft = shareDraft ?: return null
+        shareDraft = null
+        return try {
+            val convId = UUID.randomUUID().toString()
+            val msgs = draft.messages
+            val conv = Conversation(
+                id = convId,
+                title = draft.title.ifBlank { character.name }.ifBlank { com.freechat.i18n.LocaleManager.strings().shareImportedConvTitle },
+                createdAt = draft.createdAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                updatedAt = draft.updatedAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                messageCount = msgs.size,
+                mode = draft.mode,
+                characterProfile = character,
+                deletedMessageIds = draft.deletedMessageIds,
+                deletedVisualMessageIds = draft.deletedVisualMessageIds
+            )
+            MessageDeletion.register(conv)
+            if (msgs.isNotEmpty()) LocalStore.writeText(LocalStore.messagesFile(convId), gson.toJson(msgs))
+            if (draft.memories.isNotEmpty()) LocalStore.writeText(LocalStore.memoryFile(convId), gson.toJson(draft.memories))
+            draft.mood?.let {
+                _perConvSettings.value = _perConvSettings.value + (convId to it)
+                savePerConvSettings()
+            }
+            _conversations.value = sortConversations(_conversations.value + conv)
+            saveConversations()
+            switchToConversation(conv)
+            _shareImportNav.value = conv.id
+            conv.id
+        } catch (_: Exception) { null }
+    }
 
     /** 收藏详情：返回包含该收藏消息的「连续被收藏消息段」（向前向后扩展相邻 favorited 消息） */
     fun favoriteRun(convId: String, messageId: String): List<Message> {
@@ -2283,6 +2735,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             standardSettingsSnapshot = snapshot
             val langModelName = requestModels().language.displayName
             val visualModelName = requestModels().visual.displayName
+            setGenerationModel(convId, langModelName)
             val timerJob = launch {
                 // 循环条件看「本对话」而不是当前显示的对话：发完消息切去别的对话 / 切后台时，
                 // _isLoading 会跟着当前对话走，用它会让本轮的续锁提前停掉。
@@ -2340,7 +2793,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 if (generationId == standardGenerationId) {
                     restoreSettings(snapshot)
                     setConvLoading(convId, false)
-                    _isGeneratingImage.value = false
                     setConvTyping(convId, false)
                     activeRoundStartIndex = -1
                     activeRoundConvId = null
@@ -2640,7 +3092,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         // The whole companion reply batch is replaced, including siblings of the tapped bubble.
-        deleteMessageIds(convId, plan.removedReplies.mapTo(HashSet()) { it.id })
+        shatterThenDelete(convId, plan.removedReplies.mapTo(HashSet()) { it.id })
         val character = _currentCharacter.value
         val companion = _currentMode.value == ChatMode.COMPANION
         if (companion) {
@@ -2658,7 +3110,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     throw e
                 } catch (e: Exception) {
                     ensureActive()
-                    working.add(Message(role = Role.ASSISTANT, content = briefApiError(e), failed = true,
+                    val failId = UUID.randomUUID().toString()
+                    AnimationReplay.mark(failId)
+                    working.add(Message(id = failId, role = Role.ASSISTANT, content = briefApiError(e), failed = true,
                         mode = ChatMode.COMPANION, timestamp = plan.removedReplies.first().timestamp))
                     persistConversationMessages(convId, working)
                 } finally {
@@ -2674,6 +3128,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         setConvLoading(convId, true)
         val replyId = convGenerationReplyIds.getValue(convId)
+        // 重生成：时间戳复用旧回复（保序），旁路让入场/打字机仍演一次
+        AnimationReplay.mark(replyId)
         _liveReasoning.value = ""
         _liveContent.value = ""
         _thinkingTimeMs.value = 0L
@@ -2687,6 +3143,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             standardSettingsSnapshot = snapshot
             val langModelName = requestModels().language.displayName
             val visualModelName = requestModels().visual.displayName
+            setGenerationModel(convId, langModelName)
             val timerJob = launch {
                 // 循环条件看「本对话」而不是当前显示的对话：发完消息切去别的对话 / 切后台时，
                 // _isLoading 会跟着当前对话走，用它会让本轮的续锁提前停掉。
@@ -2706,7 +3163,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val assistantMessage = (if (imageReply != null) executeImageTask(
                     com.freechat.data.ImageTaskRouting.regeneration(text, images.map { it.path }, working, imageReply),
-                    visualModelName, startTime, convId)
+                    visualModelName, startTime, convId, working)
                     else generateReply(text, images, files, langModelName, visualModelName, startTime, convId, working))
                     .let(generationTimer::complete).let { separateCitationLinks(it, text) }
                 ensureActive()
@@ -2730,7 +3187,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 if (generationId == standardGenerationId) {
                     restoreSettings(snapshot)
                     setConvLoading(convId, false)
-                    _isGeneratingImage.value = false
                     standardGenerationConvId = null
                     standardSettingsSnapshot = null
                 }
@@ -2769,7 +3225,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             sendMessage(trimmed)  // 找不到目标（列表已被别的操作改过）→ 退化成普通发送，不吞消息
             return
         }
-        deleteMessageIds(convId, msgs.drop(idx).mapTo(HashSet()) { it.id })
+        shatterThenDelete(convId, msgs.drop(idx).mapTo(HashSet()) { it.id })
         sendMessage(trimmed)
     }
 
@@ -2792,7 +3248,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val replacement = msgs[lastUserIdx].copy(id = UUID.randomUUID().toString(), content = trimmed)
         // Files are retained by the replacement row; deleting the old ID does not delete shared images.
         _messages.value = msgs + replacement
-        deleteMessageIds(convId, msgs.drop(lastUserIdx).mapTo(HashSet()) { it.id })
+        shatterThenDelete(convId, msgs.drop(lastUserIdx).mapTo(HashSet()) { it.id })
         msgs.subList(lastUserIdx, msgs.size).clear()
         msgs.add(replacement)
         _messages.value = msgs
@@ -2846,7 +3302,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val hasImage = images.isNotEmpty()
         val hasFile = files.isNotEmpty()
         val imageTask = com.freechat.data.ImageTaskRouting.plan(text, images.map { it.path }, history, forceImageGen)
-        if (imageTask != null) return executeImageTask(imageTask, visualModelName, startTime, convId)
+        if (imageTask != null) return executeImageTask(imageTask, visualModelName, startTime, convId, history)
         // File reading is local work, not a tool decision by a model that has not seen it yet.
         if (hasFile && !isDocumentRequest(text)) {
             val reply = understandFile(text, files, convId, history)
@@ -2934,7 +3390,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val args = tool.arguments
         val imageTask = com.freechat.data.ImageTaskRouting.forTool(tool.name,
             args.optString("prompt") ?: args.optString("question").orEmpty(), text, images.map { it.path }, history)
-        if (imageTask != null) return executeImageTask(imageTask, visualModelName, startTime, convId)
+        if (imageTask != null) return executeImageTask(imageTask, visualModelName, startTime, convId, history)
         val elapsed = System.currentTimeMillis() - startTime
         return when (tool.name) {
             "read_calendar" -> Message(role = Role.ASSISTANT, content = readCalendar(), modelName = "系统日历", thinkingTimeMs = elapsed)
@@ -2962,7 +3418,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             "understand_file" -> {
                 val question = args.optString("question") ?: text
-                val reply = understandFile(question, files, convId)
+                val reply = understandFile(question, files, convId, history)
                 Message(role = Role.ASSISTANT, content = reply.text, failed = reply.failed, modelName = langModelName, thinkingTimeMs = elapsed)
             }
             else -> Message(role = Role.ASSISTANT, content = "（未识别的操作，请换个说法试试）", modelName = langModelName, thinkingTimeMs = elapsed)
@@ -2974,10 +3430,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         task: com.freechat.data.ImageTaskRouting.Plan,
         visualModelName: String,
         startTime: Long,
-        convId: String
+        convId: String,
+        history: List<Message>
     ): Message = withContext(Dispatchers.IO) {
         val vision = task.kind == com.freechat.data.ImageTaskRouting.Kind.VISION
-        if (!vision) _isGeneratingImage.value = true
+        val imageReasoning = _liveReasoning.value
+        if (!vision) setGenerationModel(convId, visualModelName, image = true)
+        else setGenerationModel(convId, requestModels().vision?.displayName.orEmpty())
         try {
             val references = com.freechat.data.SceneReferenceSelector.prepareSources(task.referenceSources)
             ensureActive()
@@ -2990,7 +3449,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (vision) {
                 val encoded = references.map { java.util.Base64.getEncoder().encodeToString(it.bytes) to it.mime }
                 val result = if (encoded.isEmpty()) GenText("图片读取失败，请重试。", failed = true)
-                    else callVisionChat(encoded, task.prompt.ifBlank { "请详细描述这张图片的内容" })
+                    else callVisionChat(encoded, task.prompt.ifBlank { "请详细描述这张图片的内容" }, convId, history)
                 Message(role = Role.ASSISTANT, content = result.text, failed = result.failed,
                     modelName = requestModels().vision?.displayName.orEmpty(),
                     thinkingTimeMs = System.currentTimeMillis() - startTime, reasoningContent = _liveReasoning.value)
@@ -2998,6 +3457,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val result = imageResult(task.prompt, references)
                 Message(role = Role.ASSISTANT, content = result.error, imageUrls = result.urls,
                     failed = result.urls.isEmpty(), modelName = visualModelName,
+                    reasoningContent = imageReasoning,
                     thinkingTimeMs = System.currentTimeMillis() - startTime, imagePrompt = task.prompt,
                     imageReferenceMessageId = task.referenceMessageId)
             }
@@ -3005,6 +3465,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         catch (e: Exception) {
             Message(role = Role.ASSISTANT, content = sceneImageError(e), failed = true,
                 modelName = if (vision) requestModels().vision?.displayName.orEmpty() else visualModelName,
+                reasoningContent = if (vision) _liveReasoning.value else imageReasoning,
                 thinkingTimeMs = System.currentTimeMillis() - startTime, imagePrompt = task.prompt.takeUnless { vision },
                 imageReferenceMessageId = task.referenceMessageId.takeUnless { vision })
         }
@@ -3128,6 +3589,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val langModelName = requestModels().language.displayName
         val replyStart = working.size
         val replyId = convGenerationReplyIds[convId] ?: UUID.randomUUID().toString()
+        if (regenerating) AnimationReplay.mark(replyId)
         val userSourceIds = working.filterNot { it.sceneVisualization }.takeLastWhile { it.role == Role.USER }.map { it.id }
         val snapshot = applyCharacterSettings(character)
         // ⚠️ 拟人模式**不叠**「新规则」（PerConvSettings），这一层只属于标准模式 ——
@@ -3160,7 +3622,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (imagePaths.isNotEmpty() && com.freechat.data.CharacterPresentationPolicy.usesPhotoRecognition(character?.normalized()?.dialogueMode)) {
                 val encoded = encodeImagesForApi(imagePaths.map { PendingImage(it, detectMime(it)) })
                 if (encoded.isNotEmpty()) {
-                    imageContext = callVisionChat(encoded, "请用几句话描述这张图片：画面里有什么、什么场景、有什么值得注意的细节，口语化一点。").text
+                    imageContext = callVisionChat(encoded,
+                        "结合对话中用户关心的内容分析图片，描述画面事实和相关细节；不要猜测看不见的信息，也不要代替角色回复。",
+                        convId, working, character).text
                     // 回填到用户图片消息，后续追问时作为「图片内容」注入，避免识图结果丢失
                     val ui = working.indexOfLast { it.role == Role.USER && it.imagePaths.isNotEmpty() }
                     if (ui >= 0 && imageContext.isNotBlank()) working[ui] = working[ui].copy(imageContext = imageContext)
@@ -3238,8 +3702,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val interval = com.freechat.core.CompanionRhythm.segmentIntervalMs(mood, narrativeMode)
                 delay(interval)
                 setConvTyping(convId, false)
+                val segId = if (i == 0) replyId else UUID.randomUUID().toString()
+                if (regenerating) AnimationReplay.mark(segId)
                 working.add(Message(
-                    id = if (i == 0) replyId else UUID.randomUUID().toString(),
+                    id = segId,
                     role = Role.ASSISTANT, content = seg,
                     timestamp = replyTimestamp?.plus(i) ?: System.currentTimeMillis(),
                     modelName = langModelName, mode = ChatMode.COMPANION,
@@ -3807,13 +4273,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // —— 提示词总装已抽进 freechat-core（CompanionPrompts），同码保证两端「完全还原」——
     private fun buildCompanionSystemPrompt(character: CharacterProfile?, convId: String, messages: List<Message>): String {
         val per = getPerConvSettings(convId)
-        return com.freechat.core.CompanionPrompts.buildCompanionSystemPrompt(
+        val base = com.freechat.core.CompanionPrompts.buildCompanionSystemPrompt(
             character = character,
             messages = messages,
             convRules = convRulesBlock(convId),
             pendingReminder = proactiveStore.get(convId)?.let { com.freechat.core.PendingReminder(it.dueAt, it.reason) },
             timeState = timeStateFor(convId)
         )
+        // 1.1.29.2 ①（用户拍板方案B）：产品知识库**不再进拟人系统提示词**——
+        // 产品手册注进角色扮演=出戏污染（旧触发词还和微信语境撞车，「怎么+微信」就误触发）；
+        // 拟人档只演人，问「FreeChat怎么用」请去「FreeChat简介说明」对话或标准档。
+        return base
     }
 
     /** PerConv 快照 + 作息/晚安瞬时态 装配（Android 侧状态 → 共享模块的纯输入） */
@@ -3970,7 +4440,7 @@ ${changes.joinToString("\n") { "- $it" }}
 1. 只更新与变化点相关的部分，保持未变化的部分不变，保留已经建立起来的立体人设、语气和口头禅。
 2. 变化点涉及年龄、MBTI、性格、关系、记忆等核心设定时，要相应调整这个人的行为模式、情绪反应、对用户的态度与亲昵尺度。
 3. 小修小补（比如年龄 20 改 30）不要推倒重来、不要让角色「失忆」或「重生」，而是在原人设基础上自然微调。
-4. 变化点是「旧值 → 新值」格式，请只按【箭头右侧的新值】判断：新值里出现用户写下的否定式约束（例如「不轻易脸红害羞」「不卑微」「不轻易流泪」）时，必须原样保留为禁止性要求，绝不允许把它改写成肯定式的行为描写（比如反过来写成「容易害羞、会脸红」），也不允许给角色添加用户没有写过的生理反应。反过来，如果否定式要求只出现在箭头左侧、右侧已被用户删掉（例如「温柔，不轻易脸红害羞 → 温柔」），说明用户撤回/删除了这条设定，必须把它从提示词里一并删掉，不要保留、不要换个说法留着。
+4. 变化点是「旧值 → 新值」格式，请只按【箭头右侧的新值】判断：新值里出现用户写下的否定式约束（例如「不轻易脸红害羞」「不卑微」「不轻易流泪」）时，必须原样保留为禁止性要求，绝不允许把它改写成肯定式的行为描写（比如反过来写成「容易害羞、会脸红」），也不允许给角色添加用户没有写过的生理反应。反过来，如果否定式要求只出现在箭头左侧、右侧已被用户删掉（例如「温柔，不轻易脸红害羞 → 温柔」），说明用户撤回/删除了这条设定，必须把它从提示词里一并删掉，不要保留、不要换个说法留着。同样地，新值里出现用户写下的**肯定式特质**（例如「容易脸红害羞」「爱撒娇」「热情」「黏人」「主动」）时，必须原样保留并**充分体现**——这是这个人设的标志，不得淡化、不得打折扣、不得用「适度」「偶尔」这类词稀释。
 5. 用户设定了「参考原型」时：只在用户没写到的地方用参考原型补细节（口癖、称呼、典型反应等），用户已经写下的每一条都必须原样保留，冲突时一律以用户设定为准；用户自己写的人设足够详细时，参考原型只做一致性校正，不要拿它改写用户设定。
 6. 直接输出更新后的完整系统提示词正文，不要加任何解释、前缀或标题。
 """.trimIndent()
@@ -4097,7 +4567,7 @@ ${com.freechat.data.CharacterOriginalLearning.prompt(p, com.freechat.data.Charac
 3. 描述 TA 和用户的关系与相处方式（基于「人物关系」和「记忆感知」里的前提故事）。亲疏尺度不要写死、不要套模板：要让 TA 依据自己的性格和当下的相处进展自行判断——同样一句话，随便的人可能顺势暧昧，矜持的人可能直接拒绝甚至反感。可以写清 TA 的底线和分寸感，但不要写成「什么关系就必须做什么」的固定剧本。
 4. 强调 TA 是一个有独立思想、会主动聊天、有情绪起伏的真实的人，不是 AI 助手，永远不要暴露自己是 AI。
 5. 严格保留用户设定的性格强度和底线：用户写坚强、强势、高冷、有原则、毒舌、傲娇，就照实写成这样，绝不能弱化成「温柔讨好、委曲求全、动不动就哭、卑微求全」。性格多样化的角色（强势、冷静、独立、犀利、傲娇、毒舌）都如实还原，不要把所有角色都磨平成一种软绵绵的讨好型模板。特别注意用户写的「不卑微、有底线、不轻易流泪、保持自我」这类反弱化描述，要原样写进人设，绝不能在生成时丢弃或稀释。
-6. ★ 否定式设定必须原样照抄：用户写的禁止性/否定性要求（例如「不轻易脸红害羞」「不轻易害羞」「不娇气」「情绪内敛」「不轻易心动」「不爱撒娇」）必须一字不改地保留为禁止性描述。绝对禁止把这类否定改写成肯定式的行为特征（比如把「不轻易脸红害羞」写成「容易害羞、会脸红」），也绝对禁止给角色添加用户没有写过的生理反应描写（脸红、发烫、耳尖发热、心跳加速、呼吸一滞、攥紧衣角、别开脸、咬唇等）。不要预设所有角色都容易害羞脸红——是否害羞完全由人设决定，冷静、成熟、强势、毒舌、直率、见多识广的角色本来就不会轻易害羞，请如实还原。
+6. ★ 否定式设定必须原样照抄：用户写的禁止性/否定性要求（例如「不轻易脸红害羞」「不轻易害羞」「不娇气」「情绪内敛」「不轻易心动」「不爱撒娇」）必须一字不改地保留为禁止性描述。绝对禁止把这类否定改写成肯定式的行为特征（比如把「不轻易脸红害羞」写成「容易害羞、会脸红」），也绝对禁止给角色添加用户没有写过的生理反应描写（脸红、发烫、耳尖发热、心跳加速、呼吸一滞、攥紧衣角、别开脸、咬唇等）。不要预设所有角色都容易害羞脸红——是否害羞完全由人设决定，冷静、成熟、强势、毒舌、直率、见多识广的角色本来就不会轻易害羞，请如实还原。同样地，用户写下的**肯定式特质**（例如「容易脸红害羞」「爱撒娇」「热情」「黏人」「主动」）必须原样保留并**充分体现**——这是这个人设的标志，不得淡化、不得打折扣、不得用「适度」「偶尔」这类词稀释；这个人多害羞、多热情、多黏人，完全由用户写下的设定决定。
 7. 如果设定了开场白，开场白就是 TA 跟你说的第一句话（可能有多句），要理解它的语境、情绪和可能埋下的故事，让后续对话接得住、有延续感。
 7.1 「配角」和「世界规则」是这个世界里已经存在的人和规矩（可能有很多条、很多个人），要理解并当成硬性事实，但**不要把名单和条款抄进人设提示词里**——提示词写的是「你」这个人，不是世界说明书。
 $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提示词正文，不要加任何解释、前缀或标题。
@@ -4327,19 +4797,16 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         }
         // File cleanup can be expensive. The row is already gone, and the durable deletion is queued.
         viewModelScope.launch(Dispatchers.IO) {
-            val retained = kept.flatMap { it.imagePaths + it.imageUrls + listOfNotNull(it.attachmentPath, it.quotedImagePath) }.toSet()
+            val removed = before.filter { it.id in ids }
+            val released = com.freechat.sync.ImageSync.releaseUnreferenced(removed.flatMap { it.imagePaths + it.imageUrls })
+            com.freechat.sync.Adapter.markImagesReleased(released)
+            val retained = kept.mapNotNull { it.attachmentPath }.toSet()
             val root = getApplication<Application>().filesDir.canonicalFile.toPath()
-            before.filter { it.id in ids }.flatMap { it.imagePaths + it.imageUrls + listOfNotNull(it.attachmentPath) }
+            removed.mapNotNull { it.attachmentPath }
                 .filterNot { it in retained }.forEach { path ->
                     runCatching {
                         val file = File(path).canonicalFile
-                        // 1.2.3+ 跨对话护栏：内容寻址的缓存图（img_<hash>.jpg）可能被
-                        // **别的对话**的引用着（同一张图发进两个对话很常见）——
-                        // retained 只数了本对话的保留行，盲删会把别的对话删瞎。
-                        // 出圈引用一律查全局判据；普通附件/原图键是本条消息独有的，照旧。
-                        val hash = com.freechat.sync.ImageSync.hashFromCacheName(file.name)
-                        val inUse = hash != null && com.freechat.sync.ImageSync.isReferencedLocally(hash)
-                        if (!inUse && file.toPath().startsWith(root)) file.delete()
+                        if (file.toPath().startsWith(root)) file.delete()
                     }
                 }
         }
@@ -4386,9 +4853,9 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     }
 
     /**
-     * 删除指定下标的全部消息：先清图片文件（只清 imagePaths，不碰 AI 的 imageUrls），
-     * 再倒序 removeAt（避免下标漂移）；删空则移除对话记录 + 删除消息文件。返回降序的有效下标。
-     * 行为逐行保留自原 deleteMessagePair 尾部。
+     * 删除指定下标的全部消息：统一走 [deleteMessageIds]（带删除墓碑）。
+     * 删空**不动**对话记录——空对话保留（1.1.26.8），行里可能还有新规则/角色卡。
+     * 返回降序的有效下标。
      */
     private fun removeMessagesAt(indices: Collection<Int>): List<Int> {
         val msgs = _messages.value.toMutableList()
@@ -4509,14 +4976,19 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     private val _inputDrafts = MutableStateFlow<Map<String, String>>(emptyMap())
     val inputDrafts: StateFlow<Map<String, String>> = _inputDrafts.asStateFlow()
 
-    fun saveDraft(convId: String, text: String) {
+    /**
+     * convId=null = Chat 首页（标准新对话），草稿落固定键 ""（真实对话 id 恒为 UUID，不会撞）。
+     * 1.1.30 工单①：首页打了字没发、切走再回来照常显示。
+     */
+    fun saveDraft(convId: String?, text: String) {
+        val key = convId ?: ""
         _inputDrafts.value = _inputDrafts.value.toMutableMap().apply {
-            if (text.isBlank()) remove(convId) else put(convId, text)
+            if (text.isBlank()) remove(key) else put(key, text)
         }
     }
 
     fun getDraft(convId: String?): String {
-        return if (convId != null) _inputDrafts.value[convId] ?: "" else ""
+        return _inputDrafts.value[convId ?: ""] ?: ""
     }
 
     // Search configuration is local to the device and shared by standard/companion/prototype retrieval.
@@ -4588,6 +5060,28 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     }
 
     // ========== 流式 API ==========
+    /** Same history/rules/memory budget for text and image understanding, including attached documents. */
+    private suspend fun standardRequestMessages(convId: String, history: List<Message>, hasTools: Boolean = false): MutableList<Map<String, Any?>> {
+        val selected = pickHistory(history, historyBudgetTokens(enhanced = false).coerceAtMost(30_000))
+        val messages = mutableListOf<Map<String, Any?>>()
+        buildSystemPrompt(hasTools, history, convId, requestModels()).takeIf { it.isNotEmpty() }?.let {
+            messages.add(mapOf("role" to "system", "content" to it))
+        }
+        if (convId.isNotEmpty()) {
+            convRulesBlock(convId).takeIf { it.isNotEmpty() }?.let { messages.add(mapOf("role" to "system", "content" to it)) }
+            if (_autoSummarizeMemory.value) memoryManager.buildMemoryContext(convId).takeIf { it.isNotEmpty() }?.let {
+                messages.add(mapOf("role" to "system", "content" to it))
+            }
+        }
+        pendingQuoteText?.let { messages.add(mapOf("role" to "system", "content" to it)); pendingQuoteText = null }
+        val contents = AttachmentContext.contents(selected)
+        messages.addAll(selected.mapIndexed { index, msg ->
+            val role = when (msg.role) { Role.USER -> "user"; Role.ASSISTANT -> "assistant"; else -> "system" }
+            mapOf<String, Any?>("role" to role, "content" to contents[index]) +
+                if (role == "assistant" && hasTools) mapOf("reasoning_content" to msg.reasoningContent.orEmpty()) else emptyMap()
+        })
+        return messages
+    }
     /**
      * @param needsSearch     这一轮要不要联网（走模型自带的原生搜索）
      * @param serpResults     已取得的外部检索资料或检索状态，作为 system 消息注入
@@ -4614,54 +5108,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             Provider.DOUBAO -> "$DOUBAO_BASE_URL/chat/completions" to DOUBAO_API_KEY
             Provider.CUSTOM -> customEndpoint(model, "/v1/chat/completions")
         }
-        // 标准模式没有增强检索，恒 256K 预算（1.0.71 二值化）
-        // 1.0.74 提速：标准档历史实际装载封顶 3 万 token（256K 仍是上下文天花板语义）——
-        // 二值化后长对话把十几万 token 全装进 prefill 是「部分问题数分钟」的主凶之一。
-        // 拟人档不动（质量优先）。token 预算 6 成纪律不变，这里只是再收一刀现实上限。
-        val msgHistory = pickHistory(history, historyBudgetTokens(enhanced = false).coerceAtMost(30_000))
-
-        val messagesJson = mutableListOf<Map<String, Any?>>()
-
-        val systemPrompt = buildSystemPrompt(tools.isNotEmpty(), history, convId, requestModels())
-        if (systemPrompt.isNotEmpty()) {
-            messagesJson.add(mapOf("role" to "system", "content" to systemPrompt))
-        }
-
-        // ★ 这条对话的「规则」：紧跟在系统提示词后面，压在记忆上下文之前 ——
-        // 它是用户亲手写的硬要求，位置越靠后越容易被模型当成"最新指示"，放太靠后反而会盖掉
-        // 反幻觉那类铁律，所以只挨着系统提示词，不跟后面的动态上下文抢位置。
-        if (convId.isNotEmpty()) {
-            val rulesBlock = convRulesBlock(convId)
-            if (rulesBlock.isNotEmpty()) {
-                messagesJson.add(mapOf("role" to "system", "content" to rulesBlock))
-            }
-        }
-
-        // ★ 记忆注入：把该对话的历史要点作为补充上下文，提升回复精准性与适配度、防止长上下文幻觉
-        if (_autoSummarizeMemory.value && convId.isNotEmpty()) {
-            val memCtx = memoryManager.buildMemoryContext(convId)
-            if (memCtx.isNotEmpty()) {
-                messagesJson.add(mapOf("role" to "system", "content" to memCtx))
-            }
-        }
-
-        // ★ 引用上下文：本次发送带了引用，注入给 AI（只后台告知，不在前台消息框显示）
-        pendingQuoteText?.let { q ->
-            messagesJson.add(mapOf("role" to "system", "content" to q))
-            pendingQuoteText = null
-        }
-
-        val historyContents = AttachmentContext.contents(msgHistory)
-        messagesJson.addAll(msgHistory.mapIndexed { index, msg ->
-            val role = when (msg.role) {
-                Role.USER -> "user"
-                Role.ASSISTANT -> "assistant"
-                else -> "system"
-            }
-            val content = historyContents[index]
-            mapOf<String, Any?>("role" to role, "content" to content) +
-                if (role == "assistant" && tools.isNotEmpty()) mapOf("reasoning_content" to msg.reasoningContent.orEmpty()) else emptyMap()
-        })
+        val messagesJson = standardRequestMessages(convId, history, tools.isNotEmpty())
         if (needsSearch || tools.any { (it["function"] as? Map<*, *>)?.get("name") == SearchIntent.TOOL_NAME })
             messagesJson.add(0, mapOf("role" to "system", "content" to SearchIntent.guidance))
         if (continuationMessages != null) { messagesJson.clear(); messagesJson.addAll(continuationMessages) }
@@ -5048,7 +5495,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         val character = _currentCharacter.value?.normalized() ?: return
         if (replacingId != null) {
             if (_messages.value.none { it.id == replacingId && it.sceneVisualization && it.role == Role.ASSISTANT }) return
-            deleteMessageIds(convId, setOf(replacingId)) // Durable removal before issuing another paid request.
+            shatterThenDelete(convId, setOf(replacingId)) // Durable removal before issuing another paid request.
         }
         val history = _messages.value.toList()
         val globalMemories = _globalMemories.value.toList()
@@ -5060,7 +5507,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         val generationTimer = com.freechat.data.GenerationTimer()
         setConvLoading(convId, true)
         val replyId = convGenerationReplyIds.getValue(convId)
-        _isGeneratingImage.value = true
+        if (replacingId != null) AnimationReplay.mark(replyId)
+        setGenerationModel(convId, model.displayName, image = true)
         advanceGeneration(convId, com.freechat.data.GenerationPhase.IMAGE_CONTEXT)
         _liveContent.value = ""
         _liveReasoning.value = ""
@@ -5107,7 +5555,6 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 timer.cancel()
                 if (generationId == standardGenerationId) {
                     standardGenerationConvId = null
-                    _isGeneratingImage.value = false
                     setConvLoading(convId, false)
                 }
             }
@@ -5174,11 +5621,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         val modelId = visualModel.id
         val isCustom = visualModel.provider == Provider.CUSTOM
 
-        val imagePrompt = if (preservePrompt) prompt else (prompt
+        val imagePrompt = ImageAspect.withFillInstruction(if (preservePrompt) prompt else (prompt
             .replace(Regex("(生成|画|做|创建)(一张|个|幅)?(图片|图|图像)"), "")
             .replace(Regex("帮我|给我|请|麻烦"), "")
             .trim()
-            .ifBlank { prompt })
+            .ifBlank { prompt }))
 
         try {
             ensureActive()
@@ -5199,7 +5646,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             } else {
                 "$DOUBAO_BASE_URL/images/generations" to DOUBAO_API_KEY
             }
-            val body = com.freechat.data.ImageApiRequest.body(modelId, sceneRequest?.first ?: imagePrompt, seedream, references)
+            val requestPrompt = sceneRequest?.first ?: imagePrompt
+            // 显式画幅（1.1.21.5）：不带 size 时画布默认方形，「改成 5:3」输出还是 1:1。
+            // Seedream 按比例精确算画布、自定义端走 gpt-image 档位——被拒收会退回不带 size。
+            val requestSize = ImageAspect.requestSize(requestPrompt, seedream)
+            val body = com.freechat.data.ImageApiRequest.body(modelId, requestPrompt, seedream, references, requestSize)
             ensureActive()
             val progressConvId = standardGenerationConvId.orEmpty()
             val progressSerial = convGenerationSerials[progressConvId]
@@ -5217,26 +5668,33 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                     }
                 })
                 .retryOnConnectionFailure(false).build()
-            val respBody = imageClient.newCall(Request.Builder()
-                .url(url)
-                .addHeader("Authorization", "Bearer $key")
-                .post(body).build()).awaitText(maxBytes = 32L * 1024 * 1024)
+            val respBody = try {
+                imageClient.newCall(Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $key")
+                    .post(body).build()).awaitText(maxBytes = 32L * 1024 * 1024)
+            } catch (e: com.freechat.data.ApiFailure) {
+                // 有供应商不认 size 字段——4xx 是「拒收」不是「超时」，不会重复计费，
+                // 退回不带 size 的旧请求体再试一次，宁可回到默认画幅也不弄坏生图。
+                if (e.status !in 400..499) throw e
+                val plain = com.freechat.data.ImageApiRequest.body(modelId, requestPrompt, seedream, references, null)
+                imageClient.newCall(Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $key")
+                    .post(plain).build()).awaitText(maxBytes = 32L * 1024 * 1024)
+            }
 
             val results = com.freechat.data.ImageApiResponse.parse(respBody, url).map { source ->
-                when (source) {
-                  is com.freechat.data.ImageApiResponse.Source.Remote -> source.url
-                  is com.freechat.data.ImageApiResponse.Source.Encoded -> {
-                    ensureActive()
-                    val bytes = source.bytes
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                    if (bounds.outWidth <= 0 || bounds.outHeight <= 0)
-                        throw com.freechat.data.ApiFailure(200, "invalid_image_result")
-                    val file = File(getApplication<Application>().filesDir, "gen_${UUID.randomUUID()}.png")
-                    FileOutputStream(file).use { it.write(bytes) }
-                    file.absolutePath
-                  }
+                ensureActive()
+                val path = com.freechat.data.GeneratedImageStore.persist(source, client,
+                    ImageAspect.parse(sceneRequest?.first ?: imagePrompt))
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(path, bounds)
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                    com.freechat.sync.ImageSync.releaseUnreferenced(listOf(path))
+                    throw com.freechat.data.ApiFailure(200, "invalid_image_result")
                 }
+                path
             }
             if (results.isEmpty()) throw com.freechat.data.ApiFailure(200, "empty_image_result")
             results
@@ -5262,29 +5720,39 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
     private suspend fun callVisionChat(
         images: List<Pair<String, String>>,
-        prompt: String
+        prompt: String,
+        convId: String = "",
+        history: List<Message> = emptyList(),
+        character: CharacterProfile? = null
     ): GenText = withContext(Dispatchers.IO) {
         try {
             val visionModel = requestModels().vision ?: return@withContext GenText("请先在设置里添加识图模型。", failed = true)
             val (apiUrl, apiKey) = customEndpoint(visionModel, "/v1/chat/completions")
-            // 多图：image_url 部分在前，文本在后
-            val contentParts = mutableListOf<Map<String, Any?>>()
-            images.forEach { (b64, mime) ->
-                contentParts.add(
-                    mapOf("type" to "image_url", "image_url" to mapOf("url" to "data:$mime;base64,$b64"))
-                )
+            val context = when {
+                convId.isEmpty() -> emptyList()
+                character != null -> com.freechat.core.CompanionRequestBuilder.build(
+                    character = character, systemPrompt = buildCompanionSystemPrompt(character, convId, history),
+                    memoryContext = if (_autoSummarizeMemory.value) memoryManager.buildMemoryContext(convId,
+                        highQuality = character.highQualityMemory) else "",
+                    quoteText = pendingQuoteText,
+                    history = pickHistory(history, historyBudgetTokens(character.highQualityMemory))
+                ).dropLast(1) // Visual facts, not the character's chat-format reply; language model replies next.
+                else -> standardRequestMessages(convId, history)
             }
-            contentParts.add(mapOf("type" to "text", "text" to prompt))
-            val messages = listOf(
-                mapOf("role" to "user", "content" to contentParts)
-            )
+            val messages = com.freechat.data.VisionConversationContext.attach(context, images, prompt)
+            // 1.1.29：识图的深度思考 = 用户显式选择（新规则/输入框那把开关，键是语言模型）优先，
+            // 没显式选就跟随**识图模型自己的默认**（内置识图默认开）。原来只看语言模型那份开关，
+            // 内置识图「默认开深度思考」根本无处生效。
+            val thinking = if (character != null) character.deepThinkingMode
+                else deepThinkOverride(_perConvSettings.value[convId], requestModels().language)
+                    ?: deepThinkFor(_perConvSettings.value[convId], visionModel)
 
             val requestBody = mapOf(
                 "model" to visionModel.id,
                 "messages" to messages,
                 "stream" to true,
-                "temperature" to 0.3
-            )
+                "temperature" to if (character != null) 0.3 else _tempMode.value.apiValue
+            ) + deepThinkExtras(visionModel.supportsDeepThinking && thinking, visionModel)
 
             val body = gson.toJson(requestBody).toRequestBody(JSON_MEDIA)
             Log.d("FreeChat", "══ Vision → POST chat/completions model=${visionModel.id} prompt=${prompt.take(60)}")
@@ -5352,7 +5820,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                         val fullBody = nonStreamingBody.orEmpty()
                         val json = JsonParser.parseString(fullBody).asJsonObject
                         val choices = json.getAsJsonArray("choices")
-                        choices?.get(0)?.asJsonObject?.getAsJsonObject("message")?.get("content")?.asString ?: "(空回复)"
+                        val message = choices?.get(0)?.asJsonObject?.getAsJsonObject("message")
+                        message?.optString("reasoning_content")?.takeIf { it.isNotEmpty() }?.let {
+                            _liveReasoning.value = _liveReasoning.value + it
+                        }
+                        message?.optString("content") ?: "(空回复)"
                     } catch (_: Exception) { "(空回复)" }
                 }
 
@@ -5381,7 +5853,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         return when {
             files.all { it.name.substringAfterLast('.', "").lowercase() in listOf("jpg", "jpeg", "png", "gif", "webp", "bmp") } -> {
                 val encoded = encodeImagesForApi(files.map { PendingImage(it.path, detectMime(it.path)) })
-                callVisionChat(encoded, text.ifBlank { "请详细描述这张图片的内容" })
+                callVisionChat(encoded, text.ifBlank { "请详细描述这张图片的内容" }, convId.orEmpty(),
+                    history.ifEmpty { convId?.let(::loadMessages).orEmpty() })
             }
             files.all { it.name.substringAfterLast('.', "").lowercase() in listOf("m4a", "mp3", "wav", "amr", "aac", "flac", "ogg", "mp4", "3gp") } -> {
                 val asr = currentAsrModel(convId)
@@ -5924,6 +6397,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         _generationPhase.value = convId?.let { convGenerationPhases[it] } ?: com.freechat.data.GenerationPhase.IDLE
         _generationSerial.value = convId?.let { convGenerationSerials[it] } ?: 0L
         _generationReplyId.value = convId?.let { convGenerationReplyIds[it] }
+        _generationModelName.value = convId?.let { convGenerationModels[it] }.orEmpty()
+        _isGeneratingImage.value = convId != null && convId in convImageGenerations
     }
 
     private fun setConvLoading(convId: String, v: Boolean) {
@@ -5942,6 +6417,12 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         }
         convLoading[convId] = v
         if (!v) {
+            convGenerationModels.remove(convId)
+            convImageGenerations.remove(convId)
+            if (_currentConversationId.value == convId) {
+                _generationModelName.value = ""
+                _isGeneratingImage.value = false
+            }
             // 生成收尾/取消都要把阶段归位（1.0.99.4b）：留着 stale 的 IMAGE_* 会被
             // syncDisplayGenerationState 读去显示、透给订阅者
             convGenerationPhases.remove(convId)
@@ -6026,6 +6507,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         // 内置的「Claude风格助理」不参与起标题：它的名字是功能的一部分，被概括掉之后
         // 侧栏里就只剩一条普通对话，用户根本认不出那是内置的那条（这条反馈也是这么来的）
         if (_conversations.value.find { it.id == convId }?.builtInAssistant == com.freechat.data.BuiltInAssistant.KEY) return
+        // 内置「FreeChat简介说明」同理（1.1.29）：标题就是它的身份
+        if (convId == com.freechat.data.BuiltInIntro.CONV_ID) return
         viewModelScope.launch(Dispatchers.IO + resolveModels(convId)) {
             val title = generateAiTitle(userText) ?: return@launch
             _conversations.value = sortConversations(
@@ -6115,9 +6598,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 "回复长短适中，核心信息说明白就好，不啰嗦也不敷衍。"
         }
 
-        // 仅当用户明确询问身份时才注入
+        // 1.1.29.2 ①（方案B）：知识库范围收窄——「FreeChat简介说明」对话常驻注入；
+        // 其它标准对话只认显式点名 FreeChat / 身份类提问（谁做的、收费吗——问的就是 App 本身，
+        // 不答模型会瞎编「Belate 是团队」）；删过简介对话（intro_deleted）则知识库整体停用。
         val lastUserMsg = history.lastOrNull { it.role == Role.USER }?.content ?: ""
-        val profile = if (isBotIdentityQuery(lastUserMsg)) "\n\n" + buildBotProfile(models) else ""
+        val profile = if (shouldInjectAppKnowledge(convId, lastUserMsg)) "\n\n" + com.freechat.data.FreeChatKnowledge.forPrompt(lastUserMsg) else ""
 
         // 语言识别：根据用户最后一条消息的语言决定回复语言（简单英文问候仍按中文）
         val langHint = buildString {
@@ -6218,78 +6703,47 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         return "中文"
     }
 
-    /** 检测用户是否在询问 Bot 身份 */
-    private fun isBotIdentityQuery(text: String): Boolean {
-        val keywords = listOf(
+    /**
+     * 检测用户是否在询问 FreeChat 软件本身（1.1.27 起按产品知识库回答）。
+     * 三路命中：①「关于这个 App」身份问句；②明确点名 FreeChat/这软件；③疑问句式 + 功能名词
+     * （防「帮我写个角色」这类创作请求误触发——光有功能词不算，得是问句）。
+     */
+    /**
+     * 1.1.29.2 ①（用户拍板方案B）：产品知识库注入判定。
+     * · 「FreeChat简介说明」对话：常驻注入（这对话就是讲 FreeChat 的）；
+     * · 其它标准对话：只认「身份类提问」与「显式点名 FreeChat」——问的就是 App 本身，
+     *   不注就瞎编（历史上编过「Belate 是个团队、有自研大模型」）；
+     * · 旧的「疑问句+功能词」组合触发**退役**（含「微信」）——那是拟人语境的误伤源；
+     * · 用户删过简介对话（intro_deleted）→ 知识库整体停用（知识随对话死，工单原话）。
+     */
+    private fun shouldInjectAppKnowledge(convId: String?, lastUserMsg: String): Boolean {
+        if (introDeletedLatch) return false
+        if (convId == com.freechat.data.BuiltInIntro.CONV_ID) return true
+        return isAppIdentityQuery(lastUserMsg) || isExplicitFreeChatMention(lastUserMsg)
+    }
+
+    /** 身份类提问：用户在问「这个 App / 这个助手本身」（谁做的、什么模型、收费吗…） */
+    private fun isAppIdentityQuery(text: String): Boolean {
+        val identity = listOf(
             "你是谁", "你是什么", "你的版本", "版本号", "什么模型",
             "什么版本", "哪个模型", "你能做什么", "你的能力", "你的功能",
             "谁开发的", "谁做的", "你的作者", "你叫什么", "介绍一下自己",
-            // 开源 / 收费 / 联系方式 / 功能：都属于「关于这个 App 本身」的问题，
-            // 没有这段事实表，模型只会照着训练数据瞎编（历史上就编过「Belate 是个团队、有自研大模型」）
+            // 开源 / 收费 / 联系方式：都属于「关于这个 App 本身」的问题
             "免费", "收费", "要钱", "多少钱", "开源", "open source", "github", "仓库",
-            "作者", "开发者", "团队", "联系", "反馈", "微信", "官网", "更新", "隐私",
+            "作者", "开发者", "团队", "联系", "反馈", "官网", "更新", "隐私",
             "有什么功能", "支持什么", "怎么用", "如何使用", "使用说明",
             "who are you", "what model", "what version", "who made you", "open source",
             "free", "contact"
         )
-        return keywords.any { text.contains(it, ignoreCase = true) }
+        return identity.any { text.contains(it, ignoreCase = true) }
     }
 
-    /**
-     * App 自身的事实表 —— 只在用户问到「关于你 / 关于这个 App」时注入。
-     *
-     * 为什么不写死成一段固定文案：作者要求每次说法不能一模一样，否则一眼假。
-     * 所以这里只给**事实**，并且明确要求模型自己组织语言、每次的措辞/顺序/详略都要变。
-     * 为了让「每次不一样」有抓手，还随机挑一个**切入角度**（fromFacts 里的 angle）。
-     *
-     * 事实部分全部来自作者本人提供的信息，一个字都不许模型自己发挥 ——
-     * 之前模型编出「Belate 是一个团队，拥有自研大模型」，纯属幻觉，这里用
-     * 「没有写在下面的事实，一律说不知道」把它堵死。
-     */
-    private fun buildBotProfile(models: RequestModels): String {
-        val modelName = models.language.displayName
-        val visualModelName = models.visual.displayName
-        val visionModelName = models.vision?.displayName ?: ""
-        // 随机切入角度：让同一个问题两次问出来不完全一样
-        val angle = listOf(
-            "先说这是什么 App，再说作者，最后补一句欢迎反馈",
-            "先从作者是谁说起，再顺带介绍 App 和功能",
-            "先回答用户最关心的那一点（免费？开源？谁做的？），其余一句话带过",
-            "用轻松的口吻一句话概括，再简单列一下关键事实",
-            "先摆事实（免费开源 + 仓库地址），再讲功能和作者",
-        ).random()
+    /** 显式点名 FreeChat / 这个软件 */
+    private fun isExplicitFreeChatMention(text: String): Boolean =
+        text.contains("freechat", ignoreCase = true) ||
+            text.contains("这个软件") || text.contains("这个app") || text.contains("这个应用") ||
+            text.contains("这软件") || text.contains("你们软件")
 
-        return "【关于你自己 —— 仅在用户询问时使用】\n" +
-                "\n" +
-                "== 事实（只能照这些说，没有的事实一律回答「这个我不确定」）==\n" +
-                "· 你是 **FreeChat**，一款 AI 聊天 App。\n" +
-                "· FreeChat 是**完全免费**的，而且是**开源**项目。\n" +
-                "· 开源仓库（GitHub）：https://github.com/Belate-stay/FreeChat\n" +
-                "· 作者：**Belate**，原名**胡勃阳**，男，软件工程专业、计算机系大学生。微信号：belate_coder。\n" +
-                "· **Belate 是一个人，不是团队，也没有自研大模型。**FreeChat 的模型能力来自第三方\n" +
-                "  （小米 MiMo、豆包等），App 本身是作者一个人写的客户端。**任何把 Belate 说成\n" +
-                "  「团队」「公司」「实验室」，或说他「有自研大模型」「自研了 XX 模型」的说法，\n" +
-                "  都是错的，绝对不许说。**\n" +
-                "· 本 App 的核心特色是**拟人模式**：可以自定义角色卡，和 AI 角色沉浸式聊天，\n" +
-                "  回复风格有**三种**（小说文本 / 动作演绎 / 微信聊天）。\n" +
-                "· 其它功能：回复缓冲、主动智能（微信聊天模式下角色会主动找你说话）、记忆存储、\n" +
-                "  联网搜索、生图 / 识图、文档生成、多角色、多主题配色等。\n" +
-                "· 当前语言模型：$modelName；生图模型：$visualModelName；识图模型：$visionModelName。\n" +
-                "· 设置里可以调的：主题与配色、字体、回复风格（温度模式）、回复长度、联网搜索开关、\n" +
-                "  记忆相关开关、回复缓冲、主动智能等。\n" +
-                "\n" +
-                "== 怎么回答 ==\n" +
-                "1. 说人话、自然点，像作者本人在介绍自己的作品，不要像念产品说明书。\n" +
-                "2. 别把上面每条都倒出来，按用户实际问的挑重点答，问什么答什么。\n" +
-                "3. **每次说法都要不一样**：措辞、顺序、详略、语气都换着来，不要背成一段固定文案。\n" +
-                "   这次的切入角度参考：$angle\n" +
-                "4. 用户夸它好用、或者问能不能帮上忙时，自然地表达「感谢使用、希望你会喜欢」，\n" +
-                "   并说明「有任何 bug 或建议都可以直接反馈给作者」，把微信号 belate_coder 给出来。\n" +
-                "5. 问到仓库地址、怎么联系作者，就把链接 / 微信号准确给出来，一个字都不能改。\n" +
-                "6. **不知道的就说不知道**（比如用户量、下载量、有没有 iOS 版、以后会不会收费、\n" +
-                "   未来路线图）——这些没写在上面的，一律回答「这个我不确定，可以直接问作者」，\n" +
-                "   **严禁编数字、编计划、编荣誉、编合作方**。"
-    }
 }
 
 // 安全取字符串：区分「字段缺失」与「显式 null」。推理模型的 SSE 里 content/reasoning_content

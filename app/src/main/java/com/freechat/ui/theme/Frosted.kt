@@ -1,8 +1,11 @@
 package com.freechat.ui.theme
 
+import android.graphics.RuntimeShader
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -14,6 +17,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.ClipOp
@@ -22,6 +26,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeInputScale
@@ -39,8 +44,82 @@ import com.freechat.ui.theme.materialHaze as hazeEffect
 //
 //  两者都用 [softShadow] 自绘阴影，**一律不用 `Modifier.shadow`**，原因见该函数。
 
-/** 8 层同心圆角矩形叠出的柔光阴影（伪模糊）。层数越少越省、越多越顺；8 层在手机上已经看不出台阶。 */
-private const val SHADOW_LAYERS = 8
+/** API<33 降级路径：N 层同心圆角矩形叠柔光。32 层下大 spread 的层距≈1.5px，灰阶断层不可见。 */
+private const val SHADOW_LAYERS = 32
+
+/** 旧 8 层栈的边缘累积黑度 ≈ maxAlpha × 2.4；层数换代后按 8/N 折算，观感黑度不变。 */
+private const val SHADOW_LAYER_SCALE = 8f / SHADOW_LAYERS
+
+/**
+ * AGSL source for the soft shadow (SDF rounded-rect falloff). Kept free of Android
+ * types so JVM tests can pin the shader discipline (no fwidth / banding dither —
+ * 8 层矩形栈在玻璃系大 spread 下会出可见灰阶，SDF 衰减带才是「细化」的解）。
+ */
+internal object SoftShadowShaderSource {
+    val Agsl = """
+        float bandingNoise(vec2 fragCoord) {
+          return 1. / 256. * (fract(sin(dot(.014 * fragCoord, vec2(12.9898, 78.233))) * 43758.5453123) - .5);
+        }
+
+        uniform float2 u_card;
+        uniform float2 u_cardSize;
+        uniform float u_corner;
+        uniform float u_shiftX;
+        uniform float u_shiftY;
+        uniform float u_spread;
+        uniform float u_maxAlpha;
+        layout(color) uniform half4 u_tone;
+
+        float sdRoundRect(float2 p, float2 b, float r) {
+          float2 q = abs(p) - b + r;
+          return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+        }
+
+        half4 main(float2 fragCoord) {
+          float2 center = u_card + u_cardSize * 0.5 + float2(u_shiftX, u_shiftY);
+          float d = sdRoundRect(fragCoord - center, u_cardSize * 0.5, u_corner);
+          // 影子是「位移+外扩的实心叠层」：卡面与位移影体的重叠带按满黑度算（d≤0 取 0），
+          // 从位移影体边界向外 (1-t)³ 立方化开 —— 对齐旧 8 层栈的累积剖面（2.6 倍密度）。
+          // ⚠ 绝不许 step(0,d) 把内部清零：那会在卡片与影之间留一圈底色白缝（实机「阴影是白的」病根）
+          float g = max(d, 0.0);
+          float t = clamp(g / max(u_spread, 1.0), 0.0, 1.0);
+          float a0 = u_maxAlpha * 2.6 * pow(1.0 - t, 3.0);
+          float a = 0.0;
+          if (a0 > 0.003) a = clamp(a0 + bandingNoise(fragCoord) * 0.6, 0.0, 1.0);
+          return half4(u_tone.rgb * half(a), half(a));
+        }
+    """.trimIndent()
+}
+
+@RequiresApi(33)
+internal class SoftShadowShader {
+    private val shader = RuntimeShader(SoftShadowShaderSource.Agsl)
+    private val brush = ShaderBrush(shader)
+
+    /** 画布坐标=节点坐标（nativeCanvas 原点即节点原点），卡片在 (0,0)、阴影四下扩 spread。 */
+    fun draw(
+        scope: DrawScope,
+        cardW: Float, cardH: Float, corner: Float,
+        dx: Float, dy: Float, spread: Float,
+        maxAlpha: Float, tone: Color
+    ) {
+        shader.setFloatUniform("u_card", 0f, 0f)
+        shader.setFloatUniform("u_cardSize", cardW, cardH)
+        shader.setFloatUniform("u_corner", corner)
+        shader.setFloatUniform("u_shiftX", dx)
+        shader.setFloatUniform("u_shiftY", dy)
+        shader.setFloatUniform("u_spread", spread)
+        shader.setFloatUniform("u_maxAlpha", maxAlpha)
+        shader.setColorUniform("u_tone", tone.toArgb())
+        with(scope) {
+            drawRect(
+                brush,
+                topLeft = Offset(-spread, -spread),
+                size = Size(cardW + spread * 2f, cardH + spread * 2f)
+            )
+        }
+    }
+}
 
 /**
  * 自绘柔光阴影 —— **刻意不用 `Modifier.shadow`**，两个原因：
@@ -50,16 +129,19 @@ private const val SHADOW_LAYERS = 8
  *    底下没有内容可供采样时，那个灰环就明晃晃地露出来。
  * 2. 系统阴影只能往**右下**投，方向被写死。新拟态要的「左上高光」它压根画不出来。
  *
- * 这里用 N 层同心圆角矩形叠柔光：越往外越大、越淡，合成出一条平滑的衰减带。
- * 纯几何绘制，比一次真实高斯模糊便宜一个数量级，而且方向、颜色、强度全部可控。
+ * 渲染两条路（1.1.29.9 工单③「灰阶细化」）：API33+ 走 AGSL SDF 衰减带（一整块四边形、
+ * 平滑 falloff + banding 抖动，无层距断层）；低版本 32 层同心圆角矩形栈保底。
+ * **每个调用点各持一个 RuntimeShader 实例** —— ShaderBrush 不快照 uniform，
+ * 共用一个实例同帧多卡会互相覆盖。
  *
  * @param dx/dy   阴影相对卡片的位移（左上为负、右下为正）
  * @param spread  衰减带宽度
  * @param tone    阴影色 —— 新拟态的铁律：**必须接近背景色**，不能用纯黑/纯白
- * @param maxAlpha 最里那一层的 alpha。**注意它不是肉眼看到的黑度**：8 层在卡片边缘处
+ * @param maxAlpha 最里那一层的 alpha。**注意它不是肉眼看到的黑度**：衰减带在卡片边缘处
  *   全都叠在一起，实际黑度 ≈ maxAlpha × 2.4（第 0 层 0.07 → 边缘约 0.16）。
  *   手感上「边缘一圈太黑」的锅多半在这儿，而不是 dy/spread —— 调之前先按 ×2.4 估一下。
  */
+@Composable
 fun Modifier.softShadow(
     shape: Shape,
     dx: Dp = 0.dp,
@@ -68,12 +150,27 @@ fun Modifier.softShadow(
     tone: Color = Color.Black,
     maxAlpha: Float = 0.18f,
     strength: () -> Float = { 1f },
-): Modifier = this.drawWithCache {
-    val corner = cornerRadiusOf(shape.createOutline(size, layoutDirection, this))
-    val opacity = maxAlpha * strength()
-    val face = Path().apply { addRoundRect(RoundRect(0f, 0f, size.width, size.height, corner)) }
-    onDrawBehind {
-        clipPath(face, ClipOp.Difference) { drawSoftShadow(corner, dx.toPx(), dy.toPx(), spread.toPx(), tone, opacity) }
+): Modifier {
+    val agsl = remember {
+        if (android.os.Build.VERSION.SDK_INT >= 33) runCatching { SoftShadowShader() }
+            .onFailure { android.util.Log.w("FreeChatShader", "softShadow uses layer-stack fallback", it) }
+            .getOrNull() else null
+    }
+    return this.drawWithCache {
+        val corner = cornerRadiusOf(shape.createOutline(size, layoutDirection, this))
+        val opacity = maxAlpha * strength()
+        val face = Path().apply { addRoundRect(RoundRect(0f, 0f, size.width, size.height, corner)) }
+        onDrawBehind {
+            if (opacity <= 0f) return@onDrawBehind
+            clipPath(face, ClipOp.Difference) {
+                if (agsl != null) {
+                    agsl.draw(this, size.width, size.height, corner.x,
+                        dx.toPx(), dy.toPx(), spread.toPx(), opacity, tone)
+                } else {
+                    drawSoftShadow(corner, dx.toPx(), dy.toPx(), spread.toPx(), tone, opacity)
+                }
+            }
+        }
     }
 }
 
@@ -90,8 +187,8 @@ private fun DrawScope.drawSoftShadow(
     for (i in 0 until SHADOW_LAYERS) {
         val t = i / (SHADOW_LAYERS - 1f)
         // (1-t)² 的衰减：靠里几乎实心、靠外迅速化开，这正是柔光该有的手感
-        val alpha = maxAlpha * (1f - t) * (1f - t)
-        if (alpha < 0.004f) continue
+        val alpha = maxAlpha * SHADOW_LAYER_SCALE * (1f - t) * (1f - t)
+        if (alpha < 0.002f) continue
         val grow = spread * t
         drawRoundRect(
             color = tone.copy(alpha = alpha),
@@ -161,6 +258,18 @@ fun Modifier.frostedCard(
     opaque: Boolean = false,
 ): Modifier {
     val isDark = colors.TextPrimary.luminance() > 0.5f
+    // 1.1.28：选中态主题色铺面走过渡动画（全 App 选项卡统一，不再硬切闪变）。
+    // 未选中=透明 → 叠在原卡面之上渐显/渐隐，材质层级不变，只是「染色」有了过程。
+    val selFill by androidx.compose.animation.animateColorAsState(
+        if (selected) colors.selectedFill else Color.Transparent,
+        com.freechat.ui.animation.FreeChatAnimation.colorTween,
+        label = "cardSelFill"
+    )
+
+    // 1.1.29 阴影常驻（用户工单⑤）：1.1.28 的「飞行期整卡降级」把阴影链也换掉了 ——
+    // 转场起止各闪一次（阴影重加载、割裂感重）。现在**阴影与稳态完全同链**，飞行期只停
+    // 流光采样（neumorphicFace 的 inheritLiquid），其余一概不动 —— 转场前后阴影零跳变。
+    val flying = com.freechat.ui.animation.LocalPageFlight.current
 
     // 阴影强度见 [softShadow] 的注释：8 层叠起来边缘的真实黑度约是 maxAlpha 的 2.4 倍，
     // 所以这里的数值看着小，实际落影刚刚好。早先非高级材质这一段写的是 0.16 —— 边缘实际
@@ -175,7 +284,8 @@ fun Modifier.frostedCard(
             )
             .clip(shape)
             // 选中态 = 主题色实心（1.0.50 统一，见 Color.kt 的 selectedFill）；face 显式给了就听 face 的
-            .background(face ?: if (selected) colors.selectedFill else fallback)
+            .background(face ?: fallback)
+            .then(if (face == null) Modifier.background(selFill) else Modifier)
     }
 
     if (!neumorph) {
@@ -186,7 +296,8 @@ fun Modifier.frostedCard(
                 tone = Color.Black, maxAlpha = if (isDark) 0.13f else 0.08f
             )
             .clip(shape)
-            .background(face ?: if (selected) colors.selectedFill else colors.SurfaceVariant)
+            .background(face ?: colors.SurfaceVariant)
+            .then(if (face == null) Modifier.background(selFill) else Modifier)
             .background(
                 // 顶部高光：淡淡一层白，向下渐隐，模拟玻璃反光
                 Brush.verticalGradient(
@@ -213,7 +324,7 @@ fun Modifier.frostedCard(
     val tone = remember(colors, isDark, selected, compact) {
         neumorphTone(colors, isDark, selected, compact)
     }
-    val plainFace = face ?: if (selected) colors.selectedFill else fallback
+    val plainFace = face ?: fallback
 
     return this
         // 外阴影（凸起）：只画在卡片外面（画进卡里会从半透明的卡面里透出来，见 Neumorph.kt）
@@ -221,13 +332,12 @@ fun Modifier.frostedCard(
             maxAlpha = if (isDark) 0.04f else 0.025f, strength = { 1f - progress() })
         .then(if (recessed) Modifier else Modifier.neumorphShadow(shape, tone, recessed = false, strength = progress))
         .clip(shape)
-        .neumorphicFace(tone, plainFace, progress, inheritLiquid = face == null && !selected)
-        // 覆盖色（选中态的主题色淡底）铺在这层「面」**上面**，是叠加不是替代
+        .neumorphicFace(tone, plainFace, progress, inheritLiquid = face == null && !selected && !flying)
+        // 覆盖色（选中态的主题色）铺在这层「面」**上面**，是叠加不是替代（1.1.28 起过渡动画）
         .then(
             when {
                 face != null -> Modifier.background(face)
-                selected -> Modifier.background(colors.selectedFill)
-                else -> Modifier
+                else -> Modifier.background(selFill)
             }
         )
         // 内阴影（凹进）：必须被形状裁着画，所以放到 clip 与卡面之后

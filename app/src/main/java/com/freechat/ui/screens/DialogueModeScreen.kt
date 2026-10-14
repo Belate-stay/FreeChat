@@ -3,10 +3,11 @@ package com.freechat.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.background
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -22,6 +23,7 @@ import com.freechat.data.CharacterPresentationPolicy
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.DialogueMode
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.rememberTopOnEntryScrollState
 import com.freechat.ui.animation.MotionButton
 import com.freechat.ui.components.HeaderIconButton
 import com.freechat.ui.components.TopBarBackdrop
@@ -52,7 +54,7 @@ internal fun DialogueModeScreen(
         Column(
             Modifier.fillMaxSize()
                 .then(if (advanced) Modifier.hazeSource(hazeState).hazeBackground(colors.Background) else Modifier)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(rememberTopOnEntryScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusHeight, 24.dp), bottom = 32.dp)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -115,15 +117,22 @@ internal fun DialogueModeOptions(mode: Int?, onSelect: (Int) -> Unit, hazeState:
             Triple(DialogueMode.PLOT, s.dialogueModePlot, s.dialogueModePlotDesc),
         ).forEach { (value, title, description) ->
             val selected = mode == value
+            // 选中态过渡动画（1.1.28）：淡主题色铺面叠在卡面上渐染，标题色同步渐变，不再硬切
+            val tint by androidx.compose.animation.animateColorAsState(
+                if (selected) colors.Primary.copy(alpha = 0.16f) else Color.Transparent,
+                com.freechat.ui.animation.FreeChatAnimation.colorTween, label = "modeTint")
+            val titleColor by androidx.compose.animation.animateColorAsState(
+                if (selected) colors.Primary else colors.TextPrimary,
+                com.freechat.ui.animation.FreeChatAnimation.colorTween, label = "modeTitle")
             Column(Modifier.fillMaxWidth()
                 .frostedCard(hazeState, colors, advanced, RoundedCornerShape(16.dp),
-                    fallback = colors.SurfaceVariant,
-                    face = if (selected) colors.Primary.copy(alpha = 0.16f) else null)
+                    fallback = colors.SurfaceVariant)
+                .background(tint, RoundedCornerShape(16.dp))
                 .selectable(selected = selected, role = androidx.compose.ui.semantics.Role.RadioButton,
                     onClick = { onSelect(value) })
                 .padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
-                    color = if (selected) colors.Primary else colors.TextPrimary)
+                    color = titleColor)
                 Text(description, style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
             }
         }

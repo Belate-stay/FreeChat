@@ -77,7 +77,12 @@ object FreeChatAnimation {
     val pressDown = tween<Float>(DURATION_PRESS, easing = iosEaseOut)
     val pressRelease = spring<Float>(dampingRatio = 0.82f, stiffness = 850f, visibilityThreshold = 0.001f)
     val thumbSpring = spring<Float>(dampingRatio = 0.82f, stiffness = 550f, visibilityThreshold = 0.001f)
+    /** 果冻回弹（1.1.26.1 关于页下拉）：阻尼 < 1 有可见过冲再落定，「果冻感」就来自那一下 */
+    // 1.1.26.4：阻尼 0.58→0.85——松手回位几乎不过冲（过冲会「往上冲过头」，读作方向反了），
+    // 但阻尼 <1 保留一点点果冻落定感
+    val jellyReturn = spring<Float>(dampingRatio = 0.85f, stiffness = 220f)
     val imageGradientCycle = tween<Float>(7_200, easing = LinearEasing)
+    val imageCompletion = tween<Float>(1_100, easing = iosEaseInOut)
     fun <T> controlSpec(): TweenSpec<T> = tween(DURATION_FAST, easing = iosEaseOut)
     val overlayFadeIn = tween<Float>(200, easing = iosEaseOut)
     val overlayFadeOut = tween<Float>(160, easing = iosEaseIn)
@@ -98,6 +103,18 @@ object FreeChatAnimation {
     fun expandExit(): ExitTransition =
         shrinkVertically(tween(DURATION_COLLAPSE, easing = iosEaseInOut), shrinkTowards = Alignment.Top) +
             fadeOut(tween(DURATION_COLLAPSE, easing = iosEaseInOut))
+
+    /**
+     * 居中弹窗（1.1.20 启动提醒）——轻微缩放 + 淡入落位，退场加速淡出。
+     * 与弹层同一套节奏语言：进场减速稳落（iosEaseOut）、退场干脆（iosEaseIn）；
+     * 缩放只动 8%（0.92→1），幅度小到不抢内容的注意力，「高级、简约」的来源。
+     */
+    fun dialogEnter(): EnterTransition =
+        scaleIn(initialScale = 0.92f, animationSpec = tween(DURATION_NORMAL, easing = iosEaseOut)) +
+            fadeIn(overlayFadeIn)
+    fun dialogExit(): ExitTransition =
+        scaleOut(targetScale = 0.96f, animationSpec = tween(200, easing = iosEaseIn)) +
+            fadeOut(overlayFadeOut)
 
     /** 不改变卡片样式；展开高度与贴底定位使用同一时间线，避免两个弹簧争抢视口。 */
     fun disclosureEnter(): EnterTransition = expandEnter()
@@ -148,6 +165,19 @@ object FreeChatAnimation {
     val indicatorSlideTween = tween<Float>(INDICATOR_SLIDE_MS, easing = iosEaseInOut)
 
     /**
+     * 竖条「出现」（1.1.29 工单⑦ 重做）：「水滴」指动画不是形态 ——
+     * 小圆点从屏幕左缘滑入，右移途中**慢慢放大并拉长成竖条**，到位时正好拉完即停。
+     * 形变与位移共用同一份进度（[DrawerIndicatorBar] 绘制块），所以永远同步收尾。
+     * 速率先慢后快（Bezier 慢起步、中段冲），收尾轻落不硬刹（硬刹看着像撞停，不丝滑）；
+     * 全程 180ms，整体是快的 —— 点完对话马上要进 Chat 页，动画拖过 0.2s 就成了等待。
+     */
+    const val INDICATOR_APPEAR_MS = 180
+    val indicatorAppearTween = tween<Float>(
+        INDICATOR_APPEAR_MS,
+        easing = CubicBezierEasing(0.55f, 0.0f, 0.35f, 1.0f)
+    )
+
+    /**
      * 抽屉延时关闭的时长（= 竖条的滑行与抽屉起滑的**重叠**量）。
      *
      * 为什么不能立刻关：竖条贴在面板左缘（屏幕 x≈45，宽 12px），面板往左一滑 56px 它就被
@@ -189,6 +219,13 @@ object FreeChatAnimation {
         durationMillis = DURATION_MESSAGE,
         easing = arrivalEase
     )
+    /** 列表项换位/移除（animateItem，1.1.26 补缺）：换位慢快慢、移除加速离场 */
+    val listPlacementTween = tween<androidx.compose.ui.unit.IntOffset>(DURATION_NORMAL, easing = iosEaseInOut)
+    val listFadeOutTween = tween<Float>(DURATION_DISMISS, easing = iosEaseIn)
+    /** 删除退场：整行按角色方向滑出屏幕。加速缓动（iosEaseIn），透明度走 MotionPolicy.exitAlpha 尾段才掉 */
+    val messageExitTween = tween<Float>(DURATION_COLLAPSE, easing = iosEaseIn)
+    /** 状态填色渐变（勾选圈/状态点，1.1.26 补缺） */
+    val colorTween = tween<androidx.compose.ui.graphics.Color>(DURATION_NORMAL, easing = iosEaseOut)
     /** 消息淡入 — 与滑动同步 */
     val messageFadeTween = tween<Float>(
         durationMillis = 360,

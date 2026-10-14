@@ -4,7 +4,6 @@ import com.freechat.ui.components.HeaderIconButton
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -49,7 +48,7 @@ fun ChangelogScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(com.freechat.ui.animation.rememberTopOnEntryScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 36.dp), bottom = 40.dp)
                 .padding(horizontal = 20.dp)
         ) {
@@ -118,7 +117,7 @@ private fun ChangelogEntryView(entry: ChangelogEntry, colors: FreeChatColors) {
 }
 
 @Composable
-private fun ChangelogSection(
+internal fun ChangelogSection(
     title: String,
     items: List<String>,
     accentColor: Color,

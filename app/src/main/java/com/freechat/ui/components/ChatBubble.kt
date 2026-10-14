@@ -60,6 +60,7 @@ import com.freechat.model.MultiSelectAction
 import com.freechat.model.Role
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.animation.MotionPolicy
+import com.freechat.ui.animation.pressMotion
 import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.LocalChatFontFamily
 import com.freechat.ui.theme.LocalLatinFontFamily
@@ -83,11 +84,16 @@ fun ChatBubble(
     isDark: Boolean,
     modifier: Modifier = Modifier,
     liveThinkingMs: Long = 0L,
+    liveImagePhase: com.freechat.data.GenerationPhase? = null,
     generationLabel: String? = null,
     isThinking: Boolean = false,
     showThinking: Boolean = true,
+    /** 1.1.29.8 工单②：默认折叠思考过程——思考中展开，回复开流（或输出完毕）自动折起 */
+    collapseThinking: Boolean = false,
     showSearchSources: Boolean = false,
     disclosureCallbacks: DisclosureCallbacks = DisclosureCallbacks.None,
+    sessionState: ChatSessionState? = null,
+    conversationId: String? = null,
     onRegenerate: (() -> Unit)? = null,
     onDeleteScene: (() -> Unit)? = null,
     onSpeak: (() -> Unit)? = null,
@@ -116,6 +122,10 @@ fun ChatBubble(
     val generatedImages by produceState(emptyList<String>(), message.imageUrls) {
         value = withContext(Dispatchers.IO) { ImageDisplayPolicy.generatedImages(message) }
     }
+    // Streaming and persisted replies use the same ID. Retain this slot through decode/reveal.
+    var sawImageGeneration by remember(message.id) { mutableStateOf(message.isStreaming && liveImagePhase != null) }
+    SideEffect { if (message.isStreaming && liveImagePhase != null) sawImageGeneration = true }
+    val stableImageSlot = sawImageGeneration && !message.failed && (message.isStreaming || message.imageUrls.isNotEmpty())
     val display = remember(message.content, message.searchSources, message.answerLinksRequested) {
         SearchPresentation.forDisplay(message.content, message.searchSources, message.answerLinksRequested)
     }
@@ -338,20 +348,40 @@ fun ChatBubble(
                 }
 
                 // 推理过程显示：与正文同列上下排列（修复思考卡与正文重叠），受「显示思考过程」开关控制
-                AnimatedVisibility(visible = showThinking && message.reasoningContent.orEmpty().isNotEmpty(),
+                AnimatedVisibility(visible = !isCompanion && showThinking && message.reasoningContent.orEmpty().isNotEmpty(),
                     enter = FreeChatAnimation.bodyEnter(with(LocalDensity.current) { MotionPolicy.BodyRiseDp.dp.roundToPx() }),
                     exit = fadeOut(FreeChatAnimation.overlayFadeOut)) {
                   Column {
-                    ReasoningBubble(message.id, message.reasoningContent.orEmpty(), colors, disclosureCallbacks)
+                    ReasoningBubble(message.id, message.reasoningContent.orEmpty(), colors, disclosureCallbacks,
+                        sessionState, conversationId, collapseThinking,
+                        replyStarted = message.content.orEmpty().isNotBlank() || !message.isStreaming)
                     Spacer(Modifier.height(8.dp))
                   }
+                }
+
+                if (stableImageSlot) {
+                    val firstImage = generatedImages.firstOrNull()
+                    // 场景图提示声明：生成中与完成后都固定在图片上方（2026-10-11 统一）。
+                    if (isCompanion) Text(s.sceneImageVisualOnly, style = MaterialTheme.typography.bodySmall,
+                        color = colors.TextSecondary, modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp))
+                    GeneratedImage(firstImage, Modifier.padding(vertical = 4.dp)
+                        .onGloballyPositioned { coords ->
+                            if (firstImage != null) {
+                                val pos = coords.positionInWindow()
+                                thumbnailRects[firstImage] = androidx.compose.ui.geometry.Rect(pos.x, pos.y,
+                                    pos.x + coords.size.width, pos.y + coords.size.height)
+                            }
+                        }, generating = message.isStreaming || firstImage == null,
+                        phase = liveImagePhase ?: com.freechat.data.GenerationPhase.IMAGE_RECEIVING, fromGeneration = true) {
+                            if (firstImage != null) { thumbnailRect = thumbnailRects[firstImage]; fullscreenImage = firstImage }
+                        }
                 }
 
                 // AI 正文
                 val answerTransition = remember(message.id) {
                     MutableTransitionState(!message.isStreaming && display.answer.isNotBlank())
                 }
-                answerTransition.targetState = display.answer.isNotBlank()
+                answerTransition.targetState = display.answer.isNotBlank() && !(stableImageSlot && message.sceneVisualization)
                 AnimatedVisibility(visibleState = answerTransition,
                     enter = FreeChatAnimation.bodyEnter(with(LocalDensity.current) { MotionPolicy.BodyRiseDp.dp.roundToPx() }),
                     exit = fadeOut(FreeChatAnimation.overlayFadeOut)) {
@@ -360,9 +390,14 @@ fun ChatBubble(
                     Text(display.answer, style = MaterialTheme.typography.bodySmall,
                         color = colors.TextSecondary, modifier = Modifier.fillMaxWidth())
                 } else if (isCompanion && display.answer.isNotBlank()) {
-                    Text(
-                        companionText,
-                        style = MaterialTheme.typography.bodyMedium.copy(
+                    // 逐字显现（Beta 1.1.26）：只改文字出现的过渡，最终态与整段立显完全一致。
+                    TypewriterText(
+                        text = companionText,
+                        messageId = message.id,
+                        timestampMs = message.timestamp,
+                        enabled = emphasizeDialogue && !message.isStreaming &&
+                            com.freechat.ui.animation.LocalMotionEnabled.current,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
                             fontFamily = LocalChatFontFamily.current,
                             lineBreak = cjkLineBreak
                         ),
@@ -408,9 +443,10 @@ fun ChatBubble(
                 if (ImageDisplayPolicy.hasMissingResult(message)) MissingGeneratedImageNotice()
 
                 // 生图结果 — 点击可全屏预览
-                if (generatedImages.isNotEmpty()) {
+                val remainingImages = if (stableImageSlot) generatedImages.drop(1) else generatedImages
+                if (remainingImages.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
-                    generatedImages.forEach { url ->
+                    remainingImages.forEach { url ->
                         key(url) {
                             GeneratedImage(url, Modifier.padding(vertical = 4.dp)
                                 .onGloballyPositioned { coords ->
@@ -453,35 +489,39 @@ fun ChatBubble(
                     }
                 }
 
+                // 拟人场景图操作栏（2026-10-11 统一）：与标准模式同款——图标钮无文字、同排版，
+                // 模型名/生成时长用同款 MessageAttribution 放到按钮下方。
                 if (isCompanion && !multiSelectEnabled && (onRegenerate != null || onDeleteScene != null ||
                     (message.sceneVisualization && !message.modelName.isNullOrBlank()))) {
-                  Row(Modifier.fillMaxWidth().padding(top = 4.dp),
-                      verticalAlignment = Alignment.CenterVertically,
-                      horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                   if (onRegenerate != null) Row(Modifier.heightIn(min = 48.dp)
-                        .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onRegenerate)
-                        .padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Refresh, s.regenerate, tint = colors.TextTertiary, modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(s.regenerate, style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
+                    Row(
+                        modifier = Modifier.padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (onDeleteScene != null) {
+                            MessageActionIcon(onClick = { onDeleteScene() }) {
+                                Icon(Icons.Filled.DeleteOutline, s.deleteMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        if (onRegenerate != null) {
+                            MessageActionIcon(onClick = { onRegenerate() }) {
+                                Icon(Icons.Filled.Refresh, s.regenerate, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
+                            }
+                        }
                     }
-                   if (onDeleteScene != null) Row(Modifier.heightIn(min = 48.dp)
-                        .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onDeleteScene)
-                        .padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.DeleteOutline, s.deleteMessage, tint = colors.TextTertiary, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(s.deleteMessage, style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
-                   }
-                   if (message.sceneVisualization && !message.modelName.isNullOrBlank()) {
-                       Text(message.modelName.orEmpty(), modifier = Modifier.weight(1f), textAlign = TextAlign.End,
-                           style = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalLatinFontFamily.current),
-                           color = colors.TextTertiary, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                   }
-                  }
+                    if (message.sceneVisualization && !message.modelName.isNullOrBlank()) {
+                        MessageAttribution(message.modelName.orEmpty(), message.thinkingTimeMs, colors)
+                    }
+                }
+
+                if (message.isStreaming && stableImageSlot) {
+                    // Reserve exactly the completed controls' space: bottom-follow must not move the image at completion.
+                    Spacer(Modifier.height(34.dp))
+                    MessageAttribution(message.modelName.orEmpty(), liveThinkingMs, colors, showZeroTime = true)
                 }
 
                 // 操作栏 + 模型名（拟人模式不显示，模拟真实气泡对话；多选态整体隐藏）
-                if (message.isStreaming && generationLabel != null) {
+                if (message.isStreaming && liveImagePhase == null && generationLabel != null) {
                     // Keep status BELOW readable content so stage changes cannot move the reader.
                     Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -578,11 +618,15 @@ fun ChatBubble(
         //   这一层一次性盖住正文 SelectionContainer / 图片点击 / 附件卡 / 推理卡展开 / 编辑铅笔，
         //   不用逐个去关子节点的 clickable（逐个关一定会漏）。
         if (multiSelectEnabled) {
+            val pressSource = remember { MutableInteractionSource() }
             Box(
                 modifier = Modifier
                     .matchParentSize()
+                    // 按压缩放补上（1.1.26）：整条消息是选择热区，没有按压反馈会像点不动。
+                    // ripple 仍关着——别把正文洗一层水波。
+                    .pressMotion(pressSource)
                     .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
+                        interactionSource = pressSource,
                         indication = null
                     ) { onToggleSelect?.invoke() }
             )
@@ -592,19 +636,20 @@ fun ChatBubble(
 }
 
 @Composable
-private fun MessageAttribution(model: String, timeMs: Long, colors: FreeChatColors) {
+internal fun MessageAttribution(model: String, timeMs: Long, colors: FreeChatColors, showZeroTime: Boolean = false) {
     val latin = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalLatinFontFamily.current)
     Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Text(model, modifier = Modifier.weight(1f, fill = false), style = latin,
             color = colors.TextTertiary, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        if (timeMs > 0) Text(formatThinkingTime(timeMs), style = latin, color = colors.TextTertiary)
+        if (timeMs > 0 || showZeroTime) Text(formatThinkingTime(timeMs), style = latin, color = colors.TextTertiary)
     }
 }
 
 // ========== 全屏图片预览 — 从缩略图展开/缩回 + 手势缩放 ==========
+// internal（1.1.26.3）：模拟设置页人物形象参考图的全屏预览复用同一壳（下载/手势行为一致）
 @Composable
-private fun ImagePreviewDialog(
+internal fun ImagePreviewDialog(
     images: List<PreviewImage>,
     initialIndex: Int,
     originRect: androidx.compose.ui.geometry.Rect?,
@@ -709,9 +754,32 @@ private suspend fun saveLocalImage(context: Context, path: String) {
 
 /** 推理过程折叠卡片 — 折叠时只显示标题+箭头，不显示任何思考内容 */
 @Composable
-private fun ReasoningBubble(messageId: String, reasoning: String, colors: FreeChatColors, callbacks: DisclosureCallbacks) {
+private fun ReasoningBubble(messageId: String, reasoning: String, colors: FreeChatColors, callbacks: DisclosureCallbacks,
+    session: ChatSessionState?, conversationId: String?, collapseThinking: Boolean = false,
+    replyStarted: Boolean = false) {
     val s = LocalStrings.current
-    MessageDisclosure("reasoning:$messageId", s.thinkingProcess, initiallyExpanded = true, callbacks = callbacks) {
+    var expanded by remember(session, conversationId, messageId) {
+        // 1.1.29.8：无手动记录时，折叠偏好下「回复已开流」的思考默认折起（思考中仍展开）。
+        // 1.1.29.9 实机返修：必须用**只读记录**（null=没动过）——旧版读 ?:true 兜底版永远拿非空，
+        // 首帧恒展开、再被下面的效果折掉，滚动重进视口就展开→折叠扑一轮高度（跳动病根，且随
+        // 「默认折叠思考过程」开关开/关而现/消）。首帧直接落目标态，扑动从根上不存在。
+        mutableStateOf(conversationId?.let { session?.reasoningExpandedRecord(it, messageId) }
+            ?: !(collapseThinking && replyStarted))
+    }
+    // 回复开流自动折起（只折一次——折完用户再展开就不再打扰）。
+    // 历史消息进来 replyStarted 已 true=视为已折过，滚动重进不重放（autoCollapsed 初值=replyStarted）
+    var autoCollapsed by remember(session, conversationId, messageId) { mutableStateOf(replyStarted) }
+    LaunchedEffect(collapseThinking, replyStarted) {
+        if (collapseThinking && replyStarted && !autoCollapsed) {
+            autoCollapsed = true
+            expanded = false
+        }
+    }
+    MessageDisclosure("reasoning:$messageId", s.thinkingProcess, initiallyExpanded = true, callbacks = callbacks,
+        expandedOverride = expanded, onExpandedChange = {
+            expanded = it
+            if (conversationId != null) session?.setReasoningExpanded(conversationId, messageId, it)
+        }) {
         SelectionBox(true) { Text(reasoning, style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary) }
     }
 }

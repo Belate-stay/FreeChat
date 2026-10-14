@@ -236,12 +236,7 @@ object Wire {
                 m.imagePaths.map { ImageSync.ensureCached(it) ?: it }.distinct().forEach { add(it) }
             })
             obj.add("imageUrls", JsonArray().apply {
-                m.imageUrls.map { u ->
-                    when {
-                        u.startsWith("http://") || u.startsWith("https://") -> u
-                        else -> ImageSync.ensureCached(u) ?: u   // 本机路径/data: 图 → 引用；转不动留原值
-                    }
-                }.distinct().forEach { add(it) }
+                m.imageUrls.map { ImageSync.ensureCached(it) ?: it }.distinct().forEach { add(it) }
             })
             obj.addProperty("attachmentPath", null as String?)
             obj.addProperty("quotedImagePath", null as String?)

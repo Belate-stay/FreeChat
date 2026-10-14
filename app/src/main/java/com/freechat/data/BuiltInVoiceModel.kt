@@ -9,16 +9,31 @@ object BuiltInVoiceModel {
     const val STOCK_ID = "MiMo-V2.5-TTS"
     const val DESIGN_ID = "MiMo-V2.5-TTS-VoiceDesign"
     const val CLONE_ID = "MiMo-V2.5-TTS-VoiceClone"
+    const val ASR_ID = "MiMo-V2.5-ASR"
     const val STOCK_API_ID = "mimo-v2.5-tts"
     const val DESIGN_API_ID = "mimo-v2.5-tts-voicedesign"
     const val CLONE_API_ID = "mimo-v2.5-tts-voiceclone"
+    const val ASR_API_ID = "mimo-v2.5-asr"
     const val API_BASE = "https://api.xiaomimimo.com/v1"
     const val ENDPOINT = "$API_BASE/chat/completions"
 
+    /**
+     * 1.1.28：备注统一「简介，作者自用 API，不保证随时在线」尾句（渲染层染红、无句号）。
+     * 音色设计/音色复刻**不进模型池**（哪儿都不显示，只在「自定义语音」页调用）——
+     * 池子收 STOCK（见 ChatViewModel 的过滤），这两条只留定义给自定义语音/调试页用。
+     */
     fun createAll(apiKey: String): List<ModelInfo> = listOf(
-        create(STOCK_ID, "MiMo-V2.5-TTS", "小米预置音色语音合成。", apiKey),
+        create(STOCK_ID, "MiMo-V2.5-TTS", "Xiaomi 语音合成模型，${BuiltInLanguageModel.RED_TAIL}", apiKey),
         create(DESIGN_ID, "MiMo 音色设计", "根据音色描述创建语音。需账号具有该模型权限。", apiKey),
         create(CLONE_ID, "MiMo 音色复刻", "根据参考音频合成语音。需账号具有该模型权限。", apiKey)
+    )
+
+    /** 内置语音识别模型（1.1.28 新增）：与语音合成同一家 API 共用 Key；备注口径同所有内置模型。 */
+    fun createAsr(apiKey: String): ModelInfo = ModelInfo(
+        id = ASR_ID, displayName = "MiMo-V2.5-ASR", provider = Provider.XIAOMI,
+        description = "Xiaomi 语音识别模型，${BuiltInLanguageModel.RED_TAIL}",
+        supportsWebSearch = false, supportsThinking = false, modelType = ModelType.ASR,
+        apiBaseUrl = API_BASE, apiKey = apiKey, isBuiltIn = true
     )
 
     private fun create(id: String, name: String, description: String, key: String) = ModelInfo(

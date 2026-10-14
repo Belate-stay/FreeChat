@@ -23,12 +23,14 @@ object ImageApiRequest {
 
     /** Seedream takes data URLs in JSON; OpenAI-compatible image edits take multipart image[]. */
     fun body(model: String, prompt: String, seedream: Boolean,
-        references: List<Reference> = emptyList()): RequestBody {
+        references: List<Reference> = emptyList(), size: String? = null): RequestBody {
         require(references.size <= 3)
         if (!seedream && references.isNotEmpty()) {
             return MultipartBody.Builder().setType(MultipartBody.FORM)
                 .addFormDataPart("model", model).addFormDataPart("prompt", prompt)
                 .apply {
+                    // 显式画幅（1.1.21.4）：不带 size 时画布跟参考图走，改比例改不动输出。
+                    if (size != null) addFormDataPart("size", size)
                     references.forEachIndexed { index, ref ->
                         val extension = when (ref.mime) { "image/png" -> "png"; "image/webp" -> "webp"; else -> "jpg" }
                         addFormDataPart("image[]", "reference_$index.$extension", ref.bytes.toRequestBody(ref.mime.toMediaType()))
@@ -38,6 +40,7 @@ object ImageApiRequest {
         // Keep provider defaults: even "auto" and n=1 are not universally supported.
         // Legacy model presets must never enter either JSON or multipart requests.
         val values = linkedMapOf<String, Any>("model" to model, "prompt" to prompt)
+        if (size != null) values["size"] = size
         if (references.isNotEmpty()) {
             val images = references.map { "data:${it.mime};base64,${java.util.Base64.getEncoder().encodeToString(it.bytes)}" }
             values["image"] = if (images.size == 1) images.single() else images

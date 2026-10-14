@@ -23,6 +23,42 @@ internal object VoiceInputMotion {
         return sqrt(dx * dx + dy * dy) <= minOf(width, height) / 2f + slop
     }
 
+    /** 取消指示器（红环+环绕红字）的摆放几何。angleRad=「语音键→指尖」射线方向，弧与文字关于它对称。 */
+    data class CancelRingPlacement(
+        val centerX: Float,
+        val centerY: Float,
+        val angleRad: Float,
+        val ringRadiusPx: Float,
+        val textRadiusPx: Float
+    )
+
+    /**
+     * 红环几何（1.1.29.9 工单⑥，实机两轮返修）：沿「语音键→指尖」射线越过指尖 gapPx 处取
+     * 弧中点 E（离指头足够远、不被手指盖住），环心 C = E − u·R；**触控点在环内** ⟺ gap < 2R
+     * （gap=64/R=40 满足）。弧的扇区朝拖出方向、随指尖实时转，整组恒在射线上。
+     * 指尖=语音键圆心的退化给默认朝上，避免 atan2(0,0) 抖方向。
+     */
+    fun cancelRingPlacement(
+        originX: Float, originY: Float,
+        fingerX: Float, fingerY: Float,
+        gapPx: Float, ringRadiusPx: Float, textExtraPx: Float
+    ): CancelRingPlacement {
+        val dx = fingerX - originX
+        val dy = fingerY - originY
+        val d = sqrt(dx * dx + dy * dy)
+        val angle = if (d < 1f) -Math.PI.toFloat() / 2f
+            else Math.atan2(dy.toDouble(), dx.toDouble()).toFloat()
+        val ux = if (d < 1f) 0f else dx / d
+        val uy = if (d < 1f) -1f else dy / d
+        return CancelRingPlacement(
+            centerX = fingerX + ux * (gapPx - ringRadiusPx),
+            centerY = fingerY + uy * (gapPx - ringRadiusPx),
+            angleRad = angle,
+            ringRadiusPx = ringRadiusPx,
+            textRadiusPx = ringRadiusPx + textExtraPx
+        )
+    }
+
     fun bandAt(bands: FloatArray, x: Float): Float {
         if (bands.isEmpty()) return 0f
         val at = x.coerceIn(0f, 1f) * (bands.size - 1)

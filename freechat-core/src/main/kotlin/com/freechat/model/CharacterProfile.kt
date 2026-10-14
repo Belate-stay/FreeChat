@@ -35,6 +35,8 @@ data class CharacterProfile(
     val visionModelId: String = "",              // 每角色独立识图模型（空=跟随全局）
     val visualModelId: String = "",              // 每角色独立生图模型（空=跟随全局）
     val enhancedSceneContinuity: Boolean = false, // 增强同元延续（Beta）：叙事生图可参考最近仍保留的场景图，老档案缺字段保持关闭
+    val imagePresetAspect: Int = 0,  // 图片预设·画幅（1.1.26.6）：0无声明/1=1:1/2=4:3横/3=4:3竖/4=3:2横/5=3:2竖——仅作提示词
+    val imagePresetSubject: Int = 0, // 图片预设·主体（1.1.26.6）：0无声明/1=完整场景/2=主角优先——仅作提示词
     val enableWebSearch: Boolean? = null,        // 每角色独立联网搜索（null=跟随全局）
     val appearanceText: String = "",             // 人物形象文字描述（身材/体型/外貌等）
     val appearanceImagePath: String = "",        // 【旧】人物形象参考图单路径（兼容 1.540 前数据，新代码勿写入）

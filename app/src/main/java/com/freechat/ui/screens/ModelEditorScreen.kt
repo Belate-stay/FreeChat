@@ -10,15 +10,18 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import com.freechat.ui.animation.jellyOverscroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.*
 import com.freechat.ui.animation.MotionButton as Button
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -62,6 +65,10 @@ import kotlinx.coroutines.launch
  *
  * Beta 1.0.96：只供自定义模型添加与编辑。内置模型定义不可编辑，密钥也不在此页展示。
  */
+
+/** 1.1.29.3 ①：添加页「导入已有多模态模型」卡片下缘的模糊带余量（16 上留白+48 卡+12 下留白） */
+private val ImportHeaderBandDp = 76.dp
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ModelEditorScreen(
@@ -73,8 +80,12 @@ fun ModelEditorScreen(
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
+    val context = LocalContext.current
     // Defense in depth for stale navigation/state restored from an earlier version.
-    if (!com.freechat.data.ModelAccessPolicy.canEdit(editing)) {
+    // 1.1.26.5：非开源区放行的内置模型编辑（进页查看/编辑，API Key 不显示）。
+    if (!com.freechat.data.ModelAccessPolicy.canEdit(editing) &&
+        !com.freechat.dev.DevMode.canEditBuiltIn(context)
+    ) {
         LaunchedEffect(editing) { onBack() }
         return
     }
@@ -118,6 +129,16 @@ fun ModelEditorScreen(
     var showUnsaved by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
 
+    // ===== 1.1.26.5 「导入已有多模态模型」：跨五个模型池快取信息免重输（B 提示框先弹） =====
+    var showImportHint by remember { mutableStateOf(false) }
+    var showImportPicker by remember { mutableStateOf(false) }
+    val languageModels by viewModel.languageModels.collectAsState()
+    val visualModels by viewModel.visualModels.collectAsState()
+    val visionModels by viewModel.visionModels.collectAsState()
+    val ttsModels by viewModel.ttsModels.collectAsState()
+    val asrModels by viewModel.asrModels.collectAsState()
+    val importSources = languageModels + visualModels + visionModels + ttsModels + asrModels
+
     fun tryBack() {
         if (hasChanges) showUnsaved = true else onBack()
     }
@@ -140,7 +161,20 @@ fun ModelEditorScreen(
             deepThinkingDefault = editing?.deepThinkingDefault ?: false,
             supportsNativeSearch = nativeSearch
         )
-        if (isAdd) viewModel.addCustomModel(m) else viewModel.updateCustomModel(editing!!.id, editing.modelType, m)
+        if (editing?.isBuiltIn == true) {
+            // 非开源区放行的内置编辑：保留内置身份/provider/密钥（密钥框对内置不显示），
+            // 能力位也维持内置定义原值——只让名称/备注/URL 这些外观接入信息生效
+            viewModel.updateBuiltInModel(m.copy(
+                isBuiltIn = true,
+                provider = editing.provider,
+                apiKey = editing.apiKey,
+                supportsWebSearch = editing.supportsWebSearch,
+                supportsThinking = editing.supportsThinking,
+                supportsDeepThinking = editing.supportsDeepThinking,
+                deepThinkingDefault = editing.deepThinkingDefault,
+                supportsNativeSearch = editing.supportsNativeSearch
+            ))
+        } else if (isAdd) viewModel.addCustomModel(m) else viewModel.updateCustomModel(editing!!.id, editing.modelType, m)
         onBack()
     }
 
@@ -170,17 +204,34 @@ fun ModelEditorScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                .verticalScroll(rememberScrollState())
-                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp), bottom = 40.dp)
-                .padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp))
+                .padding(horizontal = 20.dp)
         ) {
+            // 1.1.26.5：添加页顶部「导入已有多模态模型」——先弹模态适配提醒，再从五个模型池选模型快填。
+            // 1.1.29.3 ①：改**悬浮置顶**——画在模糊带之上、覆盖滚动表单（同模型池页「添加模型」），
+            // 分页线撤掉；表单自己滚、头部留出卡片占位。
+            if (isAdd) {
+                Spacer(Modifier.height(60.dp))
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .jellyOverscroll()
+                    .verticalScroll(com.freechat.ui.animation.rememberTopOnEntryScrollState())
+                    .padding(bottom = 40.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
             run {
                 // 1.0.71 顺序调整（用户点名）：名称 → URL地址 → API Key → 模型 ID → 获取模型列表 → 备注 → 上下文长度
+                // 1.1.29 工单⑤：必填项标签后缀红星，输入框内不再写「（必填）/（选填）」
                 EditorField(s.modelName, s.modelNameHint, name, { name = it }, colors)
-                EditorField(s.apiUrlLabel, s.apiUrlHint, apiUrl, { apiUrl = it }, colors)
-                EditorField(s.apiKeyLabel, s.apiKeyHint, apiKey, { apiKey = it }, colors, isPassword = true)
-                EditorField(s.modelIdLabel, s.modelIdHint, modelId, { modelId = it }, colors)
+                EditorField(s.apiUrlLabel, s.apiUrlHint, apiUrl, { apiUrl = it }, colors, required = true)
+                // 1.1.26.5：内置模型不显示 API Key（密钥是内置注入的，想显示也显示不了）
+                if (editing?.isBuiltIn != true) {
+                    EditorField(s.apiKeyLabel, s.apiKeyHint, apiKey, { apiKey = it }, colors, isPassword = true, required = true)
+                }
+                EditorField(s.modelIdLabel, s.modelIdHint, modelId, { modelId = it }, colors, required = true)
 
                 // ===== 获取模型列表（cc-switch 式；取不到照样手填） =====
                 Box(
@@ -282,9 +333,42 @@ fun ModelEditorScreen(
                     Text(s.saveModel, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
                 }
             }
+            }
         }
 
-        TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
+        // 1.1.29.3 ①：添加页模糊带下延到「导入已有多模态模型」卡片下方（内容上滑钻进高斯渐变被覆盖）
+        TopBarBackdrop(hazeState, colors.Background,
+            if (isAdd) HazeSpec.drawerTopBandHeightDp(statusBarHeightDp, ImportHeaderBandDp)
+            else HazeSpec.topBandHeightDp(statusBarHeightDp))
+
+        // 1.1.29.3 ①：「导入已有多模态模型」悬浮置顶——画在模糊带之上、覆盖滚动表单（分页线已撤）
+        if (isAdd) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp))
+                    .padding(horizontal = 20.dp)
+                    .height(48.dp)
+                    .editorSurface(colors, RoundedCornerShape(14.dp))
+                    .clickable { showImportHint = true },
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Download, null,
+                        tint = colors.Primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        s.importModelEntry,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                        color = colors.Primary
+                    )
+                }
+            }
+        }
 
         // 悬浮标题栏
         Row(
@@ -305,7 +389,7 @@ fun ModelEditorScreen(
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.weight(1f)
             )
-            if (!isAdd) {
+            if (!isAdd && editing?.isBuiltIn != true) {
                 HeaderIconButton(onClick = { showDelete = true }) {
                     Icon(Icons.Filled.DeleteOutline, s.deleteModel, tint = colors.ErrorRed, modifier = Modifier.size(22.dp))
                 }
@@ -393,6 +477,78 @@ fun ModelEditorScreen(
         ) {
             Text(s.deleteWarning, color = colors.TextSecondary)
         }
+
+        // 1.1.26.5 B：导入前先弹模态适配提醒——避免拿纯生图模型当语音/语言模型使，AI 不予回复
+        SheetPanel(
+            visible = showImportHint,
+            onDismiss = { showImportHint = false },
+            title = s.importModelHintTitle,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState,
+            confirmLabel = s.importModelContinue,
+            cancelLabel = s.cancel,
+            onConfirm = {
+                showImportHint = false
+                showImportPicker = true
+            }
+        ) {
+            Text(s.importModelHintBody, color = colors.TextSecondary)
+        }
+
+        // 五个模型池全量列出：点选即把信息填进输入框（可再改）；内置只给「获取」，不给详情
+        SheetPanel(
+            visible = showImportPicker,
+            onDismiss = { showImportPicker = false },
+            title = s.importModelPickerTitle,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                importSources.forEach { m ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                name = m.displayName
+                                modelId = m.id
+                                apiUrl = m.apiBaseUrl
+                                apiKey = m.apiKey
+                                note = m.description
+                                showImportPicker = false
+                            }
+                            .padding(horizontal = 16.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(m.displayName, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
+                            Text(
+                                when (m.modelType) {
+                                    ModelType.LANGUAGE -> s.languageModel
+                                    ModelType.VISUAL -> s.imageGenModel
+                                    ModelType.VISION -> s.visionModel
+                                    ModelType.TTS -> s.voiceTtsLabel
+                                    ModelType.ASR -> s.voiceAsrLabel
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.TextSecondary
+                            )
+                        }
+                        if (m.isBuiltIn) {
+                            Text(s.importBuiltinTag, style = MaterialTheme.typography.labelSmall, color = colors.TextTertiary)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -423,7 +579,10 @@ private fun Modifier.editorSurface(colors: FreeChatColors, shape: RoundedCornerS
     frostedCard(null, colors, true, shape, recessed = recessed, compact = compact, selected = selected,
         fallback = fallback)
 } else {
-    clip(shape).background(if (selected) colors.selectedFill else fallback)
+    // 选中态过渡动画与全 App 选项表同节奏（1.1.28）；边框只在未选中时在场，随透明度走硬切可接受
+    val fill by androidx.compose.animation.animateColorAsState(
+        if (selected) colors.selectedFill else fallback, com.freechat.ui.animation.FreeChatAnimation.colorTween, label = "editorSel")
+    clip(shape).background(fill)
         .then(if (selected) Modifier else Modifier.border(1.dp, colors.Divider.copy(alpha = 0.5f), shape))
 }
 
@@ -458,11 +617,18 @@ private fun EditorField(
     colors: FreeChatColors,
     isPassword: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    // 1.1.29 工单⑤：必填不再写进输入框预输入文案，改为标签后缀红星（如「API Key *」）；没星=选填
+    required: Boolean = false
 ) {
     val advanced = LocalAdvancedMaterial.current
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, fontWeight = FontWeight.Medium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, fontWeight = FontWeight.Medium)
+            if (required) {
+                Text(" *", style = MaterialTheme.typography.bodyMedium, color = colors.ErrorRed, fontWeight = FontWeight.Medium)
+            }
+        }
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,

@@ -28,6 +28,8 @@ object CharacterPresentationPolicy {
         visionModelId = draft.visionModelId,
         visualModelId = draft.visualModelId,
         enhancedSceneContinuity = draft.enhancedSceneContinuity,
+        imagePresetAspect = draft.imagePresetAspect,
+        imagePresetSubject = draft.imagePresetSubject,
         deepThinkingMode = draft.deepThinkingMode,
         enableWebSearch = draft.enableWebSearch,
     )

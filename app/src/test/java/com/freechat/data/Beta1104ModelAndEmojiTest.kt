@@ -13,7 +13,7 @@ class Beta1104ModelAndEmojiTest {
         assertEquals("deepseek-flash", model.id)
         assertEquals("DeepSeek-V4.1-Flash", model.displayName)
         assertEquals("https://api.deepseek.com", model.apiBaseUrl)
-        assertEquals("DeepSeek快速推理模型", model.description)
+        assertEquals("DeepSeek 快速推理模型，作者自用 API，不保证随时在线", model.description) // 1.1.28 统一内置备注口径
         assertEquals(Provider.CUSTOM, model.provider)
         assertTrue(model.supportsWebSearch)
         assertTrue(model.supportsDeepThinking)

@@ -32,9 +32,15 @@ class ImageRoutingQaActivity : ComponentActivity() {
             val server = ImageRoutingFixture()
             val id = "image-routing-qa-${UUID.randomUUID()}"
             try {
+                delay(1000) // Do not race the asynchronous settings loader.
                 val language = server.model("language-a", ModelType.LANGUAGE)
                 val visual = server.model("image-a", ModelType.VISUAL)
                 val vision = server.model("vision-a", ModelType.VISION)
+                val conversation = Conversation(id = id, title = "路由测试", rules = "QA_RULE：记住用户的喜好并结合上文回答")
+                state(vm, "_conversations", vm.conversations.value + conversation)
+                state(vm, "_autoSummarizeMemory", true)
+                com.freechat.data.MemoryManager().append(id, MemoryEntry(summary = "QA_MEMORY：用户喜欢蓝色的衣服",
+                    keywords = listOf("衣服"), kind = "plot"))
                 var rows = listOf(Message(role = Role.USER, content = "画一只穿黑裙子的白猫，全身照，水彩风格"))
                 suspend fun request(text: String, lang: ModelInfo = language, force: Boolean = false): Message {
                     val requestRows = if (rows.last().role == Role.USER && rows.last().content == text) rows
@@ -42,8 +48,11 @@ class ImageRoutingQaActivity : ComponentActivity() {
                     LocalStore.writeText(LocalStore.messagesFile(id), AppJson.gson.toJson(requestRows))
                     return withContext(RequestModels(lang, visual, vision)) { generate(vm, text, id, requestRows, force, lang, visual) }
                 }
+                state(vm, "_liveReasoning", "IMAGE QA REASONING")
                 val first = request(rows.last().content)
                 check(!first.failed && first.imageUrls.size == 1 && first.imagePrompt!!.contains("黑裙"))
+                check(java.io.File(first.imageUrls.single()).isFile && server.deliveries == 1) { "Remote result was not saved locally" }
+                check(first.reasoningContent == "IMAGE QA REASONING") { "Image completion lost its reasoning" }
                 rows = rows + first
                 val second = request("再来一张", server.model("mimo-v2.6-flash", ModelType.LANGUAGE))
                 check(!second.failed && second.imageUrls.size == 1 && second.imagePrompt!!.contains("水彩"))
@@ -54,11 +63,39 @@ class ImageRoutingQaActivity : ComponentActivity() {
                 check(server.chatRequests == 0) // Clear image requests never depend on LM tool support.
                 val generatedAgain = request("一只猫", force = true)
                 check(!generatedAgain.failed && generatedAgain.imageUrls.size == 1)
+                ChatViewModel::class.java.getDeclaredField("pendingQuoteText").apply { isAccessible = true }.set(vm, "QA_QUOTE")
                 val readPicture = request("这张图是什么？")
                 check(!readPicture.failed && readPicture.content == "这是一只猫")
                 check(server.visionRequests == 1)
-                val native = request("给这段文字配一个合适的视觉作品", server.model("language-native", ModelType.LANGUAGE))
+                listOf("QA_RULE", "QA_MEMORY", "QA_QUOTE", "黑裙", "data:image/").forEach { marker ->
+                    check(server.lastVision.contains(marker)) { "Vision context lost $marker" }
+                }
+                check(!server.lastVision.contains("\"enable_thinking\":false")) { "Vision disabled an enabled reasoning model" }
+                withContext(RequestModels(language, visual, vision)) {
+                    analyze(vm, java.util.Base64.getEncoder().encodeToString(java.io.File(first.imageUrls.single()).readBytes()), id, rows,
+                        CharacterProfile(name = "QA_PERSONA", dialogueMode = DialogueMode.WECHAT, deepThinkingMode = true))
+                }
+                listOf("QA_PERSONA", "QA_MEMORY", "QA_RULE", "黑裙").forEach { marker ->
+                    check(server.lastVision.contains(marker)) { "Companion vision context lost $marker" }
+                }
+                // Real Android bounds-only decoding must continue into compression, including >4MB originals.
+                withContext(Dispatchers.IO) {
+                    val random = java.util.Random(18)
+                    val pixels = IntArray(1400 * 1400) { 0xff000000.toInt() or random.nextInt(0x1000000) }
+                    val large = Bitmap.createBitmap(pixels, 1400, 1400, Bitmap.Config.ARGB_8888)
+                    val bytes = ByteArrayOutputStream().apply { large.compress(Bitmap.CompressFormat.PNG, 100, this) }.toByteArray()
+                    large.recycle()
+                    check(bytes.size > 4 * 1024 * 1024)
+                    val original = java.io.File(filesDir, "large-image-qa.png")
+                    LocalStore.writeBytes(original, bytes)
+                    val ref = requireNotNull(com.freechat.sync.ImageSync.ensureCached(original.absolutePath))
+                    val payload = com.freechat.sync.ImageSync.cacheFile(com.freechat.sync.ImageSync.hashOfRef(ref))
+                    check(payload.length() in 1..(4 * 1024 * 1024L) && payload.length() < bytes.size)
+                    com.freechat.sync.ImageSync.releaseUnreferenced(listOf(original.absolutePath))
+                }
+                val native = request("给这段文字配一个合适的视觉作品", server.model("language-native", ModelType.LANGUAGE).copy(supportsThinking = true))
                 check(!native.failed && native.imageUrls.size == 1)
+                check(native.reasoningContent.orEmpty().contains("NATIVE IMAGE REASONING")) { "Tool image lost model reasoning" }
                 val compatible = request("给这段文字配一个合适的视觉作品", server.model("language-rejects-tools", ModelType.LANGUAGE))
                 check(!compatible.failed && compatible.imageUrls.size == 1 && server.rejections == 1)
                 request("给这段文字配一个合适的视觉作品", server.model("language-rejects-tools", ModelType.LANGUAGE))
@@ -78,6 +115,7 @@ class ImageRoutingQaActivity : ComponentActivity() {
                 val replacement = vm.messages.value.last()
                 check(replacement.role == Role.ASSISTANT && !replacement.failed && replacement.imageUrls.size == 1)
                 check(replacement.id != first.id && replacement.imagePrompt == first.imagePrompt && vm.messages.value.size == 2)
+                check(!vm.isGeneratingImage.value && vm.generationModelName.value.isBlank()) { "Image presentation state did not settle" }
                 // An edited result must repeat its original edit using the still-retained prior picture.
                 rows = listOf(rows.first(), replacement)
                 val edited = request("背景换成海边", server.model("language-b", ModelType.LANGUAGE))
@@ -103,7 +141,7 @@ class ImageRoutingQaActivity : ComponentActivity() {
                 check(server.lastEdit.contains("image[]") && server.lastEdit.contains("海边"))
                 check(server.chatRequests == 4)
                 vm.conversations.value.find { it.id == id }?.let(vm::deleteConversation)
-                Log.i("ImageRoutingQA", "PASS edits=${server.edits} vision=1 native=1 fallback=2 rejection=1 regeneration=2 chat=${server.chatRequests}")
+                Log.i("ImageRoutingQA", "PASS edits=${server.edits} vision=2 context=standard+companion local_delivery=1 compression=1 native=1 fallback=2 rejection=1 regeneration=2 chat=${server.chatRequests}")
             } catch (e: Exception) { Log.e("ImageRoutingQA", "FAIL", e) }
             finally {
                 server.close()
@@ -113,6 +151,16 @@ class ImageRoutingQaActivity : ComponentActivity() {
             }
         }
     }
+
+    private suspend fun analyze(vm: ChatViewModel, base64: String, id: String, rows: List<Message>, character: CharacterProfile): Any =
+        suspendCoroutine<Any> { continuation ->
+            try {
+                val method = ChatViewModel::class.java.getDeclaredMethod("callVisionChat", List::class.java, String::class.java,
+                    String::class.java, List::class.java, CharacterProfile::class.java, Continuation::class.java).apply { isAccessible = true }
+                val result = method.invoke(vm, listOf(base64 to "image/png"), "结合上文分析图片", id, rows, character, continuation)
+                if (result !== COROUTINE_SUSPENDED) continuation.resume(requireNotNull(result))
+            } catch (e: Exception) { continuation.resumeWithException(e) }
+        }
 
     @Suppress("UNCHECKED_CAST")
     private fun state(vm: ChatViewModel, name: String, value: Any) {
@@ -141,6 +189,9 @@ private class ImageRoutingFixture : AutoCloseable {
     @Volatile var chatRequests = 0
     @Volatile var visionRequests = 0
     @Volatile var rejections = 0
+    @Volatile var deliveries = 0
+    @Volatile var lastVision = ""
+    private var generations = 0
     private val png = ByteArrayOutputStream().apply {
         Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff589ba6.toInt()) }
             .compress(Bitmap.CompressFormat.PNG, 100, this)
@@ -161,13 +212,16 @@ private class ImageRoutingFixture : AutoCloseable {
                     while (count < length) { val n = input.read(bytes, count, length - count); check(n > 0); count += n }
                     val body = bytes.toString(Charsets.UTF_8)
                     var status = "200 OK"
-                    val result = when {
+                    val result = if (path == "/delivery.png") { deliveries++; png } else when {
                         path.endsWith("/images/edits") -> { edits++; lastEdit = body; imageJson }
-                        path.endsWith("/images/generations") -> imageJson
+                        path.endsWith("/images/generations") -> {
+                            if (generations++ == 0) AppJson.gson.toJson(mapOf("data" to listOf(mapOf("url" to "http://127.0.0.1:${socket.localPort}/delivery.png"))))
+                            else imageJson
+                        }
                         path.endsWith("/chat/completions") -> {
                             val request = com.google.gson.JsonParser.parseString(body).asJsonObject
                             val model = request["model"].asString
-                            if (model == "vision-a") { visionRequests++; reply("这是一只猫") }
+                            if (model == "vision-a") { visionRequests++; lastVision = body; reply("这是一只猫") }
                             else {
                                 chatRequests++
                                 when {
@@ -175,7 +229,7 @@ private class ImageRoutingFixture : AutoCloseable {
                                         rejections++; status = "400 Bad Request"; "{\"error\":{\"message\":\"tools is not supported\"}}"
                                     }
                                     model == "language-native" -> AppJson.gson.toJson(mapOf("choices" to listOf(mapOf("message" to mapOf(
-                                        "content" to null, "tool_calls" to listOf(mapOf("id" to "fixture-call", "type" to "function", "function" to mapOf(
+                                        "content" to null, "reasoning_content" to "NATIVE IMAGE REASONING", "tool_calls" to listOf(mapOf("id" to "fixture-call", "type" to "function", "function" to mapOf(
                                             "name" to "generate_image", "arguments" to "{\"prompt\":\"一只白猫\"}"))))))))
                                     else -> { check(!request.has("tools")); reply("<freechat_tool>{\"name\":\"generate_image\",\"arguments\":{\"prompt\":\"一只白猫\"}}</freechat_tool>") }
                                 }
@@ -184,7 +238,7 @@ private class ImageRoutingFixture : AutoCloseable {
                         else -> error("Unexpected fixture route: $path")
                     }.toByteArray(Charsets.UTF_8)
                     connection.getOutputStream().apply {
-                        write("HTTP/1.1 $status\r\nContent-Type: application/json\r\nContent-Length: ${result.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                        write("HTTP/1.1 $status\r\nContent-Type: ${if (path == "/delivery.png") "image/png" else "application/json"}\r\nContent-Length: ${result.size}\r\nConnection: close\r\n\r\n".toByteArray())
                         write(result); flush()
                     }
                 }
@@ -192,7 +246,8 @@ private class ImageRoutingFixture : AutoCloseable {
         }, "image-routing-fixture").apply { isDaemon = true; start() }
     }
     fun model(id: String, type: ModelType) = ModelInfo(id, id, Provider.CUSTOM, supportsWebSearch = false,
-        supportsThinking = false, modelType = type, apiBaseUrl = "http://127.0.0.1:${socket.localPort}/v1", apiKey = "fixture-key")
+        supportsThinking = false, supportsDeepThinking = true, deepThinkingDefault = true,
+        modelType = type, apiBaseUrl = "http://127.0.0.1:${socket.localPort}/v1", apiKey = "fixture-key")
     private fun reply(content: String) = AppJson.gson.toJson(mapOf("choices" to listOf(mapOf("message" to mapOf("content" to content)))))
     override fun close() { socket.close() }
 }

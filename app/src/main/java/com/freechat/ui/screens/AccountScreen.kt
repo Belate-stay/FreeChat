@@ -5,9 +5,10 @@ import com.freechat.ui.components.HeaderIconButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
+import com.freechat.ui.animation.rememberTopOnEntryScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import com.freechat.ui.animation.jellyOverscroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
@@ -239,7 +240,8 @@ fun AccountScreen(onBack: () -> Unit) {
                     if (advancedMaterial) Modifier.hazeSource(state = hazeState)
                         .hazeBackground(colors.Background) else Modifier
                 )
-                .verticalScroll(rememberScrollState())
+                .jellyOverscroll()
+                .verticalScroll(rememberTopOnEntryScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 24.dp), bottom = 40.dp)
                 .padding(horizontal = 16.dp)
         ) {

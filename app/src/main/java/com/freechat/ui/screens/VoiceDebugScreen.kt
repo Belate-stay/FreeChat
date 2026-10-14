@@ -7,9 +7,9 @@ import com.freechat.ui.components.TopBarBackdropSource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import com.freechat.ui.animation.jellyOverscroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -122,7 +122,8 @@ fun VoiceDebugScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                .verticalScroll(rememberScrollState())
+                .jellyOverscroll()
+                .verticalScroll(com.freechat.ui.animation.rememberTopOnEntryScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeight), bottom = 32.dp)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)

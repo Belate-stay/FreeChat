@@ -73,8 +73,12 @@ object ImageTaskRouting {
         val selected = references.ifEmpty { if (followUp || (linked && kind == Kind.VISION)) previous?.let(::sources).orEmpty() else emptyList() }
         val previousPrompt = previous?.imagePrompt?.takeIf { it.isNotBlank() }
             ?: past.take(previousIndex.coerceAtLeast(0)).lastOrNull { it.role == Role.USER }?.content.orEmpty()
-        val prompt = if (kind == Kind.EDIT && followUp && references.isEmpty() && previousPrompt.isNotBlank() && !t.startsWith(previousPrompt))
-            "$previousPrompt\n\n本次画面要求（保留未要求改变的主体和细节，结合参考图）：\n$t" else t
+        val prompt = if (kind == Kind.EDIT && followUp && references.isEmpty() && previousPrompt.isNotBlank() && !t.startsWith(previousPrompt)) {
+            // 本次带新比例时清掉上一图 prompt 的旧画幅描述——两个比例在同一 prompt 里打架会加剧垫边。
+            val carried = if (ImageAspect.mentionsAspect(t)) ImageAspect.strip(previousPrompt) else previousPrompt
+            if (carried.isBlank()) t
+            else "$carried\n\n本次画面要求（保留未要求改变的主体和细节，结合参考图）：\n$t"
+        } else t
         return Plan(kind, prompt, if (kind == Kind.VISION) selected else selected.take(3),
             previous?.id?.takeIf { references.isEmpty() && selected.isNotEmpty() })
     }

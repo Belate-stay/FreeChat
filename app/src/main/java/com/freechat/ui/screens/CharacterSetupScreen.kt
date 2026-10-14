@@ -12,6 +12,7 @@ import android.graphics.Rect
 import androidx.compose.foundation.Image
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import com.freechat.data.CharacterPresentationPolicy
@@ -35,13 +36,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
+import com.freechat.ui.animation.jellyOverscroll
+import com.freechat.ui.animation.rememberTopOnEntryScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -56,6 +59,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -81,6 +85,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.freechat.data.ModelCatalog
 import com.freechat.data.ModelSelectionResolver
+import com.freechat.i18n.AppStrings
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.*
 import kotlinx.coroutines.launch
@@ -133,7 +138,7 @@ fun CharacterSetupScreen(
     val focusManager = LocalFocusManager.current
     val motionEnabled = LocalMotionEnabled.current
     val settingsScope = rememberCoroutineScope()
-    val settingsScrollState = rememberScrollState()
+    val settingsScrollState = rememberTopOnEntryScrollState()
     var functionalSettingsTop by remember { mutableIntStateOf(0) }
     val normInitial = initial?.normalized()
     val langModels by viewModel.languageModels.collectAsState()
@@ -168,6 +173,10 @@ fun CharacterSetupScreen(
     var visionModelId by remember { mutableStateOf(initial?.visionModelId ?: "") }
     var visualModelId by remember { mutableStateOf(initial?.visualModelId ?: "") }
     var enhancedSceneContinuity by remember { mutableStateOf(normInitial?.enhancedSceneContinuity ?: false) }
+    // 图片预设（1.1.26.6）：画幅/主体两组选项，仅作提示词随场景图请求送出
+    var imagePresetAspect by remember { mutableStateOf(normInitial?.imagePresetAspect ?: 0) }
+    var imagePresetSubject by remember { mutableStateOf(normInitial?.imagePresetSubject ?: 0) }
+    var showImagePresetSheet by remember { mutableStateOf(false) }
     var appearanceText by remember { mutableStateOf(initial?.appearanceText ?: "") }
     // 人物形象多图（最多 3 张）+ 对应识图结果
     var appearanceImagePaths by remember { mutableStateOf(normInitial?.appearanceImagePaths ?: emptyList()) }
@@ -233,6 +242,14 @@ fun CharacterSetupScreen(
     var showSaveConfirm by remember { mutableStateOf(false) }
     var showUnsavedChanges by remember { mutableStateOf(false) }
     var showMbtiIncomplete by remember { mutableStateOf(false) }
+    // 分享内容选择页（1.1.26.3 两层勾选）：角色设定/提示词必选恒开；默认全选=分支副本
+    // 是主打用法（场景图例外默认不勾——体积大，要用再勾）。
+    var showShareSheet by remember { mutableStateOf(false) }
+    var shareMemories by remember { mutableStateOf(true) }
+    var shareChats by remember { mutableStateOf(true) }
+    var shareAvatar by remember { mutableStateOf(true) }
+    var shareAppearance by remember { mutableStateOf(true) }
+    var shareSceneImages by remember { mutableStateOf(false) }
 
     fun deriveType(): String = buildString {
         append(if (mbtiEI < 0.5f) 'E' else 'I')
@@ -315,6 +332,8 @@ fun CharacterSetupScreen(
         visionModelId = visionModelId,
         visualModelId = visualModelId,
         enhancedSceneContinuity = enhancedSceneContinuity,
+        imagePresetAspect = imagePresetAspect,
+        imagePresetSubject = imagePresetSubject,
         enableWebSearch = webSearch,
         appearanceText = appearanceText.trim(),
         appearanceImagePaths = appearanceImagePaths,
@@ -362,7 +381,9 @@ fun CharacterSetupScreen(
             deepThinking = base.deepThinking,
             aiCreativity = base.aiCreativity,
             proactiveEnabled = base.proactiveEnabled,
-            enhancedSceneContinuity = base.enhancedSceneContinuity
+            enhancedSceneContinuity = base.enhancedSceneContinuity,
+            imagePresetAspect = base.imagePresetAspect,
+            imagePresetSubject = base.imagePresetSubject
         ) != base
     } ?: false
     // 功能设置独立于角色提示词：预览态可修改，保存/返回不会重新学习角色。
@@ -382,6 +403,8 @@ fun CharacterSetupScreen(
         visionModelId != initial.visionModelId ||
         visualModelId != initial.visualModelId ||
         enhancedSceneContinuity != initial.enhancedSceneContinuity ||
+        imagePresetAspect != initial.imagePresetAspect ||
+        imagePresetSubject != initial.imagePresetSubject ||
         webSearch != initial.enableWebSearch
     )
 
@@ -451,6 +474,13 @@ fun CharacterSetupScreen(
         supportingCast = profile.supportingCast
         worldRules = profile.worldRules
         userPersona = profile.userPersona
+        // 1.1.26.5 修：头像/形象参考图也得回填——分享包导入的图片全丢根因就在这行没写。
+        // 空缺依旧空缺：老格式（无图）导入不抹已设好的图。
+        if (profile.avatarPath.isNotBlank()) avatarPath = profile.avatarPath
+        if (profile.appearanceImagePaths.isNotEmpty()) {
+            appearanceImagePaths = profile.appearanceImagePaths
+            appearanceImageDescs = profile.appearanceImageDescs
+        }
         importedPersonaPrompt = profile.personaPrompt.ifBlank { null }
         if (adoptMode) dialogueMode = profile.dialogueMode
     }
@@ -459,6 +489,36 @@ fun CharacterSetupScreen(
         if (uri == null) return@rememberLauncherForActivityResult
         try {
             val json = context.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() }.orEmpty()
+            // 新格式分享包（1.1.26.3）：内容进暂存区+填表，**停在模拟设置页**继续调节；
+            // 点「创建角色」才成建（MainActivity 的 hasShareDraft 分支），不再导入即建
+            if (com.freechat.data.ShareExport.isShareFormat(json)) {
+                val profile = viewModel.importShareToDraft(json)
+                if (profile != null) {
+                    val currentMode = dialogueMode
+                    when {
+                        // 阶段一还没选模式：直接采用导入角色的模式并进阶段二
+                        !modeChosen -> {
+                            fillFormFromProfile(profile, adoptMode = true)
+                            modeChosen = true
+                            android.widget.Toast.makeText(context, s.importSuccess, android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        // 模式不一致：弹窗让用户选（切换模式 / 按当前模式投影导入）
+                        profile.dialogueMode != currentMode -> {
+                            pendingImport = profile
+                            showImportMismatch = true
+                        }
+                        else -> {
+                            fillFormFromProfile(profile, adoptMode = true)
+                            android.widget.Toast.makeText(context, s.importSuccess, android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } else {
+                    android.widget.Toast.makeText(context, s.shareImportFailed, android.widget.Toast.LENGTH_SHORT).show()
+                }
+                return@rememberLauncherForActivityResult
+            }
+            // 老格式 CharacterExport：走纯文本填表，清掉可能残留的分享包暂存（两条导入路不混用）
+            viewModel.clearShareDraft()
             val profile = viewModel.importCharacterFromJson(json)
             if (profile != null) {
                 val currentMode = dialogueMode
@@ -487,11 +547,24 @@ fun CharacterSetupScreen(
         }
     }
 
-    // 角色导出：生成 JSON 文件后走系统分享
+    // 角色导出：按勾选项生成分享包 JSON 后走系统分享（角色设定/提示词必选，恒可导）
     fun exportCharacter() {
         try {
-            val json = viewModel.exportCharacterJson(buildProfile())
-            val file = File(context.cacheDir, "${name.trim().ifBlank { "character" }}.freechat.json")
+            val json = viewModel.exportShareJson(
+                buildProfile(),
+                com.freechat.data.ShareExport.Options(
+                    avatar = shareAvatar,
+                    appearance = shareAppearance,
+                    chats = shareChats,
+                    sceneImages = shareSceneImages,
+                    memories = shareMemories
+                )
+            )
+            if (json == null) {
+                android.widget.Toast.makeText(context, s.shareExportNeedOne, android.widget.Toast.LENGTH_SHORT).show()
+                return
+            }
+            val file = File(context.cacheDir, "${name.trim().ifBlank { "character" }}.freechat-share.json")
             file.writeText(json)
             val uri = androidx.core.content.FileProvider.getUriForFile(context, "com.freechat.fileprovider", file)
             val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
@@ -499,7 +572,7 @@ fun CharacterSetupScreen(
                 putExtra(android.content.Intent.EXTRA_STREAM, uri)
                 addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            context.startActivity(android.content.Intent.createChooser(intent, s.exportCharacter))
+            context.startActivity(android.content.Intent.createChooser(intent, s.shareExportAction))
         } catch (_: Exception) {
             android.widget.Toast.makeText(context, s.exportFailed, android.widget.Toast.LENGTH_SHORT).show()
         }
@@ -586,6 +659,8 @@ fun CharacterSetupScreen(
                 // 放后面就成了「滚动内容里的一段留白」，视口还是被键盘盖着的那一整屏，
                 // 光标该被挡住还是被挡住。放前面 = 可视区真的变矮，内容才有地方滚上来。
                 .imePadding()
+                // 果冻边界冗余（1.1.26.6）：顶/底继续拖跟手位移带阻尼，松手回弹
+                .jellyOverscroll()
                 .verticalScroll(settingsScrollState)
                 .padding(top = settingsTopPadding, bottom = 40.dp)
                 .padding(horizontal = 16.dp),
@@ -927,28 +1002,34 @@ fun CharacterSetupScreen(
                             colors = outlinedColors(colors)
                         )
                     }
+                    // 1.1.26.3：点图进全屏预览（Chat 页同款壳，含缩放/拖拽/下载）；
+                    // 删除 X 只在编辑态渲染——预览态点了没用的按钮不该存在
+                    var appearancePreview by remember { mutableStateOf<String?>(null) }
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         appearanceImagePaths.forEachIndexed { idx, path ->
                             Box {
                                 AsyncImage(
                                     model = File(path),
                                     contentDescription = null,
-                                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)),
+                                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(12.dp))
+                                        .clickable { appearancePreview = path },
                                     contentScale = ContentScale.Crop
                                 )
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .size(20.dp)
-                                        .clip(CircleShape)
-                                        .background(Color.Black.copy(alpha = 0.55f))
-                                        .clickable(enabled = canEditPersona) {
-                                            appearanceImagePaths = appearanceImagePaths.filterIndexed { i, _ -> i != idx }
-                                            appearanceImageDescs = appearanceImageDescs.filterIndexed { i, _ -> i != idx }
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Filled.Close, null, tint = Color.White, modifier = Modifier.size(12.dp))
+                                if (canEditPersona) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .size(20.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.Black.copy(alpha = 0.55f))
+                                            .clickable {
+                                                appearanceImagePaths = appearanceImagePaths.filterIndexed { i, _ -> i != idx }
+                                                appearanceImageDescs = appearanceImageDescs.filterIndexed { i, _ -> i != idx }
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Filled.Close, null, tint = Color.White, modifier = Modifier.size(12.dp))
+                                    }
                                 }
                             }
                         }
@@ -968,6 +1049,14 @@ fun CharacterSetupScreen(
                                 }
                             }
                         }
+                    }
+                    appearancePreview?.let { path ->
+                        com.freechat.ui.components.ImagePreviewDialog(
+                            images = listOf(com.freechat.ui.components.PreviewImage("", path)),
+                            initialIndex = 0,
+                            originRect = null,
+                            onDismiss = { appearancePreview = null }
+                        )
                     }
                 }
             }
@@ -1428,8 +1517,8 @@ fun CharacterSetupScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(Modifier.weight(1f)) {
+                                    // 1.1.29.9 返修：小字删除，与「联网搜索」一致只留标题
                                     Text(s.deepThinkingMode, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                    Text(s.deepThinkingModeDesc, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
                                 }
                                 Switch(
                                     enabled = true,
@@ -1460,40 +1549,61 @@ fun CharacterSetupScreen(
                                     Text(if (generates) s.imageGenModel else s.visionModel, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
                                     Text(models.find { it.id == selectedId }?.displayName
                                         ?: "${s.followGlobal} · ${globalModel?.displayName ?: s.notSelected}",
-                                        style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
+                                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
                                 }
                                 Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
                             }
                             HorizontalDivider(color = colors.Divider.copy(alpha = 0.4f), modifier = Modifier.padding(horizontal = 14.dp))
                             if (generates) {
-                                SettingsRow {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(Modifier.weight(1f)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(s.enhancedSceneContinuity, modifier = Modifier.weight(1f, fill = false),
-                                                    style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                                BetaTag(s.betaTag, colors)
-                                            }
-                                            Text(s.enhancedSceneContinuityDesc,
-                                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
-                                                color = colors.TextSecondary)
-                                        }
-                                        Switch(
-                                            enabled = true,
-                                            checked = enhancedSceneContinuity,
-                                            onCheckedChange = { enhancedSceneContinuity = it },
-                                            colors = SwitchDefaults.colors(
-                                                checkedThumbColor = colors.OnPrimary,
-                                                checkedTrackColor = colors.Primary,
-                                                uncheckedThumbColor = colors.TextTertiary,
-                                                uncheckedTrackColor = colors.SurfaceVariant
-                                            )
+                                // 图片预设（1.1.26.6）：生图模型与增强同元延续之间；选中的画幅/主体随提示词送出
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { showImagePresetSheet = true }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(s.imagePreset, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                                        Text(
+                                            buildList {
+                                                if (imagePresetAspect != 0) add(imagePresetAspectLabel(imagePresetAspect, s))
+                                                if (imagePresetSubject != 0) add(imagePresetSubjectLabel(imagePresetSubject, s))
+                                            }.ifEmpty { listOf(s.imagePresetNone) }.joinToString(" · "),
+                                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary
                                         )
                                     }
+                                    Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                                }
+                                HorizontalDivider(color = colors.Divider.copy(alpha = 0.4f), modifier = Modifier.padding(horizontal = 14.dp))
+                                // 1.1.26.3：去掉 SettingsRow 独立卡壳，裸行进既有卡（对齐「深度思考」写法）
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(s.enhancedSceneContinuity, modifier = Modifier.weight(1f, fill = false),
+                                                style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                                            BetaTag(s.betaTag, colors)
+                                        }
+                                        Text(s.enhancedSceneContinuityDesc,
+                                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
+                                            color = colors.TextSecondary)
+                                    }
+                                    Switch(
+                                        enabled = true,
+                                        checked = enhancedSceneContinuity,
+                                        // 1.1.29.9 返修：开启走「代价确认」二次卡片（可能大幅增长回复时长）
+                                        onCheckedChange = { on ->
+                                            if (on) pendingHeavy = HeavyToggle.SCENE_CONTINUITY else enhancedSceneContinuity = false
+                                        },
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = colors.OnPrimary,
+                                            checkedTrackColor = colors.Primary,
+                                            uncheckedThumbColor = colors.TextTertiary,
+                                            uncheckedTrackColor = colors.SurfaceVariant
+                                        )
+                                    )
                                 }
                                 HorizontalDivider(color = colors.Divider.copy(alpha = 0.4f), modifier = Modifier.padding(horizontal = 14.dp))
                             }
@@ -1580,7 +1690,7 @@ fun CharacterSetupScreen(
                 Icon(Icons.Filled.Tune, s.jumpToFunctionalSettings, tint = colors.TextSecondary)
             }
             if (isEditing) {
-                HeaderIconButton(onClick = { exportCharacter() }) {
+                HeaderIconButton(onClick = { showShareSheet = true }) {
                     Icon(Icons.Filled.Share, s.exportCharacter, tint = colors.TextSecondary, modifier = Modifier.size(22.dp))
                 }
             } else {
@@ -1746,6 +1856,86 @@ fun CharacterSetupScreen(
             Text(s.mbtiIncompleteMessage, color = colors.TextSecondary)
         }
 
+        // 分享内容选择页（1.1.26.3 两层勾选）：勾选后导出为一个 json，再走系统分享。
+        // 角色设定/提示词必选恒勾；头像/形象参考图是它的下拉子项；文字消息随聊天记录必勾，
+        // 场景图是聊天记录的下拉子项。勾什么导什么，导入后对应功能无缝衔接。
+        SheetPanel(
+            visible = showShareSheet,
+            onDismiss = { showShareSheet = false },
+            title = s.shareDialogTitle,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState,
+            confirmLabel = s.shareExportAction,
+            confirmEnabled = true,
+            onConfirm = { showShareSheet = false; exportCharacter() }
+        ) {
+            ShareCheckRow(s.shareOptPersona, checked = true, locked = true, colors = colors) {}
+            ShareCheckRow(s.shareOptPrompt, checked = true, locked = true, indent = true, colors = colors) {}
+            ShareCheckRow(s.shareOptAvatar, shareAvatar, indent = true, colors = colors) { shareAvatar = !shareAvatar }
+            ShareCheckRow(s.shareOptAppearance, shareAppearance, indent = true, colors = colors) { shareAppearance = !shareAppearance }
+            ShareCheckRow(s.shareOptChats, shareChats, colors = colors) { shareChats = !shareChats }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = shareChats,
+                enter = FreeChatAnimation.expandEnter(),
+                exit = FreeChatAnimation.expandExit()
+            ) {
+                Column {
+                    ShareCheckRow(s.shareOptText, checked = true, locked = true, indent = true, colors = colors) {}
+                    ShareCheckRow(s.shareOptScene, shareSceneImages, indent = true, colors = colors) { shareSceneImages = !shareSceneImages }
+                }
+            }
+            ShareCheckRow(s.shareOptMemories, shareMemories, colors = colors) { shareMemories = !shareMemories }
+        }
+
+        // 图片预设选择卡（1.1.26.6，1.1.26.9 排版分层）：画幅/主体两组单选，默认「无声明」＝不写入额外提示词
+        // 层级语言（1.1.28 排版返修）：主题色粗体小标题与弹层标题同竖直线、选项直接在卡面上、
+        // 选中=全 App 统一的主题色实心底（selectedFill）过渡动画
+        SheetPanel(
+            visible = showImagePresetSheet,
+            onDismiss = { showImagePresetSheet = false },
+            title = s.imagePreset,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    s.imagePresetDesc,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.TextSecondary,
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+                PresetSectionHeader(s.imagePresetAspectSection, colors)
+                listOf(
+                    0 to s.imagePresetNone,
+                    1 to s.imagePreset11,
+                    2 to s.imagePreset43h,
+                    3 to s.imagePreset43v,
+                    4 to s.imagePreset32h,
+                    5 to s.imagePreset32v
+                ).forEach { (value, label) ->
+                    SheetOption(
+                        selected = imagePresetAspect == value,
+                        title = label,
+                        colors = colors,
+                        onClick = { imagePresetAspect = value }
+                    )
+                }
+                PresetSectionHeader(s.imagePresetSubjectSection, colors)
+                SheetOption(selected = imagePresetSubject == 0, title = s.imagePresetNone, colors = colors, onClick = { imagePresetSubject = 0 })
+                SheetOption(selected = imagePresetSubject == 1, title = s.imagePresetFullScene, subtitle = s.imagePresetFullSceneDesc, colors = colors, onClick = { imagePresetSubject = 1 })
+                SheetOption(selected = imagePresetSubject == 2, title = s.imagePresetSubjectFirst, subtitle = s.imagePresetSubjectFirstDesc, colors = colors, onClick = { imagePresetSubject = 2 })
+            }
+        }
+
         // 头像三选项（查看 / 编辑 / 更换；查看与编辑只在已有头像时可点）
         SheetPanel(
             visible = showAvatarMenu,
@@ -1798,7 +1988,9 @@ fun CharacterSetupScreen(
                 com.freechat.model.ModelType.VISUAL, sceneModels), title = s.followGlobal,
                 colors = colors, onClick = { visualModelId = ""; showVisualPicker = false })
             sceneModels.forEach { m ->
+                // 备注与语言/识图模型选择卡同款展示（1.1.29.9 返修：此处曾漏掉 subtitle）
                 SheetOption(selected = m.id == visualModelId, title = m.displayName,
+                    subtitle = com.freechat.ui.components.modelDescTwoLines(com.freechat.i18n.localizedModelDesc(m, s)),
                     colors = colors, monoTitle = true,
                     onClick = { visualModelId = m.id; showVisualPicker = false })
             }
@@ -1822,26 +2014,38 @@ fun CharacterSetupScreen(
         // token 和等待时间都是成倍地涨。原来只有开关下面那行小字提一句，等于没说 ——
         // 用户是在**点开的那一瞬间**该知道代价，所以拦一个浮层：红字点明代价，两个选择都摆在台面上。
         //
-        // 按钮分配跟「关闭联网搜索」那张保持一致：主按钮站**现状**(取消)，行内那个才是「仍然开启」。
-        // 行内那个用链接样式（蓝色斜体下划线）—— 1.0.53 起两个二级风险弹层统一（见 SheetActionRow 的 link）。
+        // 1.1.26.1 按钮改版：「仍然开启」行内链接换成确定/取消一行双钮（取消在左、确定在右主题色，
+        // 与版本更新提示弹窗同款）——风险提示口吻，不再是「仍然…」式严重警告。文字内容不动。
         SheetPanel(
             visible = pendingHeavy != null,
             onDismiss = { pendingHeavy = null },
             title = when (pendingHeavy ?: lastHeavy) {
                 HeavyToggle.TIME_PERCEPTION -> s.timePerception
                 HeavyToggle.DEEP_THINKING -> s.deepThinking
+                HeavyToggle.SCENE_CONTINUITY -> s.enhancedSceneContinuity
                 else -> s.highQualityMemory
             },
             colors = colors,
             isDark = isDark,
             advancedMaterial = advancedMaterial,
             hazeState = hazeState,
-            confirmLabel = s.cancel,
-            onConfirm = { pendingHeavy = null }
+            confirmLabel = s.confirm,
+            cancelLabel = s.cancel,
+            onConfirm = {
+                when (pendingHeavy) {
+                    HeavyToggle.RETRIEVAL -> highQualityMemory = true
+                    HeavyToggle.DEEP_THINKING -> deepThinking = true
+                    HeavyToggle.TIME_PERCEPTION -> { timePerception = true; sleepSimulation = false }
+                    HeavyToggle.SCENE_CONTINUITY -> enhancedSceneContinuity = true
+                    null -> Unit
+                }
+                pendingHeavy = null
+            }
         ) {
-            if ((pendingHeavy ?: lastHeavy) == HeavyToggle.TIME_PERCEPTION) {
-                Text(s.timePerceptionConfirm, color = colors.TextSecondary)
-            } else Text(
+            when (pendingHeavy ?: lastHeavy) {
+                HeavyToggle.TIME_PERCEPTION -> Text(s.timePerceptionConfirm, color = colors.TextSecondary)
+                HeavyToggle.SCENE_CONTINUITY -> Text(s.sceneContinuityConfirm, color = colors.TextSecondary)
+                else -> Text(
                 buildAnnotatedString {
                     append(s.heavyWarnHead)
                     // 代价那半句上红 —— 整句里最该被看见的就是它
@@ -1852,25 +2056,17 @@ fun CharacterSetupScreen(
                 },
                 color = colors.TextSecondary
             )
-            Spacer(Modifier.height(4.dp))
-            SheetActionRow(s.stillEnable, colors, link = true) {
-                when (pendingHeavy) {
-                    HeavyToggle.RETRIEVAL -> highQualityMemory = true
-                    HeavyToggle.DEEP_THINKING -> deepThinking = true
-                    HeavyToggle.TIME_PERCEPTION -> { timePerception = true; sleepSimulation = false }
-                    null -> Unit
-                }
-                pendingHeavy = null
             }
         }
     }
 }
 
 /**
- * 打开前要先讲代价的两个重开关：
- * 增强检索（[CharacterProfile.highQualityMemory]）与深度推演（[CharacterProfile.deepThinking]）。
+ * 打开前要先讲代价的重开关：
+ * 增强检索（[CharacterProfile.highQualityMemory]）、深度推演（[CharacterProfile.deepThinking]）、
+ * 时间感知与增强同元延续（可能大幅增长回复时长）。
  */
-private enum class HeavyToggle { RETRIEVAL, DEEP_THINKING, TIME_PERCEPTION }
+private enum class HeavyToggle { RETRIEVAL, DEEP_THINKING, TIME_PERCEPTION, SCENE_CONTINUITY }
 
 /** AI创造力取值区间与精度：1.0~10.0，落点吸附在十分位（与旧 Slider 的 steps=89 等价） */
 private const val CREATIVITY_MIN = 1f
@@ -2174,11 +2370,14 @@ private fun BoxScope.MbtiTypeSheet(
             ) {
                 row.forEach { t ->
                     val sel = t == current
+                    // 选中态过渡动画与全 App 选项表同节奏（1.1.28，不再硬切闪变）
+                    val fill by animateColorAsState(if (sel) colors.selectedFill else Color.Transparent, com.freechat.ui.animation.FreeChatAnimation.colorTween, label = "mbtiFill")
+                    val textColor by animateColorAsState(if (sel) colors.selectedText else colors.TextPrimary, com.freechat.ui.animation.FreeChatAnimation.colorTween, label = "mbtiText")
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (sel) colors.selectedFill else Color.Transparent)
+                            .background(fill)
                             .clickable { onSelect(t) }
                             .padding(vertical = 12.dp),
                         contentAlignment = Alignment.Center
@@ -2186,7 +2385,7 @@ private fun BoxScope.MbtiTypeSheet(
                         Text(
                             t,
                             fontFamily = LocalMonoFontFamily.current,
-                            color = if (sel) colors.selectedText else colors.TextPrimary,
+                            color = textColor,
                             fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal
                         )
                     }
@@ -2235,7 +2434,7 @@ private fun BoxScope.LangModelSheet(
             SheetOption(
                 selected = ModelSelectionResolver.find(current, ModelType.LANGUAGE, models) == m,
                 title = m.displayName,
-                subtitle = com.freechat.i18n.localizedModelDesc(m, s),
+                subtitle = com.freechat.ui.components.modelDescTwoLines(com.freechat.i18n.localizedModelDesc(m, s)),
                 colors = colors,
                 // 模型名是"代码感"的字符串，沿用原来的等宽字体
                 monoTitle = true,
@@ -2283,7 +2482,7 @@ private fun BoxScope.VisionModelSheet(
             SheetOption(
                 selected = m.id == current,
                 title = m.displayName,
-                subtitle = com.freechat.i18n.localizedModelDesc(m, s),
+                subtitle = com.freechat.ui.components.modelDescTwoLines(com.freechat.i18n.localizedModelDesc(m, s)),
                 colors = colors,
                 monoTitle = true,
                 onClick = { onSelect(m.id) }
@@ -2318,6 +2517,68 @@ private fun BetaTag(text: String, colors: FreeChatColors) {
     }
 }
 
+
+/**
+ * 图片预设小标题（1.1.26.9 加，1.1.28 排版返修）：与弹层标题「图片预设」同一竖直线、
+ * 前面无缩进无空格（分组卡与竖条按用户反馈撤掉，层级全靠主题色粗体文字排版）。
+ */
+@Composable
+private fun PresetSectionHeader(title: String, colors: FreeChatColors) {
+    Text(
+        title,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold,
+        color = colors.Primary,
+        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
+    )
+}
+
+private fun imagePresetAspectLabel(v: Int, s: AppStrings): String = when (v) {
+    1 -> s.imagePreset11
+    2 -> s.imagePreset43h
+    3 -> s.imagePreset43v
+    4 -> s.imagePreset32h
+    5 -> s.imagePreset32v
+    else -> s.imagePresetNone
+}
+
+private fun imagePresetSubjectLabel(v: Int, s: AppStrings): String = when (v) {
+    1 -> s.imagePresetFullScene
+    2 -> s.imagePresetSubjectFirst
+    else -> s.imagePresetNone
+}
+
+/** 分享内容勾选行（NoticeDialog 同款 0.85 倍勾选框）；locked=必选项：恒勾、禁点、灰字 */
+@Composable
+private fun ShareCheckRow(
+    label: String,
+    checked: Boolean,
+    locked: Boolean = false,
+    indent: Boolean = false,
+    colors: FreeChatColors,
+    onToggle: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (indent) Modifier.padding(start = 28.dp) else Modifier)
+            .clickable(enabled = !locked) { onToggle() }
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = { if (!locked) onToggle() },
+            enabled = !locked,
+            colors = CheckboxDefaults.colors(checkedColor = colors.Primary),
+            modifier = Modifier.scale(0.85f)
+        )
+        Text(
+            label,
+            color = if (locked) colors.TextSecondary else colors.TextPrimary,
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
 
 /** 单次回复长度（叙事档专属；1.0.93 起从对话模式卡里拆出——模式区两态都可能用它） */
 @Composable

@@ -5,5 +5,8 @@
         <activity android:name="com.freechat.qa.RenderQaActivity" android:exported="true"
             android:windowSoftInputMode="adjustNothing" />
         <activity android:name="com.freechat.qa.ImageRoutingQaActivity" android:exported="true" />
+        <activity android:name="com.freechat.qa.ChatPresentationQaActivity" android:exported="true"
+            android:windowSoftInputMode="adjustNothing" />
+        <activity android:name="com.freechat.qa.ImageRevealQaActivity" android:exported="true" />
     </application>
 </manifest>

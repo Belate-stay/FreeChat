@@ -21,11 +21,15 @@ import java.util.concurrent.Executors
  *
  * 配置走环境变量（systemd EnvironmentFile=/etc/freechat/companion.env）：
  *   FREECHAT_DB=/var/lib/freechat/freechat.db
- *   XIAOMI_API_KEY=sk-…          （内置 mimo 代调，方案 v2「凭据零配置、成本用户自担」）
+ *   DEEPSEEK_API_KEY=sk-…        （内置 deepseek-flash 代调，1.1.30X 换代；
+ *                                  旧 XIAOMI_API_KEY 仍兜底认，但那把是小米的钥——
+ *                                  部署时 companion.env 必须换成 DeepSeek 的 Key）
  */
 fun main() {
     val dbPath = System.getenv("FREECHAT_DB") ?: "/var/lib/freechat/freechat.db"
-    val apiKey = System.getenv("XIAOMI_API_KEY") ?: error("XIAOMI_API_KEY is required")
+    val apiKey = System.getenv("DEEPSEEK_API_KEY")
+        ?: System.getenv("XIAOMI_API_KEY")
+        ?: error("DEEPSEEK_API_KEY is required")
     val port = (System.getenv("FREECHAT_COMPANION_PORT") ?: "3100").toInt()
 
     val store = CompanionStore(dbPath)

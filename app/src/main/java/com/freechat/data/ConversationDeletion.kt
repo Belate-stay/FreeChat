@@ -104,7 +104,7 @@ object ConversationDeletion {
         val unused = hashes - survivorHashes
         val root = LocalStore.filesDir().canonicalFile.toPath()
         for (path in paths) {
-            val file = runCatching { File(path).canonicalFile }.getOrNull() ?: continue
+            val file = runCatching { File(GeneratedImageStore.cachedSource(path) ?: path).canonicalFile }.getOrNull() ?: continue
             val hash = ImageSync.refForLocal(path)?.let(ImageSync::hashOfRef)
             if (path !in survivorPaths && (hash == null || hash in unused) && file.toPath().startsWith(root) && file.isFile) {
                 check(file.delete()) { "Unable to delete conversation file ${file.name}" }

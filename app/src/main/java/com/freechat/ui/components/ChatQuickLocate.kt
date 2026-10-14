@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import com.freechat.i18n.LocalStrings
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.animation.MotionPolicy
+import com.freechat.ui.animation.LocalMotionEnabled
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.LocalColorTheme
@@ -58,7 +59,7 @@ fun ChatQuickLocate(visible: Boolean, list: LazyListState, items: List<ChatScrol
     val monochrome = LocalColorTheme.current == ColorTheme.WHITE
     val thumbColor = if (monochrome) Color.Black else colors.Primary
     val railColor = if (monochrome && isDark) Color(0xFFDDE1E5)
-        else lerp(colors.Surface, colors.TextPrimary, if (isDark) 0.10f else 0.05f)
+        else lerp(colors.Surface, colors.TextPrimary, if (isDark) 0.12f else 0.07f)
     val travel = with(density) { MotionPolicy.LocatorTravelDp.dp.roundToPx() }
     val latestDismiss by rememberUpdatedState(onDismiss)
     var dragging by remember(conversationId) { mutableStateOf(false) }
@@ -132,10 +133,13 @@ fun ChatQuickLocate(visible: Boolean, list: LazyListState, items: List<ChatScrol
             seeks.trySend(requestedFraction)
         }
         val shown = if (dragging) requestedFraction else position
+        val latestPosition by rememberUpdatedState(position)
         val thumbScale by animateFloatAsState(if (dragging) 1f else 0f,
-            FreeChatAnimation.thumbSpring, label = "quick_locate_thumb")
-        val inset = QuickLocatePolicy.insetForHeight(trackHeight.toFloat(), with(density) { 24.dp.toPx() })
-        val thumbHalf = QuickLocatePolicy.thumbHalfHeight(inset, with(density) { 16.dp.toPx() })
+            if (LocalMotionEnabled.current) FreeChatAnimation.thumbSpring else androidx.compose.animation.core.snap(), label = "quick_locate_thumb")
+        // A fixed gesture axis prevents hold-growth from moving the thumb away from the finger.
+        val innerInset = QuickLocatePolicy.insetForHeight(trackHeight * .90f, with(density) { 24.dp.toPx() })
+        val inset = trackHeight * .05f + innerInset
+        val thumbHalf = QuickLocatePolicy.thumbHalfHeight(innerInset, with(density) { 16.dp.toPx() })
         val thumbY = ((trackHeight - inset * 2f).coerceAtLeast(0f) * shown + inset).roundToInt()
         val timeIndex by remember(list, conversationId) { derivedStateOf {
             // Offscreen heights are estimates. Label the row actually on screen, not a second
@@ -167,30 +171,33 @@ fun ChatQuickLocate(visible: Boolean, list: LazyListState, items: List<ChatScrol
                     Key.MoveEnd -> { request(1f); true }
                     else -> false
                 }
-            }.pointerInput(conversationId, inset) {
+            }.pointerInput(conversationId) {
                 awaitEachGesture {
                     val down = awaitFirstDown()
-                    val center = ((size.height - inset * 2f).coerceAtLeast(0f) * position + inset)
+                    val gestureInset = size.height * .05f + QuickLocatePolicy.insetForHeight(size.height * .90f,
+                        with(density) { 24.dp.toPx() })
+                    val center = ((size.height - gestureInset * 2f).coerceAtLeast(0f) * latestPosition + gestureInset)
                     val grab = QuickLocatePolicy.grabOffset(down.position.y, center, with(density) { 26.dp.toPx() })
                     dragging = true
                     down.consume()
-                    request(QuickLocatePolicy.trackFraction(down.position.y - grab, size.height.toFloat(), inset))
+                    request(QuickLocatePolicy.trackFraction(down.position.y - grab, size.height.toFloat(), gestureInset))
                     try {
                         var pressed: Boolean
                         do {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            request(QuickLocatePolicy.trackFraction(change.position.y - grab, size.height.toFloat(), inset))
+                            request(QuickLocatePolicy.trackFraction(change.position.y - grab, size.height.toFloat(), gestureInset))
                             event.changes.forEach { it.consume() }
                             pressed = change.pressed
                         } while (pressed)
                     } finally { dragging = false; activity++ }
                 }
             }) {
-            Box(Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(10.dp)
-                .shadow(if (advanced) 6.dp else 4.dp, trackShape, clip = false,
-                    ambientColor = Color.Black.copy(alpha = if (isDark) 0.6f else 0.3f),
-                    spotColor = Color.Black.copy(alpha = if (isDark) 0.6f else 0.3f))
+            Box(Modifier.align(Alignment.CenterEnd).fillMaxHeight(.90f).width(10.dp)
+                .graphicsLayer { scaleX = 1f + thumbScale * .25f; scaleY = 1f + thumbScale / 9f }
+                .shadow(if (advanced) 9.dp else 7.dp, trackShape, clip = false,
+                    ambientColor = Color.Black.copy(alpha = if (isDark) 0.65f else 0.4f),
+                    spotColor = Color.Black.copy(alpha = if (isDark) 0.65f else 0.4f))
                 .background(railColor, trackShape))
             Box(Modifier.align(Alignment.TopEnd)
                 .offset { IntOffset(-with(density) { 2.dp.roundToPx() }, thumbY - thumbHalf.roundToInt()) }

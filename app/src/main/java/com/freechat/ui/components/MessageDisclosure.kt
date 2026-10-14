@@ -51,6 +51,8 @@ fun MessageDisclosure(
     initiallyExpanded: Boolean,
     callbacks: DisclosureCallbacks = DisclosureCallbacks.None,
     live: Boolean = false,
+    expandedOverride: Boolean? = null,
+    onExpandedChange: ((Boolean) -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = LocalFreeChatColors.current
@@ -58,7 +60,8 @@ fun MessageDisclosure(
     val s = LocalStrings.current
     val scale = LocalFontScale.current
     val geometry = remember(id) { DisclosureGeometry() }
-    var expanded by rememberSaveable(id) { mutableStateOf(initiallyExpanded) }
+    var localExpanded by rememberSaveable(id) { mutableStateOf(initiallyExpanded) }
+    val expanded = expandedOverride ?: localExpanded
     val transition = remember(id) { MutableTransitionState(expanded) }
     transition.targetState = expanded
     val arrowRotation = animateFloatAsState(if (expanded) 180f else 0f,
@@ -90,7 +93,7 @@ fun MessageDisclosure(
                 .semantics { stateDescription = if (expanded) s.disclosureExpanded else s.disclosureCollapsed }
                 .clickable(role = androidx.compose.ui.semantics.Role.Button) {
                     callbacks.onToggle(id, geometry.height, geometry.headerTop, !expanded)
-                    expanded = !expanded
+                    if (onExpandedChange != null) onExpandedChange(!expanded) else localExpanded = !expanded
                 }
                 .padding(horizontal = if (live) 12.dp else 10.dp, vertical = if (live) 8.dp else 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {

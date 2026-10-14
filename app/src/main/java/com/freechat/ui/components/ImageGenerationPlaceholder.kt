@@ -39,7 +39,8 @@ fun ImageGenerationPlaceholder(colors: FreeChatColors, modifier: Modifier = Modi
 }
 
 @Composable
-internal fun ImageGenerationParticles(colors: FreeChatColors, modifier: Modifier = Modifier, phase: GenerationPhase = GenerationPhase.IDLE) {
+internal fun ImageGenerationParticles(colors: FreeChatColors, modifier: Modifier = Modifier,
+    phase: GenerationPhase = GenerationPhase.IDLE, completion: () -> Float = { 0f }, resultAspect: Float = 1f) {
     val view = LocalView.current
     var visible by remember { mutableStateOf(false) }
     val seconds = rememberRenderSeconds(active = visible)
@@ -63,38 +64,40 @@ internal fun ImageGenerationParticles(colors: FreeChatColors, modifier: Modifier
         val cell = size.width / ImageDotMotion.Columns
         val rows = (size.height / cell).roundToInt().coerceAtLeast(1)
         val originY = (size.height - rows * cell) * .5f
+        val progress = completion()
+        val shape = ImageRevealPolicy.frame(progress, size.width, size.height, resultAspect, ImageRevealPolicy.CornerDp.dp.toPx())
         if (Build.VERSION.SDK_INT >= 33 && shader != null && drawContext.canvas.nativeCanvas.isHardwareAccelerated) {
-            shader.draw(this, frame, cell, originY)
+            shader.draw(this, frame, cell, originY, progress, shape)
         } else {
-            drawImageDotFallback(frame, appearance, cell, originY, rows)
+            drawImageDotFallback(frame, appearance, cell, originY, rows, progress, shape)
         }
     }
 }
 
 private fun DrawScope.drawImageDotFallback(
-    frame: ImageDotMotion.Frame, appearance: ImageLoadingAppearance, cell: Float, originY: Float, rows: Int
+    frame: ImageDotMotion.Frame, appearance: ImageLoadingAppearance, cell: Float, originY: Float, rows: Int,
+    completion: Float, shape: ImageRevealPolicy.Frame
 ) {
     // Nested translucent fills approximate the same rounded-distance feather on software/older Android.
     var previous = 0f
     for (layer in 0 until 16) {
-        val inset = ImageDotMotion.Feather * layer / 16f
+        val inset = shape.feather * layer / 16f
         val opacity = ImageDotMotion.smoothStep(0f, 1f, (layer + 1f) / 16f)
         drawRoundRect(appearance.base.copy(alpha = appearance.base.alpha * (opacity - previous)),
-            topLeft = Offset(size.width * inset, size.height * inset),
-            size = Size(size.width * (1f - 2f * inset), size.height * (1f - 2f * inset)),
-            cornerRadius = CornerRadius(size.width * max(0f, ImageDotMotion.Corner - inset),
-                size.height * max(0f, ImageDotMotion.Corner - inset)))
+            topLeft = Offset(size.width * .5f - shape.halfWidth + inset, size.height * .5f - shape.halfHeight + inset),
+            size = Size(max(0f, (shape.halfWidth - inset) * 2f), max(0f, (shape.halfHeight - inset) * 2f)),
+            cornerRadius = CornerRadius(max(0f, shape.corner - inset)))
         previous = opacity
     }
     for (row in 0 until rows) for (column in 0 until ImageDotMotion.Columns) {
         val center = Offset((column + .5f) * cell, (row + .5f) * cell + originY)
         val x = center.x / size.width
         val y = center.y / size.height
-        val opacity = ImageDotMotion.edgeOpacity(x, y)
+        val opacity = shape.opacity(center.x, center.y, size.width, size.height)
         if (opacity <= 0f) continue
         val strength = frame.strength(x, y)
         val ink = lerp(appearance.dot, appearance.gloss, .28f * strength + .42f * frame.sheen(x, y))
         drawCircle(ink.copy(alpha = ink.alpha * opacity),
-            cell * (ImageDotMotion.MinRadius + (ImageDotMotion.MaxRadius - ImageDotMotion.MinRadius) * strength), center)
+            cell * ImageRevealPolicy.radius(completion, strength), center)
     }
 }

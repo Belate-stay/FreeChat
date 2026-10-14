@@ -363,4 +363,17 @@ object ApiClient {
         )
         return o.getAsJsonArray("feedbacks") ?: JsonArray()
     }
+
+    /**
+     * 「FreeChat从夯到拉」评分（1.1.28）：一设备只评一次由客户端保证（评完卡片消失）。
+     * 落库=评分/设备型号/提交时间/版本号/账号（登录则由令牌挂上）；匿名可评。
+     */
+    suspend fun submitRating(score: Int, device: String, version: String, versionCode: Int, token: String? = null): JsonObject {
+        val body = JsonObject()
+        body.addProperty("score", score)
+        body.addProperty("device", device)
+        body.addProperty("version", version)
+        body.addProperty("versionCode", versionCode)
+        return call("POST", "/rating", token = token, body = body)
+    }
 }

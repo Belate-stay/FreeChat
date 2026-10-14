@@ -5,10 +5,13 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import com.freechat.ui.animation.jellyOverscroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -17,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -27,7 +31,12 @@ import com.freechat.data.*
 import com.freechat.ui.components.HeaderIconButton
 import com.freechat.ui.components.TopBarBackdrop
 import com.freechat.ui.components.TopBarBackdropSource
+import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.animation.LocalPageActive
+import com.freechat.ui.animation.MotionButton
+import com.freechat.ui.animation.MotionPolicy
+import com.freechat.ui.animation.MotionTextButton
+import com.freechat.ui.animation.pressMotion
 import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
@@ -219,12 +228,25 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
             Column(
                 Modifier.fillMaxSize()
                     .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
+                    .jellyOverscroll()
                     .verticalScroll(rememberScrollState())
-                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeight), bottom = 36.dp)
+                    // 1.1.29.8 工单③：原顶距（标题栏+8dp）落在模糊渐隐带里，首行字顶被糊——
+                    // 整体下移 24dp 出带（渐隐带高=HazeSpec.TopFadeZoneDp 32dp），首屏与二级页同吃
+                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeight) + 24.dp, bottom = 36.dp)
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                if (mode == null) {
+                // 卡片↔表单硬分支会闪现（1.1.26.7 动画补缺）：与设置页二级跳转同规格，前进=进表单。
+                val travel = with(LocalDensity.current) { MotionPolicy.PageTravelDp.dp.roundToPx() }
+                AnimatedContent(
+                    targetState = mode,
+                    transitionSpec = {
+                        FreeChatAnimation.pageTransition(targetState != null, travel, animateSize = true)
+                    },
+                    label = "voice_creation_mode"
+                ) { currentMode ->
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (currentMode == null) {
                     Text("创建自己的声音", color = colors.TextPrimary, style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold)
                     Text("选择模拟方式，创建成功后可以试听、命名并保存为本机音色。", color = colors.TextSecondary,
@@ -238,11 +260,11 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                     Text("音色配置和参考音频仅保存在本机，暂不参与账号同步、导出或系统备份。", color = colors.TextTertiary,
                         style = MaterialTheme.typography.bodySmall)
                 } else {
-                    SectionLabel(if (mode == VoiceCreationMode.PROMPT) Icons.Filled.Edit else Icons.Filled.Mic,
-                        if (mode == VoiceCreationMode.PROMPT) "根据提示词模拟" else "根据音频模拟")
+                    SectionLabel(if (currentMode == VoiceCreationMode.PROMPT) Icons.Filled.Edit else Icons.Filled.Mic,
+                        if (currentMode == VoiceCreationMode.PROMPT) "根据提示词模拟" else "根据音频模拟")
                     SettingsRow {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            if (mode == VoiceCreationMode.PROMPT) {
+                            if (currentMode == VoiceCreationMode.PROMPT) {
                                 Text("音色描述", color = colors.TextSecondary, style = MaterialTheme.typography.bodySmall)
                                 CharacterTextField(value = prompt, onValueChange = {
                                     if (it.length <= 4000) { prompt = it; clearPreview() }
@@ -255,13 +277,13 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                                 Text("使用本人或已获授权的声音。录音至少 3 秒，最长 60 秒会自动停止。", color = colors.TextSecondary,
                                     style = MaterialTheme.typography.bodySmall)
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(onClick = { upload.launch("audio/*") }, enabled = !busy && !capture.isRecording) {
+                                    MotionOutlinedButton(onClick = { upload.launch("audio/*") }, enabled = !busy && !capture.isRecording) {
                                         Icon(Icons.Filled.UploadFile, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("上传音频")
                                     }
                                     if (capture.isRecording) {
-                                        Button(onClick = ::finishRecording, enabled = !busy) { Text("停止录音") }
+                                        MotionButton(onClick = ::finishRecording, enabled = !busy) { Text("停止录音") }
                                     } else {
-                                        OutlinedButton(onClick = {
+                                        MotionOutlinedButton(onClick = {
                                             notice = null
                                             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                                                 if (recorder.start()) { clearPreview(); consent = false }
@@ -273,7 +295,7 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.SpaceBetween) {
                                         Text("正在录音 ${(capture.recordedMs / 1000)} / 60 秒", color = colors.Primary)
-                                        TextButton(onClick = { recorder.cancel(); notice = "录音已取消。" }) { Text("取消录音") }
+                                        MotionTextButton(onClick = { recorder.cancel(); notice = "录音已取消。" }) { Text("取消录音") }
                                     }
                                     LinearProgressIndicator(progress = { (capture.recordedMs / 60000f).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                                 }
@@ -284,7 +306,7 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                                             Text("${if (ref.mimeType == "audio/wav") "WAV" else "MP3"} · ${ref.sizeBytes / 1024} KB",
                                                 color = colors.TextSecondary, style = MaterialTheme.typography.bodySmall)
                                         }
-                                        TextButton(enabled = !busy && !capture.isRecording, onClick = {
+                                        MotionTextButton(enabled = !busy && !capture.isRecording, onClick = {
                                             clearPreview()
                                             reference = null
                                             drafts -= ref
@@ -307,19 +329,22 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                                 placeholder = { Text("输入这段声音要朗读的文本。", color = characterHintColor(colors)) },
                                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.TextPrimary), colors = fieldColors)
                             Text("${previewText.length}/300", color = colors.TextTertiary, style = MaterialTheme.typography.bodySmall)
-                            Row(Modifier.fillMaxWidth().clickable(enabled = !busy && !capture.isRecording) { consent = !consent },
+                            val consentPress = remember { MutableInteractionSource() }
+                            Row(Modifier.fillMaxWidth().pressMotion(consentPress)
+                                .clickable(interactionSource = consentPress, indication = null,
+                                    enabled = !busy && !capture.isRecording) { consent = !consent },
                                 verticalAlignment = Alignment.Top) {
                                 Checkbox(consent, onCheckedChange = { consent = it }, enabled = !busy && !capture.isRecording)
-                                Text(if (mode == VoiceCreationMode.PROMPT)
+                                Text(if (currentMode == VoiceCreationMode.PROMPT)
                                     "我同意将描述发送给 MiMo，并在以后朗读时向 MiMo 发送生成的参考音频。"
                                     else "我有权使用这段声音，同意在创建和以后朗读时向 MiMo 发送参考音频。",
                                     Modifier.weight(1f).padding(top = 12.dp), color = colors.TextSecondary, style = MaterialTheme.typography.bodySmall)
                             }
-                            Button(enabled = !busy && !capture.isRecording && consent && previewText.isNotBlank() &&
-                                (if (mode == VoiceCreationMode.PROMPT) prompt.isNotBlank() else reference != null),
+                            MotionButton(enabled = !busy && !capture.isRecording && consent && previewText.isNotBlank() &&
+                                (if (currentMode == VoiceCreationMode.PROMPT) prompt.isNotBlank() else reference != null),
                                 onClick = {
                                     val generation = beginWork()
-                                    val creationMode = mode ?: return@Button
+                                    val creationMode = currentMode ?: return@MotionButton
                                     val currentReference = reference
                                     val promptSnapshot = prompt
                                     val styleSnapshot = style
@@ -357,7 +382,7 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                                     Spacer(Modifier.width(8.dp)); Text("正在创建语音…")
                                 } else Text(if (completed == null) "创建/试听" else "重新创建")
                             }
-                            if (creating) TextButton(onClick = {
+                            if (creating) MotionTextButton(onClick = {
                                 workJob?.cancel(); workGeneration += 1; TtsController.stop(); creating = false; notice = "创建已取消。"
                             }, modifier = Modifier.align(Alignment.End)) { Text("取消创建") }
                             if (importing || finishing || saving || previewing) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -371,7 +396,7 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                                 Text("试听满意后为音色命名。以后朗读会使用这次保存的参考音频模拟同一声线。", color = colors.TextSecondary,
                                     style = MaterialTheme.typography.bodySmall)
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(enabled = !busy, onClick = {
+                                    MotionOutlinedButton(enabled = !busy, onClick = {
                                         val generation = beginWork()
                                         previewing = true
                                         notice = null
@@ -382,14 +407,14 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                                             finally { if (generation == workGeneration) previewing = false }
                                         }
                                     }) { Icon(Icons.Filled.PlayArrow, null); Text("再次试听") }
-                                    TextButton(onClick = { TtsController.stop() }) { Text("停止试听") }
+                                    MotionTextButton(onClick = { TtsController.stop() }) { Text("停止试听") }
                                 }
                                 Text("音色名称", color = colors.TextSecondary, style = MaterialTheme.typography.bodySmall)
                                 CharacterTextField(value = name, onValueChange = { if (it.length <= 40) name = it }, enabled = !busy,
                                     modifier = Modifier.fillMaxWidth(), singleLine = true,
                                     placeholder = { Text("例如：温柔电台", color = characterHintColor(colors)) },
                                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.TextPrimary), colors = fieldColors)
-                                Button(enabled = !busy && name.isNotBlank(), modifier = Modifier.fillMaxWidth(), onClick = {
+                                MotionButton(enabled = !busy && name.isNotBlank(), modifier = Modifier.fillMaxWidth(), onClick = {
                                     val generation = beginWork()
                                     saving = true
                                     notice = null
@@ -418,6 +443,8 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                     Text("创建由 MiMo 在线合成完成，模型权限和可用额度取决于当前账号。音色以本机配置保存，每次朗读都会重新发送参考音频。",
                         color = colors.TextTertiary, style = MaterialTheme.typography.bodySmall)
                 }
+                }
+                }
             }
             TopBarBackdrop(hazeState, colors.Background, topBandHeight)
             Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(top = 8.8.dp),
@@ -429,11 +456,23 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
     }
 }
 
+/** Outlined keep their border look; only the shared press spring is added (no MotionOutlinedButton in the kit). */
+@Composable
+private fun MotionOutlinedButton(onClick: () -> Unit, enabled: Boolean = true,
+    modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier.pressMotion(source),
+        interactionSource = source, content = content)
+}
+
 @Composable
 private fun AdvancedVoiceChoice(title: String, description: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
     val colors = LocalFreeChatColors.current
+    val pressSource = remember { MutableInteractionSource() }
     SettingsRow {
-        Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().pressMotion(pressSource)
+            .clickable(interactionSource = pressSource, indication = null, onClick = onClick).padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, tint = colors.Primary, modifier = Modifier.size(22.dp))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {

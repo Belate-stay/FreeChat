@@ -15,7 +15,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
@@ -61,7 +60,9 @@ import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.TextToolbar
 import androidx.compose.ui.platform.TextToolbarStatus
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -97,6 +98,7 @@ import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.LocalChatFontFamily
 import com.freechat.ui.theme.selectedFill
 import com.freechat.ui.theme.frostedCard
+import com.freechat.ui.theme.linkInk
 import com.freechat.ui.theme.floatingSurface
 import com.freechat.ui.theme.rememberGlassBackdropProbe
 import com.freechat.ui.theme.glassProbeBounds
@@ -116,6 +118,9 @@ import kotlinx.coroutines.withContext
 
 // 最短录音长度：16kHz/16bit 单声道 = 32000 字节/秒，0.25s ≈ 8000 字节
 private const val MIN_PCM_BYTES = 8000
+
+/** 语音键发送识别半径（黄圈）= 按钮半径 + 此值。圈内松手发送、圈外松手取消（1.1.29.9 工单⑥） */
+private const val SendZoneExtraDp = 68
 
 // 内置常用 emoji 列表（系统原生渲染，无需第三方素材库）
 private val EMOJI_LIST = listOf(
@@ -571,7 +576,9 @@ fun ChatInput(
                                     if (!currentStartRecording.value()) return@awaitEachGesture
                                     var fingerOutside = false
                                     var releasedNormally = false
-                                    val slop = with(density) { 8.dp.toPx() }
+                                    // 黄圈识别半径（1.1.29.9 工单⑥）：比语音键大一圈，手指稍移不误取消；
+                                    // 圈内松手=发送、圈外松手=取消（圈外亮红环提示）
+                                    val slop = with(density) { SendZoneExtraDp.dp.toPx() }
                                     while (true) {
                                         val event = awaitPointerEvent()
                                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -643,23 +650,35 @@ fun ChatInput(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
         // ──── 图片候选区（悬浮在输入框上方，单行小缩略图，超出右滑）────
-        if (pendingImages.isNotEmpty()) {
-            ImageCandidateArea(
-                images = pendingImages,
-                isAdding = isAddingImages,
-                onRemove = onRemovePendingImage,
-                colors = colors,
-                isDark = isDark,
-                hazeState = hazeState,
-                advancedMaterial = advancedMaterial
-            )
-            Spacer(Modifier.height(8.dp))
+        // 候选区/提示条/引用卡的出现与收起统一走 expand 曲线（1.1.26 动画补缺），不再瞬出瞬入。
+        AnimatedVisibility(
+            visible = pendingImages.isNotEmpty(),
+            enter = FreeChatAnimation.expandEnter(),
+            exit = FreeChatAnimation.expandExit()
+        ) {
+            Column {
+                ImageCandidateArea(
+                    images = pendingImages,
+                    isAdding = isAddingImages,
+                    onRemove = onRemovePendingImage,
+                    colors = colors,
+                    isDark = isDark,
+                    hazeState = hazeState,
+                    advancedMaterial = advancedMaterial
+                )
+                Spacer(Modifier.height(8.dp))
+            }
         }
 
         // ──── 改写提示词提示条 ────
         // 必须有这个「取消」：改写态下输入框装的是那条旧提示词，如果用户改主意了直接清空输入框，
         // 之后他打的任何新消息都会顶掉那条旧提示词而不是追加 —— 那是个没有出口的死状态。
-        if (editingHint != null) {
+        AnimatedVisibility(
+            visible = editingHint != null,
+            enter = FreeChatAnimation.expandEnter(),
+            exit = FreeChatAnimation.expandExit()
+        ) {
+            Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -669,23 +688,29 @@ fun ChatInput(
             ) {
                 Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(colors.Primary.copy(alpha = 0.12f))
+                        // 1.1.26.9：与输入框同款哑光磨砂玻璃（原来 12% 透明度的色块在深色背景上几乎隐形）
+                        .floatingSurface(hazeState, isDark, RoundedCornerShape(50), fallback = colors.InputBg)
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(Icons.Filled.Edit, null, tint = colors.Primary, modifier = Modifier.size(13.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        editingHint,
+                        editingHint.orEmpty(), // AnimatedVisibility 的 visible 表达式不吃 smart cast
                         style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
                         color = colors.Primary
                     )
                     Spacer(Modifier.width(10.dp))
                     Text(
                         s.cancel,
-                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
-                        color = colors.Primary,
+                        // 1.1.26.9：链接样式（蓝色斜体下划线，全平台通用的「这里能点」符号，见 SheetActionRow.link）
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            fontStyle = FontStyle.Italic,
+                            textDecoration = TextDecoration.Underline
+                        ),
+                        color = colors.linkInk,
                         modifier = Modifier
                             .clip(RoundedCornerShape(50))
                             .clickable(onClick = onCancelEdit)
@@ -693,34 +718,47 @@ fun ChatInput(
                     )
                 }
             }
+            }
         }
 
         // ──── 文件候选区（悬浮在输入框上方，显示文件名列表，可删除；仅标准模式）────
-        if (pendingFiles.isNotEmpty()) {
-            FileCandidateArea(
-                files = pendingFiles,
-                isAdding = isAddingFiles,
-                onRemove = onRemovePendingFile,
-                colors = colors,
-                isDark = isDark,
-                hazeState = hazeState,
-                advancedMaterial = advancedMaterial
-            )
-            Spacer(Modifier.height(8.dp))
+        AnimatedVisibility(
+            visible = pendingFiles.isNotEmpty(),
+            enter = FreeChatAnimation.expandEnter(),
+            exit = FreeChatAnimation.expandExit()
+        ) {
+            Column {
+                FileCandidateArea(
+                    files = pendingFiles,
+                    isAdding = isAddingFiles,
+                    onRemove = onRemovePendingFile,
+                    colors = colors,
+                    isDark = isDark,
+                    hazeState = hazeState,
+                    advancedMaterial = advancedMaterial
+                )
+                Spacer(Modifier.height(8.dp))
+            }
         }
 
         // ──── 引用预览区（悬浮在输入框上方，最多两行；引用图片时显示图片缩略图，与图片候选区同款磨砂玻璃）────
-        if (quotedContent != null || quotedImagePath != null) {
-            QuotePreviewCard(
-                content = quotedContent,
-                imagePath = quotedImagePath,
-                onClear = onClearQuote,
-                colors = colors,
-                isDark = isDark,
-                hazeState = hazeState,
-                advancedMaterial = advancedMaterial
-            )
-            Spacer(Modifier.height(8.dp))
+        AnimatedVisibility(
+            visible = quotedContent != null || quotedImagePath != null,
+            enter = FreeChatAnimation.expandEnter(),
+            exit = FreeChatAnimation.expandExit()
+        ) {
+            Column {
+                QuotePreviewCard(
+                    content = quotedContent,
+                    imagePath = quotedImagePath,
+                    onClear = onClearQuote,
+                    colors = colors,
+                    isDark = isDark,
+                    hazeState = hazeState,
+                    advancedMaterial = advancedMaterial
+                )
+                Spacer(Modifier.height(8.dp))
+            }
         }
 
         // ──── 全屏输入槽（文字超过 3 行自动弹出 / 长按手动弹出，同色凹陷材质，平滑过渡）────
@@ -751,7 +789,8 @@ fun ChatInput(
                             onValueChange = { v -> text = v.text; textSelection = v.selection; textComposition = v.composition },
                             textStyle = MaterialTheme.typography.bodyMedium.copy(color = glassText, fontSize = 15.sp, lineHeight = 20.sp, fontFamily = LocalChatFontFamily.current),
                             cursorBrush = SolidColor(glassCursor),
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp).verticalScroll(rememberScrollState()).focusRequester(fullscreenFocusRequester),
+                            // Let the text field own scrolling so its caret and IME see the same viewport.
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp).focusRequester(fullscreenFocusRequester),
                             maxLines = Int.MAX_VALUE
                         )
                     }
@@ -792,7 +831,6 @@ fun ChatInput(
                                     .fillMaxWidth()
                                     .padding(start = 6.dp, end = 2.dp)
                                     .heightIn(min = 24.dp, max = maxTextAreaHeight)
-                                    .verticalScroll(rememberScrollState())
                                     .onGloballyPositioned { coords -> mainFieldWidthPx = coords.size.width }
                                     .focusRequester(mainFocusRequester)
                                     .onFocusChanged { focusState ->
@@ -1191,12 +1229,13 @@ fun ChatInput(
             }
         }
 
-        // ──── 上滑取消弧线（始终跟随手指，红色光影 + 「松手取消」）────
+        // ──── 拖出取消环（识别圈外亮红弧+环绕红字，随指尖实时平移旋转，AGSL 光圈）────
         if (cancelFingerWinPos != null) {
-            VoiceCancelArc(
-                fingerWinPos = cancelFingerWinPos!!,
-                cancelColor = colors.ErrorRed,
-                density = density
+            VoiceCancelRing(
+                originWin = microphoneCenter.value,
+                fingerWin = cancelFingerWinPos!!,
+                cancelColor = VoiceCancelRingRed,
+                label = s.releaseToCancel
             )
         }
         }
@@ -1217,11 +1256,16 @@ private fun InputStateChip(
     uncheckedInk: Color = colors.TextPrimary,
     icon: @Composable (Boolean) -> Unit
 ) {
+    // 选中态过渡动画与全 App 选项表同节奏（1.1.28）；两种边框结构不同保持硬切，底色/字色渐变
+    val chipFill by androidx.compose.animation.animateColorAsState(
+        if (checked) colors.selectedFill else Color.Transparent, com.freechat.ui.animation.FreeChatAnimation.colorTween, label = "stateChipFill")
+    val chipInk by androidx.compose.animation.animateColorAsState(
+        if (checked) colors.OnPrimary else uncheckedInk, com.freechat.ui.animation.FreeChatAnimation.colorTween, label = "stateChipInk")
     Row(
         modifier = Modifier
             .softShadow(RoundedCornerShape(50), dy = 1.dp, spread = 3.dp, maxAlpha = if (checked) 0.045f else 0.025f)
             .clip(RoundedCornerShape(50))
-            .background(if (checked) colors.selectedFill else Color.Transparent)
+            .background(chipFill)
             .then(
                 if (checked) Modifier.border(0.75.dp,
                     androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color.White.copy(alpha = 0.34f),
@@ -1241,7 +1285,7 @@ private fun InputStateChip(
                 fontSize = 12.sp,
                 fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal
             ),
-            color = if (checked) colors.OnPrimary else uncheckedInk
+            color = chipInk
         )
     }
 }
@@ -1444,75 +1488,3 @@ private fun QuotePreviewCard(
     }
 }
 
-// ──── 上滑取消弧线：Popup 定位到手指窗口坐标，弧线画在手指上方，跟随手指 ────
-@Composable
-private fun VoiceCancelArc(
-    fingerWinPos: Offset,
-    cancelColor: Color,
-    density: androidx.compose.ui.unit.Density
-) {
-    val s = LocalStrings.current
-    val arcRadiusPx = with(density) { 60.dp.toPx() }
-    Popup(
-        popupPositionProvider = remember(fingerWinPos) { FixedPositionProvider(fingerWinPos) },
-        properties = PopupProperties(focusable = false)
-    ) {
-        // Box 中心 = 弧形中心 = 手指上方一个半径处
-        Box(
-            modifier = Modifier
-                .size(with(density) { (arcRadiusPx * 2).toDp() })
-                .offset {
-                    IntOffset(
-                        -arcRadiusPx.roundToInt(),
-                        (-arcRadiusPx * 2).roundToInt()
-                    )
-                }
-        ) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val center = Offset(size.width / 2f, size.height / 2f)
-                val radius = size.width / 2f
-                // 光晕层：宽而淡，模拟柔光
-                drawArc(
-                    color = cancelColor.copy(alpha = 0.10f),
-                    startAngle = 225f,
-                    sweepAngle = 90f,
-                    useCenter = false,
-                    topLeft = Offset(center.x - radius, center.y - radius),
-                    size = Size(radius * 2, radius * 2),
-                    style = Stroke(width = with(density) { 9.dp.toPx() }, cap = StrokeCap.Round)
-                )
-                // 主层：细而清晰
-                drawArc(
-                    color = cancelColor.copy(alpha = 0.55f),
-                    startAngle = 225f,
-                    sweepAngle = 90f,
-                    useCenter = false,
-                    topLeft = Offset(center.x - radius, center.y - radius),
-                    size = Size(radius * 2, radius * 2),
-                    style = Stroke(width = with(density) { 2.5.dp.toPx() }, cap = StrokeCap.Round)
-                )
-            }
-            Text(
-                s.releaseToCancel,
-                color = cancelColor.copy(alpha = 0.85f),
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 6.dp)
-            )
-        }
-    }
-}
-
-private class FixedPositionProvider(private val pos: Offset) : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize
-    ): IntOffset {
-        val x = pos.x.roundToInt().coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
-        val y = pos.y.roundToInt().coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
-        return IntOffset(x, y)
-    }
-}

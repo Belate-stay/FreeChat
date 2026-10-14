@@ -2,6 +2,8 @@ package com.freechat.ui.components
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.animation.core.EaseOutCubic
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -98,6 +100,12 @@ fun BoxScope.SheetPanel(
     hazeState: HazeState,
     confirmLabel: String? = null,
     onConfirm: (() -> Unit)? = null,
+    /**
+     * 「取消」按钮文案（1.1.26.1 风险弹层改版）：传入后与 confirmLabel 同行左右分置——
+     * 取消在左中性浅底、确定在右主题色实底（与版本更新提示弹窗同款按钮），不再让主按钮独行。
+     * 不传 = 旧的独行主按钮（删除/注销等危险操作还在用）。
+     */
+    cancelLabel: String? = null,
     /** 主按钮不可用（密码还没填之类）。灰掉而不是隐藏 —— 位置一直在，用户知道该点哪 */
     confirmEnabled: Boolean = true,
     /** 危险操作（注销账号/删除）用红底，别让「注销」长得跟「确定」一模一样 */
@@ -198,6 +206,41 @@ fun BoxScope.SheetPanel(
                 enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
                 Column {
                 Spacer(Modifier.height(12.dp))
+                if (cancelLabel != null) {
+                    // 1.1.26.1 风险弹层改版：取消在左中性浅底、确定在右主题色实底——
+                    // 与版本更新提示弹窗同一对按钮（位置与颜色双重引导确定键），主按钮不再独行。
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                                .clip(RoundedCornerShape(13.dp))
+                                .background(colors.Surface)
+                                .border(1.dp, colors.InputBorder, RoundedCornerShape(13.dp))
+                                .clickable { onDismiss() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(cancelLabel, style = MaterialTheme.typography.bodyMedium,
+                                color = colors.TextPrimary, fontWeight = FontWeight.Medium)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                                .clip(RoundedCornerShape(13.dp))
+                                .background(
+                                    (if (confirmDanger) colors.ErrorRed else colors.Primary)
+                                        .copy(alpha = if (confirmEnabled) 1f else 0.38f)
+                                )
+                                .clickable(enabled = confirmEnabled) { onConfirm?.invoke() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(confirmLabel ?: lastConfirmLabel.value, style = MaterialTheme.typography.bodyMedium,
+                                color = if (confirmDanger) readableForeground(colors.ErrorRed) else colors.OnPrimary,
+                                fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                } else {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -213,6 +256,7 @@ fun BoxScope.SheetPanel(
                     Text(confirmLabel ?: lastConfirmLabel.value,
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                         color = if (confirmDanger) readableForeground(colors.ErrorRed) else colors.OnPrimary, fontWeight = FontWeight.SemiBold)
+                }
                 }
                 }
             }
@@ -244,11 +288,18 @@ fun SheetOption(
     swatch: Color? = null,
     extra: @Composable ColumnScope.() -> Unit = {}
 ) {
+    // 1.1.28：选中态过渡动画统一走 colorTween（320ms iosEaseOut）——底色/字色一起渐变，
+    // 不再硬切闪变。全 App 选项表共用这一套节奏（见 FreeChatAnimation.colorTween）
+    val fill by animateColorAsState(if (selected) colors.selectedFill else Color.Transparent, FreeChatAnimation.colorTween, label = "optFill")
+    val titleColor by animateColorAsState(if (selected) colors.selectedText else colors.TextPrimary, FreeChatAnimation.colorTween, label = "optTitle")
+    val subBase by animateColorAsState(if (selected) colors.selectedSubText else colors.TextSecondary, FreeChatAnimation.colorTween, label = "optSub")
+    val iconTint by animateColorAsState(if (selected) colors.selectedText else colors.TextSecondary, FreeChatAnimation.colorTween, label = "optIcon")
+    val swatchBorder by animateColorAsState(if (selected) colors.OnPrimary.copy(alpha = 0.65f) else colors.InputBorder, FreeChatAnimation.colorTween, label = "optSwatch")
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(if (selected) colors.selectedFill else Color.Transparent)
+            .background(fill)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 12.dp)
     ) {
@@ -257,27 +308,33 @@ fun SheetOption(
                 Box(
                     Modifier.size(20.dp)
                         .background(swatch, RoundedCornerShape(6.dp))
-                        .border(1.dp, if (selected) colors.OnPrimary.copy(alpha = 0.65f) else colors.InputBorder, RoundedCornerShape(6.dp))
+                        .border(1.dp, swatchBorder, RoundedCornerShape(6.dp))
                 )
                 Spacer(Modifier.width(10.dp))
             }
             if (icon != null) {
-                Icon(icon, null, tint = if (selected) colors.selectedText else colors.TextSecondary, modifier = Modifier.size(20.dp))
+                Icon(icon, null, tint = iconTint, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(10.dp))
             }
             Column(Modifier.weight(1f)) {
                 Text(
                     title,
-                    color = if (selected) colors.selectedText else colors.TextPrimary,
-                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                    // null = 沿用外层样式（字号/行高不动，只换字体族）
+                    // 1.1.28：全 App 选项表统一 bodyMedium、不加粗（用户点名「缩小一些不要加粗」）——
+                    // 选中态只靠底色说话，不再叠字重（底色+字色已经是两套语言，字重是第三套）
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = titleColor,
+                    fontWeight = FontWeight.Normal,
                     fontFamily = if (monoTitle) LocalMonoFontFamily.current else null
                 )
                 if (!subtitle.isNullOrBlank()) {
                     Text(
-                        subtitle,
+                        // 内置模型备注尾句「作者自用 API…」统一红字（1.1.28）；非模型备注无尾句原样
+                        modelDescAnnotated(
+                            subtitle,
+                            base = subBase,
+                            red = colors.ErrorRed
+                        ),
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
-                        color = if (selected) colors.selectedSubText else colors.TextSecondary
                     )
                 }
             }

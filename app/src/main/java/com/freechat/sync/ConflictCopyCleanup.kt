@@ -35,6 +35,14 @@ object ConflictCopyCleanup {
     }
 
     /**
+     * 1.1.20：数一数对话列表里有多少条冲突副本（深度 ≥1）。
+     * 只检测不删除 —— 2026-10-10 用户改口径：「不要主动帮用户删除」，
+     * 弹窗提醒后由用户自己在侧滑页决定删不删、删哪些。
+     */
+    fun copyCount(convs: List<Conversation>): Int =
+        convs.count { analyze(it.title).depth > 0 }
+
+    /**
      * @param hasMessages 这条对话有没有聊天记录（调用方按 id 查消息文件）
      * @return 可安全删除的对话 id 列表
      */

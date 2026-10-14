@@ -6,15 +6,18 @@ import android.os.Looper
 import android.provider.Settings
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.IndicationNodeFactory
 import androidx.compose.foundation.interaction.FocusInteraction
 import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
@@ -59,14 +62,39 @@ fun Modifier.pressMotion(source: InteractionSource, pressedScale: Float = Motion
     return graphicsLayer { scaleX = scale.value; scaleY = scale.value }
 }
 
-/** All foundation clickable/combinedClickable controls share press/release feedback. */
-data class MotionIndication(val enabled: Boolean, val focusInk: Color) : IndicationNodeFactory {
-    override fun create(interactionSource: InteractionSource): DelegatableNode = PressNode(interactionSource, enabled, focusInk)
+/**
+ * All foundation clickable/combinedClickable controls share press/release feedback.
+ * 1.1.29.5 追加单：触点水波纹 —— 一层淡波从触控点扩散（[ripple]），与按压缩放独立开关
+ * （[pressScale]，自带缩放的按钮传 false 防双重缩放）；输入框整棵子树传 ripple=false 豁免。
+ */
+data class MotionIndication(
+    val enabled: Boolean,
+    val focusInk: Color,
+    val rippleTint: Color = focusInk,
+    val ripple: Boolean = true,
+    val pressScale: Boolean = true,
+) : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode =
+        PressNode(interactionSource, enabled, focusInk, rippleTint, ripple, pressScale)
+}
+
+/** 全站共用的指示器工厂：色随主题（波纹用中性墨色，聚焦环用主题色）。 */
+@Composable
+fun rememberMotionIndication(pressScale: Boolean = true, ripple: Boolean = true): MotionIndication {
+    val enabled = LocalMotionEnabled.current
+    val colors = com.freechat.ui.theme.LocalFreeChatColors.current
+    return remember(enabled, colors, pressScale, ripple) {
+        MotionIndication(enabled, colors.Primary, colors.TextPrimary, ripple = ripple, pressScale = pressScale)
+    }
 }
 
 private class PressNode(private val source: InteractionSource, private val enabled: Boolean,
-    private val focusInk: Color) : Modifier.Node(), DrawModifierNode {
+    private val focusInk: Color, private val rippleTint: Color,
+    private val ripple: Boolean, private val pressScale: Boolean) : Modifier.Node(), DrawModifierNode {
     private val scale = Animatable(1f)
+    private val wave = Animatable(1f) // 1 = 播完/空闲
+    private var waveOrigin = androidx.compose.ui.geometry.Offset.Zero
+    private var waveJob: kotlinx.coroutines.Job? = null
     private var focused = false
     override fun onAttach() {
         coroutineScope.launch {
@@ -82,18 +110,57 @@ private class PressNode(private val source: InteractionSource, private val enabl
                 }
                 presses.isNotEmpty()
             }.distinctUntilChanged().collectLatest { pressed ->
-                if (!enabled) scale.snapTo(1f)
+                if (!enabled || !pressScale) scale.snapTo(1f)
                 else scale.animateTo(if (pressed) MotionPolicy.PressScale else 1f,
                     if (pressed) FreeChatAnimation.pressDown else FreeChatAnimation.pressRelease)
             }
         }
+        if (ripple) coroutineScope.launch {
+            source.interactions.collect { interaction ->
+                if (interaction is PressInteraction.Press && enabled) {
+                    waveOrigin = interaction.pressPosition
+                    waveJob?.cancel()
+                    waveJob = launch {
+                        wave.snapTo(0f)
+                        wave.animateTo(1f, tween(WAVE_MS, easing = FreeChatAnimation.iosEaseOut))
+                    }
+                }
+            }
+        }
     }
     override fun ContentDrawScope.draw() {
-        scale(scale.value, scale.value) { this@draw.drawContent() }
+        if (pressScale) scale(scale.value, scale.value) { this@draw.drawContent() }
+        else this@draw.drawContent()
+        // 1.1.29.5：触点水波纹画在内容之上（各形态按钮的底板位置不一，压在下面会被不透明底吃掉），
+        // 一层淡波限定在组件边界内（外层 clip 负责圆角），alpha 平滑衰减到零
+        val p = wave.value
+        if (ripple && p < 1f) {
+            clipRect {
+                val maxR = kotlin.math.hypot(size.width, size.height)
+                val r = (maxR * p).coerceAtLeast(1f)
+                val a = (1f - p) * (1f - p) * WAVE_ALPHA
+                if (a > 0.003f) drawCircle(
+                    brush = Brush.radialGradient(
+                        0f to rippleTint.copy(alpha = 0.9f),
+                        0.72f to rippleTint.copy(alpha = 0.35f),
+                        1f to rippleTint.copy(alpha = 0f),
+                        center = waveOrigin, radius = r
+                    ),
+                    radius = r,
+                    center = waveOrigin,
+                    alpha = a
+                )
+            }
+        }
         if (focused) drawRoundRect(focusInk, cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f * density),
             style = Stroke(2f * density))
     }
-    override fun onDetach() { focused = false }
+    override fun onDetach() { focused = false; waveJob?.cancel() }
+
+    private companion object {
+        const val WAVE_MS = 420
+        const val WAVE_ALPHA = 0.16f
+    }
 }
 
 @Composable

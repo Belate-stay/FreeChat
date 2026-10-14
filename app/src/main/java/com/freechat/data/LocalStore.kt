@@ -168,6 +168,16 @@ object LocalStore {
         onWrite = fn
     }
 
+    /** Images also require atomic publication: a interrupted download must not leave a partial original. */
+    fun writeBytes(file: File, bytes: ByteArray) = locked {
+        val tmp = File.createTempFile(file.name, ".tmp", file.parentFile)
+        try {
+            java.io.FileOutputStream(tmp).use { output -> output.write(bytes); output.fd.sync() }
+            java.nio.file.Files.move(tmp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            Unit
+        } finally { tmp.delete() }
+    }
+
     /** 读文本。文件不存在返回 null（**不是**空串 —— 「没有这个文件」和「文件是空的」要分开）。 */
     fun readText(file: File): String? = synchronized(LOCK) {
         try {

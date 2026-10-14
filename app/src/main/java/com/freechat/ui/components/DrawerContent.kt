@@ -1,5 +1,6 @@
 package com.freechat.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -56,6 +57,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
@@ -83,6 +85,7 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import java.io.File
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.jellyOverscroll
 import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
@@ -232,6 +235,15 @@ fun DrawerContent(
     val indicatorHeightPx = with(density) { 30.dp.toPx() }
     // 竖条左边缘 = 列表 contentPadding(8dp) + 行内 start padding(16dp)（两种布局同值）
     val indicatorStartPadPx = with(density) { 24.dp.toPx() }
+    // 1.1.29 工单⑦：水滴出现的圆点直径（=竖条宽×2）——起点是个看得清的小点，收成条宽
+    val indicatorDotPx = with(density) { 6.dp.toPx() }
+    val indicatorBarWPx = with(density) { 3.dp.toPx() }
+    // 果冻位移读数（1.1.26.9）：列表拉脱时内容整体位移，竖条浮在列表外——补同一份位移才不掉队。
+    // 两种布局共用一份（同时只有一支在跑），挂在各自 LazyColumn 的 jellyOverscroll 上回写。
+    val jellyOffsetPx = remember { mutableFloatStateOf(0f) }
+    // 水滴滑入的 x 起点残余（与 y 滑行同一套「起点 + 残余 ×(1−进度)」机制）；
+    // 起点=圆点压着屏幕左缘（barX=−dot/2），落点=startPadPx。初始值只在 progress=1 时在场，无视觉意义
+    val indicatorDeltaX = remember { mutableFloatStateOf(-(indicatorStartPadPx + indicatorDotPx * 0.5f)) }
     val indicatorProgress = remember { Animatable(1f) }
     val indicatorDelta = remember { mutableFloatStateOf(0f) }
     // 上一帧竖条**真正画在**哪儿。故意的非 Compose 状态（FloatArray 而非 mutableStateOf）：
@@ -277,11 +289,15 @@ fun DrawerContent(
     var indicatorReady by remember { mutableStateOf(false) }
 
     LaunchedEffect(currentId, searchQuery) {
-        // 搜索态整根不画（结果行按消息列，没有「当前对话行」可言）：
-        // 把动画收干净，免得退出搜索时竖条还悬在半路
+        // 搜索态/首页整根不画（结果行按消息列，没有「当前对话行」可言）：
+        // 把动画收干净，免得退出搜索时竖条还悬在半路。
+        // lastId 清空 + ready 置位（1.1.26.9）：下一次点选是「出现」不是「换行」——
+        // 首页点对话要播水滴弹入；开屏直进对话仍走下面的「首次直落」
         if (currentId == null || searchQuery.isNotBlank()) {
             indicatorDelta.floatValue = 0f
             indicatorProgress.snapTo(1f)
+            indicatorLastId = null
+            indicatorReady = true
             return@LaunchedEffect
         }
         // 行还没量到（首帧 / 懒加载还没铺开）就等它出现，别把这一次切换漏掉
@@ -289,14 +305,31 @@ fun DrawerContent(
             ?: snapshotFlow { listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == currentId } }
                 .filterNotNull().first()
         val targetY = indicatorYOf(info)
-        if (indicatorReady) {
-            // 起点 = 上一行**此刻的位置** + 正在跑的那次动画的残余位移（算法见 indicatorStartY）。
+        if (!indicatorReady) {
+            // 开屏即在对话里：直接到位，不播任何入场（开屏见竖条从边上飞进来很假）
+            indicatorDelta.floatValue = 0f
+            indicatorDeltaX.floatValue = 0f
+            indicatorProgress.snapTo(1f)
+            indicatorInstalledId[0] = currentId
+            indicatorReady = true
+        } else if (indicatorLastId == null) {
+            // 水滴滑入（1.1.29 工单⑦）：y 直接贴行，圆点从屏幕左缘（barX=−dot/2，圆心压着边缘）
+            // 滑入，途中放大+拉长成竖条；速率先慢后快（FreeChatAnimation.indicatorAppearTween），
+            // 形变与位移同一进度，到位时正好拉完成条
+            indicatorDelta.floatValue = 0f
+            indicatorDeltaX.floatValue = -(indicatorStartPadPx + indicatorDotPx * 0.5f)
+            indicatorProgress.snapTo(0f)
+            indicatorInstalledId[0] = currentId
+            indicatorProgress.animateTo(1f, FreeChatAnimation.indicatorAppearTween)
+        } else {
+            // 换行滑行。起点 = 上一行**此刻的位置** + 正在跑的那次动画的残余位移（算法见 indicatorStartY）。
             // ⚠️ 两个坑都踩过了：
             // ① 用「新目标 + 残余偏移」凑起点 → 残余偏移是相对**上一个目标**算的，
             //    配着新目标读出来恒等于 0，竖条原地不动（第一版就这样，动画像没播）。
             // ② 用绘制期记下的「上一帧画在哪」当起点 → LaunchedEffect 的执行时机在
             //    这一帧布局/绘制之后，读到的已经是**新位置**了，delta 又是 0（同一副面孔）。
             //    行位置只跟列表滚动有关、跟选中谁无关，所以从布局查上一行是稳的。
+            indicatorDeltaX.floatValue = 0f
             indicatorDelta.floatValue = indicatorStartY() - targetY
             indicatorProgress.snapTo(0f)
             // ⚠️ 这一行必须紧跟 snapTo(0f)：装上 id 之前，布局期那一帧会走 DrawerIndicatorBar
@@ -304,12 +337,6 @@ fun DrawerContent(
             // 慢一点的机器是 1~2 帧，两种情况落点都跟这里算的起点一致，接得住。
             indicatorInstalledId[0] = currentId
             indicatorProgress.animateTo(1f, FreeChatAnimation.indicatorSlideTween)
-        } else {
-            // 首次不做动画：一进 App 就到位，免得开屏看见竖条从顶上滑下来
-            indicatorDelta.floatValue = 0f
-            indicatorProgress.snapTo(1f)
-            indicatorInstalledId[0] = currentId
-            indicatorReady = true
         }
         indicatorLastId = currentId
     }
@@ -384,7 +411,8 @@ fun DrawerContent(
             ) {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
+                    // 果冻边界冗余（1.1.26.6）：侧滑对话列表同款——顶/底继续拖跟手位移，松手回弹
+                    modifier = Modifier.fillMaxSize().jellyOverscroll(offsetPx = jellyOffsetPx),
                     contentPadding = PaddingValues(
                         start = 8.dp, end = 8.dp,
                         top = topBandHeight,
@@ -411,12 +439,17 @@ fun DrawerContent(
                     currentId = if (searchQuery.isBlank()) currentId else null,
                     progress = indicatorProgress,
                     delta = indicatorDelta,
+                    deltaX = indicatorDeltaX,
+                    jellyY = jellyOffsetPx,
                     drawnY = indicatorDrawnY,
                     viewport = indicatorViewport,
                     installedId = indicatorInstalledId,
                     startY = { indicatorStartY() },
+                    isAppearFlight = { indicatorLastId == null },
                     startPadPx = indicatorStartPadPx,
-                    heightPx = indicatorHeightPx
+                    heightPx = indicatorHeightPx,
+                    dotPx = indicatorDotPx,
+                    barWPx = indicatorBarWPx
                 ) { indicatorViewport.floatValue = it }
             }
 
@@ -446,7 +479,13 @@ fun DrawerContent(
                     .statusBarsPadding()
                     .padding(top = titleBarAreaDp + headerGapTopDp)
             ) {
-                if (selectMode) {
+                // 多选操作栏↔搜索/新建的换头走 contentReplacement（1.1.26 动画补缺），不再硬切。
+                AnimatedContent(
+                    targetState = selectMode,
+                    transitionSpec = { FreeChatAnimation.contentReplacement() },
+                    label = "drawerHeader"
+                ) { selecting ->
+                if (selecting) {
                     DrawerSelectionBar(
                         count = selectedConversations.size,
                         allPinned = allSelectedPinned,
@@ -461,9 +500,12 @@ fun DrawerContent(
                         modifier = Modifier.padding(horizontal = HeaderCardInset)
                     )
                 } else {
+                    Column {
                     SearchBox(searchQuery, onSearchQueryChange, drawerHazeState, isDark, Modifier.padding(horizontal = HeaderCardInset))
                     Spacer(Modifier.height(headerCardGapDp))
                     NewChatButton(onNewChat, onNewChatRect, drawerHazeState, isDark, Modifier.padding(horizontal = HeaderCardInset))
+                    }
+                }
                 }
             }
 
@@ -524,19 +566,35 @@ fun DrawerContent(
         }
     } else {
         // ===== 非高级材质：原布局（固定搜索/新对话/底部设置，非沉浸） =====
+        // 1.1.26.8：非高级材质没有悬浮/磨砂概念——整列**无条件实体底**（pageBackground 在
+        // 流光炫彩下是 no-op，透明抽屉会让列表与悬浮元素穿帮叠字，用户点名「没有可读性」）。
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .pageBackground(colors.Surface)
+                .background(colors.Surface)
                 .statusBarsPadding()
                 .padding(start = 8.dp)
         ) {
+            // 1.1.26.8：头部整体（含标题留白区）实体板 + zIndex——列表果冻平移从板下穿过，内容隔离不叠字
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .zIndex(1f)
+                    .background(colors.Surface)
+            ) {
             Spacer(Modifier.height(12.dp))
             // 留出顶部空间给共享 FreeChat 标题
             Spacer(Modifier.height(36.dp))
             Spacer(Modifier.height(headerGapTopDp))
 
-            if (selectMode) {
+            // 多选操作栏↔搜索/新建的换头走 contentReplacement（1.1.26 动画补缺），不再硬切。
+            AnimatedContent(
+                targetState = selectMode,
+                transitionSpec = { FreeChatAnimation.contentReplacement() },
+                label = "drawerHeaderPlain"
+            ) { selecting ->
+            if (selecting) {
+                Column {
                 DrawerSelectionBar(
                     count = selectedConversations.size,
                     allPinned = allSelectedPinned,
@@ -551,12 +609,17 @@ fun DrawerContent(
                     modifier = Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset)
                 )
                 Spacer(Modifier.height(headerGapBottomDp))
+                }
             } else {
+                Column {
                 // 这一支的 Column 自己已经 pad 了 start = 8dp，这里补到 HeaderCardInset，落点与高级材质一致
                 SearchBox(searchQuery, onSearchQueryChange, drawerHazeState, isDark, Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset))
                 Spacer(Modifier.height(10.dp))
                 NewChatButton(onNewChat, onNewChatRect, drawerHazeState, isDark, Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset))
                 Spacer(Modifier.height(headerGapBottomDp))
+                }
+            }
+            }
             }
 
             HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
@@ -565,7 +628,8 @@ fun DrawerContent(
             Box(modifier = Modifier.weight(1f)) {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
+                    // 果冻边界冗余（1.1.26.6）：侧滑对话列表同款——顶/底继续拖跟手位移，松手回弹
+                    modifier = Modifier.fillMaxSize().jellyOverscroll(offsetPx = jellyOffsetPx),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     if (searchQuery.isNotBlank()) {
@@ -587,12 +651,17 @@ fun DrawerContent(
                     currentId = if (searchQuery.isBlank()) currentId else null,
                     progress = indicatorProgress,
                     delta = indicatorDelta,
+                    deltaX = indicatorDeltaX,
+                    jellyY = jellyOffsetPx,
                     drawnY = indicatorDrawnY,
                     viewport = indicatorViewport,
                     installedId = indicatorInstalledId,
                     startY = { indicatorStartY() },
+                    isAppearFlight = { indicatorLastId == null },
                     startPadPx = indicatorStartPadPx,
-                    heightPx = indicatorHeightPx
+                    heightPx = indicatorHeightPx,
+                    dotPx = indicatorDotPx,
+                    barWPx = indicatorBarWPx
                 ) { indicatorViewport.floatValue = it }
             }
 
@@ -636,6 +705,10 @@ fun DrawerContent(
  * 收放写在绘制块里（不是改 height），免得每帧重组。
  * （旧注释写的「中段收 30%」是上一稿的遗留，现在方向相反：拉长，见下面绘制块里的 `f`。）
  *
+ * 出现分支是另一套画法（1.1.29 工单⑦）：**圆点→竖条形变**（宽 dot→barW、高 dot→barH，
+ * 同一进度插值、圆角半径=min(w,h)/2 自然从圆收成胶囊），与右移同起同落 ——
+ * 到位那一刻正好拉完成条。「水滴指动画不指形态」，液尾/spring 一概删掉。
+ *
  * 外层 [clipToBounds] 是必须的：竖条可能跑到列表可视区之外（当前对话被滚走了），
  * 不裁的话它会浮在头部/底部栏上面。
  */
@@ -646,12 +719,17 @@ private fun BoxScope.DrawerIndicatorBar(
     currentId: String?,
     progress: Animatable<Float, androidx.compose.animation.core.AnimationVector1D>,
     delta: androidx.compose.runtime.State<Float>,
+    deltaX: androidx.compose.runtime.State<Float>,
+    jellyY: androidx.compose.runtime.State<Float>,
     drawnY: FloatArray,
     viewport: androidx.compose.runtime.State<Float>,
     installedId: Array<String?>,
     startY: () -> Float,
+    isAppearFlight: () -> Boolean,
     startPadPx: Float,
     heightPx: Float,
+    dotPx: Float,
+    barWPx: Float,
     onMeasured: (Float) -> Unit
 ) {
     Box(
@@ -675,12 +753,16 @@ private fun BoxScope.DrawerIndicatorBar(
                                 // 贴着行走：位置每帧现算（滚动/抽屉平移都自动跟上），再加动画的残余偏移
                                 installedId[0] == currentId ->
                                     target + delta.value * (1f - progress.value)
+                                // 出现弹入（含动画还没装上的首帧）：起点就是目标行（x 在左侧起点，见下）。
+                                // 1.1.29.8 工单④：未装帧必须按出现第 0 帧画——旧分支「首次直接到位」
+                                // 会在 LaunchedEffect 之前闪一帧终点位的竖条（首帧跳变/位置不对的根子）
+                                isAppearFlight() -> target
                                 // ⚠️ 刚换行、动画还没装上（LaunchedEffect 在这帧布局/绘制之后才跑）：
                                 // 这一帧 progress 还停在上一次的 1、delta 是 0，照上面那条算就是
                                 // **先闪一下目标行**再滑回起点重来 —— 看着像「瞬移＋倒放」。
                                 // 直接按起点画，与动画第 0 帧严丝合缝（真机常常同帧内追平，慢机器 1~2 帧）。
                                 installedId[0] != null -> startY()
-                                // 首次出现（从来没装过动画）：直接到位，不从边缘飞进来
+                                // 从未播过动画也不在出现程中（开屏直进对话）：直接到位
                                 else -> target
                             }
                         } else {
@@ -696,25 +778,53 @@ private fun BoxScope.DrawerIndicatorBar(
                         // 记下这一帧真正画在哪儿：切换动画的起点、以及上面判上下的依据都取它。
                         // 纯数组写、不是 Compose 状态，绘制期写不引发重组/重绘。
                         drawnY[0] = y
-                        IntOffset(startPadPx.roundToInt(), y.roundToInt())
+                        // x：换行滑行走直线落点；出现弹入从面板左缘外掠入（残余 ×(1−进度)）。
+                        // barX 就是形状左缘：换行滑行落点=startPad，出现期从屏幕左缘插值过来（静止位置一寸不动）。
+                        val barX = when {
+                            installedId[0] == currentId ->
+                                startPadPx + deltaX.value * (1f - progress.value)
+                            // 出现弹入一律左缘起步（未装上的首帧同帧 0，见 y 分支的注释）
+                            isAppearFlight() -> -dotPx * 0.5f
+                            else -> startPadPx
+                        }
+                        IntOffset(barX.roundToInt(), (y + jellyY.value).roundToInt())
                     }
-                    .width(3.dp)
+                    // 节点就是竖条本体宽；出现期圆点比节点宽，drawBehind 默认不裁、照样画得下
+                    .width(with(LocalDensity.current) { barWPx.toDp() })
                     .height(30.dp)
                     .drawBehind {
-                        // 长度：**先拉长再缩小** —— 起步蓄力、中段（速度最快处）拉到最长，
-                        // 落位时收回原长。峰值取在 44% 处（sin(π·p^0.85)），比速度峰值早一点点，
-                        // 看着像「先探出去、再跟上来」，那口气就是「灵动」的来源。
-                        // ⚠️ 拉长会画到节点外面（30dp 的 Box 里画 ~39dp）—— drawBehind 默认
-                        // **不裁**到节点边界，靠的就是这个；别在这条链上加 clip。
-                        val f = 1f + 0.30f *
-                            kotlin.math.sin(kotlin.math.PI.toFloat() * progress.value.pow(0.85f))
-                        val h = size.height * f
-                        drawRoundRect(
-                            color = colors.Primary,
-                            topLeft = Offset(0f, (size.height - h) / 2f),
-                            size = androidx.compose.ui.geometry.Size(size.width, h),
-                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx(), 2.dp.toPx())
-                        )
+                        // 未装帧按出现第 0 帧画（圆点），防首帧闪跳（工单④）
+                        val p = if (installedId[0] == null && isAppearFlight()) 0f
+                        else progress.value.coerceIn(0f, 1f)
+                        if (isAppearFlight()) {
+                            // 出现（1.1.29 工单⑦）：圆点→竖条形变，宽高同一进度插值，
+                            // 圆角=min(w,h)/2 从整圆自然收成胶囊；与右移同起同落，到位正好成条
+                            val w = dotPx + (barWPx - dotPx) * p
+                            val h = dotPx + (heightPx - dotPx) * p
+                            drawRoundRect(
+                                color = colors.Primary,
+                                topLeft = Offset(0f, (size.height - h) / 2f),
+                                size = androidx.compose.ui.geometry.Size(w, h),
+                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                                    kotlin.math.min(w, h) / 2f, kotlin.math.min(w, h) / 2f
+                                )
+                            )
+                        } else {
+                            // 换行滑行：长度**先拉长再缩小** —— 起步蓄力、中段（速度最快处）
+                            // 拉到最长，落位收回原长。峰值取在 44% 处（sin(π·p^0.85)），比速度
+                            // 峰值早一点点，看着像「先探出去、再跟上来」。
+                            // ⚠️ 拉长会画到节点外面（30dp 的 Box 里画 ~39dp）—— drawBehind 默认
+                            // **不裁**到节点边界，靠的就是这个；别在这条链上加 clip。
+                            val f = 1f + 0.30f *
+                                kotlin.math.sin(kotlin.math.PI.toFloat() * p.pow(0.85f))
+                            val h = size.height * f
+                            drawRoundRect(
+                                color = colors.Primary,
+                                topLeft = Offset(0f, (size.height - h) / 2f),
+                                size = androidx.compose.ui.geometry.Size(barWPx, h),
+                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(barWPx / 2f, barWPx / 2f)
+                            )
+                        }
                     }
             )
         }
@@ -773,7 +883,13 @@ private fun androidx.compose.foundation.lazy.LazyListScope.conversationItems(
                     onClick = { if (selectMode) onToggleSelect(conv) else onSelectConversation(conv) },
                     onLongPress = { if (selectMode) onToggleSelect(conv) else onEnterSelectMode(conv) },
                     onOpenMenu = onOpenMenu,
-                    hasFavorites = favoriteConvIds.contains(conv.id)
+                    hasFavorites = favoriteConvIds.contains(conv.id),
+                    // 删除/批量删除不再瞬灭（1.1.26 补缺）：淡出+收拢，相邻行平滑补位。
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = FreeChatAnimation.messageFadeTween,
+                        placementSpec = FreeChatAnimation.listPlacementTween,
+                        fadeOutSpec = FreeChatAnimation.listFadeOutTween
+                    )
                 )
             }
         }
@@ -806,7 +922,14 @@ private fun androidx.compose.foundation.lazy.LazyListScope.searchResultItems(
         }
     } else {
         items(results, key = { "${it.conversation.id}_${it.messageId}" }) { item ->
-            SearchResultRow(item = item, onClick = { onSelect(item.conversation, item.messageId) })
+            // 搜索结果↔历史分组整表切换的行进出场（1.1.26 补缺），不再瞬换。
+            Box(Modifier.animateItem(
+                fadeInSpec = FreeChatAnimation.messageFadeTween,
+                placementSpec = FreeChatAnimation.listPlacementTween,
+                fadeOutSpec = FreeChatAnimation.listFadeOutTween
+            )) {
+                SearchResultRow(item = item, onClick = { onSelect(item.conversation, item.messageId) })
+            }
         }
     }
     item { Spacer(Modifier.height(8.dp)) }
@@ -1057,8 +1180,12 @@ private fun SettingsFavoritesRowFull(
     onFavoritesRowPositioned: ((Rect) -> Unit)?
 ) {
     val s = LocalStrings.current
+    val colors = LocalFreeChatColors.current
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.Surface)
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         DrawerBottomRow(
@@ -1111,7 +1238,8 @@ private fun RowScope.DrawerBottomRow(
                 val size = coords.size
                 onPositioned?.invoke(Rect(pos.x, pos.y, pos.x + size.width, pos.y + size.height))
             }
-            .clip(RoundedCornerShape(10.dp))
+            // 1.1.29.5（用户拍板）：三选项不要独立色块——直接落在整行 Surface 背景板上，
+            // 色块与底板的色差/接缝都难看；列表果冻平移的隔离仍由整行实体底兜住
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 14.dp)
     ) {
@@ -1309,16 +1437,28 @@ private fun ConversationItem(
                 )
             }
 
-            if (selectMode) {
+            // 勾选圈↔「···」键互换与选中填色都走过渡（1.1.26 动画补缺），不再硬切。
+            AnimatedContent(
+                targetState = selectMode,
+                transitionSpec = { FreeChatAnimation.contentReplacement() },
+                label = "convRowTrailing"
+            ) { selecting ->
+            if (selecting) {
                 // 多选态：右侧换成勾选圈（自绘，跟整套 UI 的手绘风格一致，也不依赖扩展图标集）
+                val fill by animateColorAsState(
+                    if (isSelected) colors.Primary else Color.Transparent,
+                    FreeChatAnimation.colorTween, label = "drawerCheckFill")
+                val stroke by animateColorAsState(
+                    if (isSelected) colors.Primary else colors.TextTertiary.copy(alpha = 0.6f),
+                    FreeChatAnimation.colorTween, label = "drawerCheckStroke")
                 Box(
                     modifier = Modifier
                         .size(20.dp)
                         .clip(CircleShape)
-                        .background(if (isSelected) colors.Primary else Color.Transparent)
+                        .background(fill)
                         .border(
                             width = 1.5.dp,
-                            color = if (isSelected) colors.Primary else colors.TextTertiary.copy(alpha = 0.6f),
+                            color = stroke,
                             shape = CircleShape
                         ),
                     contentAlignment = Alignment.Center
@@ -1345,6 +1485,7 @@ private fun ConversationItem(
                         modifier = Modifier.size(18.dp)
                     )
                 }
+            }
             }
         }
     }

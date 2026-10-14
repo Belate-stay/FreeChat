@@ -74,7 +74,9 @@ private fun HeaderActionButton(
         modifier
             .then(if (icon) Modifier.size(48.dp) else Modifier.heightIn(min = 48.dp).padding(horizontal = 7.dp))
             .clip(if (icon) CircleShape else RoundedCornerShape(24.dp))
-            .clickable(enabled = enabled, interactionSource = source, indication = null,
+            // 1.1.29.5：标题栏按钮加触点波纹（镂空/卡片两式都吃）——缩放仍归 pressMotion，这里只波不缩
+            .clickable(enabled = enabled, interactionSource = source,
+                indication = com.freechat.ui.animation.rememberMotionIndication(pressScale = false),
                 role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {

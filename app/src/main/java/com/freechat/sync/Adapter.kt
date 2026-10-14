@@ -103,6 +103,20 @@ object Adapter {
 
     fun markDirty(key: String) = mark(key)
 
+    /** Persist media deletions too; closing the app must not lose the pending cloud removal. */
+    fun markImagesReleased(hashes: Set<String>) {
+        if (hashes.isEmpty()) return
+        synchronized(this) {
+            hashes.forEach { hash ->
+                val key = objKey(SyncKind.IMG, hash)
+                dirtyVersions.changed(key)
+                dirty.add(key)
+            }
+        }
+        persistQueue()
+        notifyDirty()
+    }
+
     /** A deletion must not depend on an old diff snapshot or on which child files happen to exist. */
     fun markConversationDeleted(id: String, imageHashes: Set<String> = emptySet()) {
         val keys = listOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET).map { objKey(it, id) } +

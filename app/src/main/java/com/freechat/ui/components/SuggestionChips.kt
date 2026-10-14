@@ -82,9 +82,13 @@ fun ModelChip(
             )
             if (com.freechat.i18n.localizedModelDesc(model, s).isNotEmpty()) {
                 Text(
-                    com.freechat.i18n.localizedModelDesc(model, s),
+                    // 内置模型备注尾句「作者自用 API…」统一红字（1.1.28）
+                    modelDescAnnotated(
+                        com.freechat.i18n.localizedModelDesc(model, s),
+                        base = colors.TextTertiary,
+                        red = colors.ErrorRed
+                    ),
                     style = MaterialTheme.typography.bodySmall,
-                    color = colors.TextTertiary
                 )
             }
         }

@@ -115,6 +115,12 @@ data class ShareInfo(
     val revoked: Boolean = false
 )
 
+/**
+ * 分享页的公开地址（服务端 share.js 同口径：PUBLIC_BASE + /s/<id>，域名确定式）。
+ * 列表接口不回 url，客户端按 id 现拼——「查看内容 / 复制链接」都用它。
+ */
+fun shareWebUrl(id: String): String = "https://freechater.com/s/$id"
+
 data class ShareListResult(
     val shares: List<ShareInfo> = emptyList()
 )

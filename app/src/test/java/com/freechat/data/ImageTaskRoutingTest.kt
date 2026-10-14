@@ -145,4 +145,24 @@ class ImageTaskRoutingTest {
         assertEquals(reply.imagePrompt, request.prompt)
         assertTrue(request.referenceSources.isEmpty())
     }
+
+    @Test fun changingTheAspectDropsTheStaleRatioFromTheMergedPrompt() {
+        // 旧「3:4竖幅」和新「5:3横幅」同处一 prompt 会打架——本次换比例时旧描述必须清掉。
+        val original = user("画一只白猫，3:4竖幅，高4宽3")
+        val row = picture.copy(imagePrompt = "画一只白猫，3:4竖幅，高4宽3")
+        val text = "将这张图修改为5:3横幅比例，注意是横幅，长5高3"
+        val request = requireNotNull(plan(text, listOf(original, row, user(text))))
+        assertEquals("EDIT", request.kind.name)
+        assertFalse(request.prompt.contains("3:4"))
+        assertFalse(request.prompt.contains("高4宽3"))
+        assertTrue(request.prompt.contains("长5高3"))
+        assertTrue(request.prompt.contains("白猫"))
+    }
+
+    @Test fun anEditWithoutNewAspectKeepsTheOldRatio() {
+        val original = user("画一只白猫，3:4竖幅")
+        val row = picture.copy(imagePrompt = "画一只白猫，3:4竖幅")
+        val request = requireNotNull(plan("背景换成海边", listOf(original, row, user("背景换成海边"))))
+        assertTrue(requireNotNull(request).prompt.contains("3:4竖幅"))
+    }
 }

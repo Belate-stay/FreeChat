@@ -45,7 +45,7 @@ class Beta94RegressionTest {
         // 内置模型名是产品事实，三语一致（错了用户会找不到）
         listOf("zh-CN", "zh-TW", "en").forEach { locale ->
             val s = com.freechat.i18n.buildStrings(locale)
-            assertTrue("$locale notice2 应点名 mimo-v2.6-flash", s.wechatNotice2.contains("mimo-v2.6-flash"))
+            assertTrue("$locale notice2 应点名 DeepSeek-V4.1-Flash", s.wechatNotice2.contains("DeepSeek-V4.1-Flash"))
         }
     }
 }

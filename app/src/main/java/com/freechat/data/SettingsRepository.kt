@@ -39,6 +39,8 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         internal val KEY_ENABLE_WEB_SEARCH = booleanPreferencesKey("enable_web_search")
         internal val KEY_SHOW_SEARCH_SOURCES = booleanPreferencesKey("show_search_sources")
         internal val KEY_SHOW_THINKING = booleanPreferencesKey("show_thinking")
+        /** 1.1.29.8：默认折叠思考过程——思考中展开、回复开流自动折起；仅「显示思考过程」开启时可见。默认开启 */
+        internal val KEY_COLLAPSE_THINKING = booleanPreferencesKey("collapse_thinking")
         internal val KEY_LANGUAGE_CODE = stringPreferencesKey("language_code")
         internal val KEY_FONT_SIZE = intPreferencesKey("font_size_v2")
         /** 输入框样式（1.0.70）：0 = 简洁（现状），1 = 完整。老数据缺键 = 0 = 简洁，零迁移 */
@@ -96,6 +98,17 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         internal val KEY_CLAUDE_DELETED = booleanPreferencesKey("claude_deleted")
 
         /**
+         * 内置对话「FreeChat简介说明」是否被**用户亲手删掉**过（1.1.29）。单向置真，跟着账号同步。
+         * 固定 id 的种子（见 [BuiltInIntro]）只在「没删过且盘上没有」时落一次；删了就永远消失。
+         */
+        internal val KEY_INTRO_DELETED = booleanPreferencesKey("intro_deleted")
+        /** 1.1.20：冲突副本提醒勾过「永不提醒」（置真后不论还有没有副本都不再弹） */
+        internal val KEY_COPY_NOTICE_NEVER = booleanPreferencesKey("copy_notice_never")
+        /** 1.1.20：更新提醒勾「近期不再提醒」的时刻（0 = 从没勾过；3 天后恢复提醒，见 NoticePolicy） */
+        internal val KEY_UPDATE_SNOOZE_AT = longPreferencesKey("update_snooze_at")
+        internal val KEY_LAST_LAUNCH_NOTICE = stringPreferencesKey("last_launch_notice")
+
+        /**
          * 「默认值改到第几版了」的一次性闩（1.0.64 引入）。
          *
          * 新装默认值和老用户当前值本来该各走各的 —— 但**没被改过的项在盘上根本没有键**，
@@ -105,16 +118,19 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         internal val KEY_DEFAULTS_VERSION = intPreferencesKey("defaults_version")
 
         /** 当前这一版默认值。加新默认值就 +1，并在 [migrateDefaultsIfNeeded] 里补一段。 */
-        private const val DEFAULTS_VERSION = 2
+        private const val DEFAULTS_VERSION = 3
 
-        // ---- 1.0.64 起的新装默认值 ----
-        // 每一对（新默认值 / 老默认值）都成对写在这里，别散落到迁移函数里去 ——
+        // ---- 新装默认值 ----
+        // 每一对（新默认值 / 老默认值）都成对写在这里与 migrateDefaultsIfNeeded 的对应版本块里 ——
         // 散着写早晚会出现「改了默认值却忘了同步改迁移里的老值」，
         // 那种 bug 的表现是「老用户被静默改设置」，没人会报上来。
-        private const val DEFAULT_SHOW_THINKING = true          // 老：false
-        private const val DEFAULT_COLOR_THEME_ORDINAL = 2       // 2 = WHITE(纯白)；老：0 = BROWN(莫兰迪暖棕)
+        // 1.1.28（v3）换代口径（用户拍板）：首次点开=新默认；老用户延续已有设置；新加入的设置项遵守默认。
+        private const val DEFAULT_SHOW_THINKING = false         // 1.1.28 前：true
+        private const val DEFAULT_COLOR_THEME_ORDINAL = 4       // 4 = PINE(松绿)；1.1.28 前：2 = WHITE(纯白)（更老：0 = BROWN）
         private const val DEFAULT_ADVANCED_MATERIAL = true      // 老：false
         private const val DEFAULT_LIQUID_BACKDROP = SettingsPresentationPolicy.DEFAULT_LIQUID_BACKDROP
+        private const val DEFAULT_INPUT_STYLE_ORDINAL = 1       // 1 = COMPLETE(完整)；1.1.28 前：0 = COMPACT(简洁)
+        private const val DEFAULT_HEADER_BAR_STYLE_ORDINAL = 1  // 1 = CUTOUT(镂空)；1.1.28 前：0 = CARD(卡片)
 
         // ---- 写入通知：同步引擎靠它知道"设置被用户改了" ----
 
@@ -239,7 +255,9 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         prefs[KEY_SELECTED_MODEL] ?: ""
     }
 
-    val selectedVisualModelId: Flow<String> = dataStore.data.map { prefs ->
+    // 过 afterDefaultMigration：v3 迁移要给「没选过生图模型」的老用户钉回旧默认（池首 Seedream-Lite），
+    // 不先迁移就发值会按新默认闪一帧 gpt-image-2.5 再跳回
+    val selectedVisualModelId: Flow<String> = dataStore.data.afterDefaultMigration().map { prefs ->
         prefs[KEY_SELECTED_VISUAL_MODEL] ?: ""
     }
 
@@ -293,6 +311,11 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         prefs[KEY_SHOW_THINKING] ?: DEFAULT_SHOW_THINKING
     }
 
+    // 新键零迁移：缺键=默认开启（工单「打开思考过程后折叠思考过程默认开启」）
+    val collapseThinking: Flow<Boolean> = dataStore.data.afterDefaultMigration().map { prefs ->
+        prefs[KEY_COLLAPSE_THINKING] ?: true
+    }
+
     val languageCode: Flow<String> = dataStore.data.map { prefs ->
         prefs[KEY_LANGUAGE_CODE] ?: "system"
     }
@@ -301,8 +324,8 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         prefs[KEY_FONT_SIZE] ?: 1  // 1 = MEDIUM（标准）
     }
 
-    val inputStyleOrdinal: Flow<Int> = dataStore.data.map { prefs ->
-        prefs[KEY_INPUT_STYLE] ?: 0  // 0 = COMPACT（简洁，现状）
+    val inputStyleOrdinal: Flow<Int> = dataStore.data.afterDefaultMigration().map { prefs ->
+        prefs[KEY_INPUT_STYLE] ?: DEFAULT_INPUT_STYLE_ORDINAL
     }
 
     val inputBarStateOrdinal: Flow<Int> = dataStore.data.map { prefs ->
@@ -352,8 +375,8 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         prefs[KEY_ADVANCED_MATERIAL] ?: DEFAULT_ADVANCED_MATERIAL
     }
 
-    val headerBarStyle: Flow<HeaderBarStyle> = dataStore.data.map { prefs ->
-        HeaderBarStyle.fromOrdinal(prefs[KEY_HEADER_BAR_STYLE] ?: HeaderBarStyle.CARD.ordinal)
+    val headerBarStyle: Flow<HeaderBarStyle> = dataStore.data.afterDefaultMigration().map { prefs ->
+        HeaderBarStyle.fromOrdinal(prefs[KEY_HEADER_BAR_STYLE] ?: DEFAULT_HEADER_BAR_STYLE_ORDINAL)
     }
 
     val systemDarkTheme: Flow<Boolean> = dataStore.data.map { prefs ->
@@ -415,6 +438,29 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
     }
 
     /**
+     * 内置「FreeChat简介说明」是否被**用户亲手删掉**过（1.1.29，语义同 [claudeDeleted]）。
+     * 固定 id 的种子只需要这一个闩：盘上有就跳过、删过就永不再种、丢了就补回（幂等）。
+     */
+    val introDeleted: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[KEY_INTRO_DELETED] ?: false
+    }
+
+    /** 1.1.20：冲突副本提醒 —— 勾过「永不提醒」就永远不弹（见 NoticePolicy） */
+    val copyNoticeNever: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[KEY_COPY_NOTICE_NEVER] ?: false
+    }
+
+    /** 1.1.20：更新提醒 —— 上次勾「近期不再提醒」的时刻（0 = 从没勾过） */
+    val updateSnoozeAt: Flow<Long> = dataStore.data.map { prefs ->
+        prefs[KEY_UPDATE_SNOOZE_AT] ?: 0L
+    }
+
+    /** 上次启动弹的是哪个提醒（copy/update，空=没弹过）——两个都中时轮流来，不固定优先级 */
+    val lastLaunchNotice: Flow<String> = dataStore.data.map { prefs ->
+        prefs[KEY_LAST_LAUNCH_NOTICE] ?: ""
+    }
+
+    /**
      * 当前这份设置的原始快照（同步引擎按名字读原值用，比如主题的枚举序号）。
      *
      * 只读 —— 拿它去改是不行的：所有落盘一律走 [edit]，那里才挂着写通知。
@@ -435,21 +481,36 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
      */
     private suspend fun migrateDefaultsIfNeeded() {
         val prefs = dataStore.data.first()
-        if (prefs[KEY_DEFAULTS_VERSION] == DEFAULTS_VERSION) return
+        val version = prefs[KEY_DEFAULTS_VERSION] ?: 0
+        if (version >= DEFAULTS_VERSION) return
         val freshInstall = prefs.asMap().isEmpty()
         edit { mutable ->
             if (!freshInstall) {
-                // 老默认值（= 1.0.64 之前代码里写的那些），成对见 companion 顶部的常量。
-                // 全部按「键不存在才写」走 —— DEFAULTS_VERSION 升版重跑时不会碰用户改过的值
-                if (KEY_SHOW_THINKING !in mutable) mutable[KEY_SHOW_THINKING] = false
-                if (KEY_COLOR_THEME !in mutable) mutable[KEY_COLOR_THEME] = 0
-                if (KEY_ADVANCED_MATERIAL !in mutable) mutable[KEY_ADVANCED_MATERIAL] = false
-                if (KEY_LIQUID_BACKDROP !in mutable) mutable[KEY_LIQUID_BACKDROP] = false
-                // 1.0.75（v2）：深度思考换语义 —— deepThinkingDefault 从「模型的默认值」变成
-                // 「全局设置里绑定模型的开关」，且**所有模型默认关**。1.0.74 写进模型 JSON 的
-                // true 是当时的字段默认值、不是用户选的，一律归零（用户在新设置页打开的才算数）。
-                // 1.0.74 实机未验，不存在「用户已经打开过」的情形；全新安装更是什么都不用写。
-                resetDeepThinkDefaults(mutable)
+                // 分版本块跑：升版时只补「比自己新的那些块」，绝不重放老块的钉子 ——
+                // v2 的钉子是那个年代的老默认值，v3 用户（含 v2 时的新装户）要是被重放一遍，
+                // 就会被钉回 v2 年代的值，正是「老用户被静默改设置」。
+                if (version < 2) {
+                    // v2 老默认值（= 1.0.64 之前代码里写的那些）。全部按「键不存在才写」走
+                    if (KEY_SHOW_THINKING !in mutable) mutable[KEY_SHOW_THINKING] = false
+                    if (KEY_COLOR_THEME !in mutable) mutable[KEY_COLOR_THEME] = 0
+                    if (KEY_ADVANCED_MATERIAL !in mutable) mutable[KEY_ADVANCED_MATERIAL] = false
+                    if (KEY_LIQUID_BACKDROP !in mutable) mutable[KEY_LIQUID_BACKDROP] = false
+                    // 1.0.75（v2）：深度思考换语义 —— deepThinkingDefault 从「模型的默认值」变成
+                    // 「全局设置里绑定模型的开关」，且**所有模型默认关**。1.0.74 写进模型 JSON 的
+                    // true 是当时的字段默认值、不是用户选的，一律归零（用户在新设置页打开的才算数）。
+                    // 1.0.74 实机未验，不存在「用户已经打开过」的情形；全新安装更是什么都不用写。
+                    resetDeepThinkDefaults(mutable)
+                }
+                if (version < 3) {
+                    // v3（1.1.28）：本版改了默认值的键，按**改动前的代码默认值**钉住 =「延续已有设置」。
+                    // 新加入的设置项（内置识图/ASR 的默认选中）不钉 —— 它们遵守新默认（用户拍板）。
+                    if (KEY_SHOW_THINKING !in mutable) mutable[KEY_SHOW_THINKING] = true          // 旧默认 true
+                    if (KEY_COLOR_THEME !in mutable) mutable[KEY_COLOR_THEME] = 2                 // 旧默认 WHITE(纯白)
+                    if (KEY_INPUT_STYLE !in mutable) mutable[KEY_INPUT_STYLE] = 0                 // 旧默认 COMPACT(简洁)
+                    if (KEY_HEADER_BAR_STYLE !in mutable) mutable[KEY_HEADER_BAR_STYLE] = 0       // 旧默认 CARD(卡片)
+                    // 旧默认=池首 Doubao-Seedream-5.0-Lite（新装默认改 gpt-image-2.5，见 ChatViewModel）
+                    if (KEY_SELECTED_VISUAL_MODEL !in mutable) mutable[KEY_SELECTED_VISUAL_MODEL] = "ep-20260629143810-ffvjl"
+                }
             }
             mutable[KEY_DEFAULTS_VERSION] = DEFAULTS_VERSION
         }
@@ -555,6 +616,10 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         edit { prefs -> prefs[KEY_SHOW_THINKING] = enabled }
     }
 
+    suspend fun saveCollapseThinking(enabled: Boolean) {
+        edit { prefs -> prefs[KEY_COLLAPSE_THINKING] = enabled }
+    }
+
     suspend fun saveLanguageCode(code: String) {
         edit { prefs -> prefs[KEY_LANGUAGE_CODE] = code }
     }
@@ -656,6 +721,24 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
 
     suspend fun saveClaudeDeleted(deleted: Boolean) {
         edit { prefs -> prefs[KEY_CLAUDE_DELETED] = deleted }
+    }
+
+    suspend fun saveIntroDeleted(deleted: Boolean) {
+        edit { prefs -> prefs[KEY_INTRO_DELETED] = deleted }
+    }
+
+    /** 1.1.20：冲突副本提醒的「永不提醒」（置真后不回退） */
+    suspend fun saveCopyNoticeNever(never: Boolean) {
+        edit { prefs -> prefs[KEY_COPY_NOTICE_NEVER] = never }
+    }
+
+    /** 1.1.20：更新提醒的「近期不再提醒」时刻（毫秒；0 = 清除冷却） */
+    suspend fun saveUpdateSnoozeAt(ms: Long) {
+        edit { prefs -> prefs[KEY_UPDATE_SNOOZE_AT] = ms }
+    }
+
+    suspend fun saveLastLaunchNotice(kind: String) {
+        edit { prefs -> prefs[KEY_LAST_LAUNCH_NOTICE] = kind }
     }
 }
 

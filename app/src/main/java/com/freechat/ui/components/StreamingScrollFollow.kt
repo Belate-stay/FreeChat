@@ -52,9 +52,10 @@ class BottomFollowPolicy {
 
 /** One update per rendered frame, outside measurement; no synthetic trailing spacer. */
 @Composable
-fun rememberStreamingScrollFollow(list: LazyListState, conversationId: String?): BottomFollowPolicy {
+fun rememberStreamingScrollFollow(list: LazyListState, conversationId: String?, enabled: Boolean = true): BottomFollowPolicy {
     val policy = remember(list, conversationId) { BottomFollowPolicy() }
-    LaunchedEffect(policy) {
+    LaunchedEffect(policy, enabled) {
+        if (!enabled) return@LaunchedEffect
         snapshotFlow { list.layoutInfo to list.isScrollInProgress }.conflate().collect { (_, scrolling) ->
             policy.observe(!list.canScrollForward, scrolling)
             if (policy.following && !scrolling && list.canScrollForward) {

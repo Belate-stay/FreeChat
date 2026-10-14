@@ -14,6 +14,7 @@ import com.freechat.data.SettingsRepository.Companion.KEY_FONT_SIZE
 import com.freechat.data.SettingsRepository.Companion.KEY_INPUT_BAR_STATE
 import com.freechat.data.SettingsRepository.Companion.KEY_INPUT_STYLE
 import com.freechat.data.SettingsRepository.Companion.KEY_GLOBAL_MEMORIES
+import com.freechat.data.SettingsRepository.Companion.KEY_INTRO_DELETED
 import com.freechat.data.SettingsRepository.Companion.KEY_LANGUAGE_CODE
 import com.freechat.data.SettingsRepository.Companion.KEY_LENGTH_MODE
 import com.freechat.data.SettingsRepository.Companion.KEY_LIQUID_BACKDROP
@@ -236,6 +237,8 @@ object SettingsBridge {
         p[KEY_CLAUDE_SEEDED]?.let { o.addProperty("claudeSeeded", it) }
         // 用户亲手删过没有。也得同步 —— 在 A 机删掉，B 机不该让它在下次冷启动时又长出来。
         p[KEY_CLAUDE_DELETED]?.let { o.addProperty("claudeDeleted", it) }
+        // 内置「FreeChat简介说明」同理（1.1.29）
+        p[KEY_INTRO_DELETED]?.let { o.addProperty("introDeleted", it) }
         return if (o.size() == 0) null else o
     }
 
@@ -329,6 +332,10 @@ object SettingsBridge {
         // 同上，单向置真
         if (o.boolean("claudeDeleted") == true && repo.currentPreferences()[KEY_CLAUDE_DELETED] != true) {
             repo.saveClaudeDeleted(true)
+        }
+        // 同上，单向置真（内置简介对话，1.1.29）
+        if (o.boolean("introDeleted") == true && repo.currentPreferences()[KEY_INTRO_DELETED] != true) {
+            repo.saveIntroDeleted(true)
         }
     }
 

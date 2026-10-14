@@ -6,6 +6,7 @@ import com.freechat.ui.components.HeaderTextButton
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -80,15 +81,13 @@ private enum class FavSort { FAVORITE_TIME, CONV_TIME }
 /** 收藏条目的选择键：与 LazyColumn 的 item key 同构（对话 + 消息） */
 private fun favKey(item: FavoriteItem): String = "${item.conversation.id}_${item.message.id}"
 
-/** 调节菜单层级：主菜单 / 筛选对话 / 排序方式 */
-private enum class TuneLevel { MAIN, FILTER, SORT }
-
 /** 收藏夹页：平铺所有被收藏的消息（每条带所属对话名），标题栏右侧「调节」按钮承载筛选/排序，可点进「收藏详情」 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FavoritesScreen(
     viewModel: ChatViewModel,
     isDark: Boolean,
+    listState: androidx.compose.foundation.lazy.LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
     onBack: () -> Unit,
     onOpenDetail: (FavoriteItem) -> Unit
 ) {
@@ -107,7 +106,7 @@ fun FavoritesScreen(
     var sortMode by remember { mutableStateOf(FavSort.FAVORITE_TIME) }
     // 调节菜单状态
     var showTuneMenu by remember { mutableStateOf(false) }
-    var tuneLevel by remember { mutableStateOf(TuneLevel.MAIN) }
+    var tuneLevel by remember { mutableStateOf(com.freechat.ui.components.TuneLevel.MAIN) }
 
     // ===== 多选：长按任一条进入，可批量取消收藏（整段取消，见 ChatViewModel.unfavoriteItems） =====
     var selectMode by remember { mutableStateOf(false) }
@@ -173,6 +172,7 @@ fun FavoritesScreen(
                 }
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 16.dp, end = 16.dp,
@@ -191,6 +191,12 @@ fun FavoritesScreen(
                         }
                     } else {
                         items(displayList, key = { favKey(it) }) { fav ->
+                            // 取消收藏不再瞬灭（1.1.26 补缺）：淡出+收拢，相邻行平滑补位。
+                            Box(Modifier.animateItem(
+                                fadeInSpec = FreeChatAnimation.messageFadeTween,
+                                placementSpec = FreeChatAnimation.listPlacementTween,
+                                fadeOutSpec = FreeChatAnimation.listFadeOutTween
+                            )) {
                             FavoriteRow(
                                 item = fav,
                                 colors = colors,
@@ -201,6 +207,7 @@ fun FavoritesScreen(
                                 onClick = { if (selectMode) toggleSelectFav(fav) else onOpenDetail(fav) },
                                 onLongPress = { if (selectMode) toggleSelectFav(fav) else enterSelectFav(fav) }
                             )
+                            }
                         }
                     }
                 }
@@ -219,8 +226,15 @@ fun FavoritesScreen(
                 .padding(top = 8.8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (selectMode) {
+            // 多选换头走 contentReplacement（1.1.26 动画补缺），不再整组闪换。
+            AnimatedContent(
+                targetState = selectMode,
+                transitionSpec = { FreeChatAnimation.contentReplacement() },
+                label = "favoritesHeader"
+            ) { selecting ->
+            if (selecting) {
                 // 多选态：返回键换成「取消」（退出多选，不离开收藏夹）
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 HeaderIconButton(onClick = { exitSelect() }) {
                     Icon(Icons.Filled.Close, s.cancel, tint = colors.TextPrimary)
                 }
@@ -242,7 +256,9 @@ fun FavoritesScreen(
                 ) {
                     Text(s.unfavorite, color = if (selectedItems.isEmpty()) colors.TextTertiary else colors.Primary)
                 }
+                }
             } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 HeaderIconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
                 }
@@ -256,10 +272,12 @@ fun FavoritesScreen(
                 // 调节按钮：点击开/关二级菜单
                 HeaderIconButton(onClick = {
                     showTuneMenu = !showTuneMenu
-                    if (showTuneMenu) tuneLevel = TuneLevel.MAIN
+                    if (showTuneMenu) tuneLevel = com.freechat.ui.components.TuneLevel.MAIN
                 }) {
                     Icon(Icons.Filled.Tune, s.newRules, tint = colors.TextPrimary)
                 }
+                }
+            }
             }
         }
 
@@ -294,14 +312,21 @@ fun FavoritesScreen(
             enter = FreeChatAnimation.menuEnter(TransformOrigin(1f, 0f)),
             exit = FreeChatAnimation.menuExit(TransformOrigin(1f, 0f))
         ) {
-            TuneMenu(
+            com.freechat.ui.components.TuneMenu(
                 level = tuneLevel,
                 onLevelChange = { tuneLevel = it },
-                convWithFavs = convWithFavs,
-                filterConvId = effectiveFilter,
+                filterLabel = s.filterByConversation,
+                sortLabel = s.sortBy,
+                filterEntries = listOf(com.freechat.ui.components.TuneEntry("", s.filterAll)) +
+                    convWithFavs.map { com.freechat.ui.components.TuneEntry(it.id, com.freechat.i18n.localizedConvTitle(it, s)) },
+                selectedFilterKey = effectiveFilter ?: "",
                 onFilterSelect = { filterConvId = it; showTuneMenu = false },
-                sortMode = sortMode,
-                onSortSelect = { sortMode = it; showTuneMenu = false },
+                sortEntries = listOf(
+                    com.freechat.ui.components.TuneEntry("FAVORITE_TIME", s.sortFavoriteTime),
+                    com.freechat.ui.components.TuneEntry("CONV_TIME", s.sortConvTime)
+                ),
+                selectedSortKey = sortMode.name,
+                onSortSelect = { sortMode = FavSort.valueOf(it); showTuneMenu = false },
                 colors = colors,
                 s = s,
                 hazeState = hazeState,
@@ -310,139 +335,6 @@ fun FavoritesScreen(
                 topPadding = statusBarHeightDp + titleBarAreaDp + 4.dp
             )
         }
-    }
-}
-
-/** 调节按钮弹出的二级菜单：主菜单（筛选对话/排序方式）↔ 子菜单（对话列表/排序选项），带滑动淡入过渡 */
-@Composable
-private fun TuneMenu(
-    modifier: Modifier = Modifier,
-    level: TuneLevel,
-    onLevelChange: (TuneLevel) -> Unit,
-    convWithFavs: List<Conversation>,
-    filterConvId: String?,
-    onFilterSelect: (String?) -> Unit,
-    sortMode: FavSort,
-    onSortSelect: (FavSort) -> Unit,
-    colors: FreeChatColors,
-    s: AppStrings,
-    hazeState: HazeState,
-    isDark: Boolean,
-    advancedMaterial: Boolean,
-    topPadding: Dp
-) {
-    val travel = with(LocalDensity.current) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.roundToPx() }
-    Box(
-        modifier = modifier
-            .padding(top = topPadding, end = 12.dp, start = 16.dp, bottom = 16.dp)
-            .width(220.dp)
-            .then(
-                if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, RoundedCornerShape(20.dp), elevation = 6.dp)
-                else Modifier.background(colors.Surface, RoundedCornerShape(20.dp))
-            )
-    ) {
-        AnimatedContent(
-            targetState = level,
-            transitionSpec = {
-                val forward = targetState != TuneLevel.MAIN
-                FreeChatAnimation.pageTransition(forward, travel, animateSize = true)
-            },
-            label = "tune_menu"
-        ) { lvl ->
-            when (lvl) {
-                TuneLevel.MAIN -> Column {
-                    TuneMenuParentItem(s.filterByConversation, colors) { onLevelChange(TuneLevel.FILTER) }
-                    TuneMenuParentItem(s.sortBy, colors) { onLevelChange(TuneLevel.SORT) }
-                }
-                TuneLevel.FILTER -> Column {
-                    TuneMenuHeader(s.filterByConversation, colors) { onLevelChange(TuneLevel.MAIN) }
-                    TuneMenuItem(s.filterAll, selected = filterConvId == null, colors) {
-                        onFilterSelect(null)
-                    }
-                    convWithFavs.forEach { conv ->
-                        TuneMenuItem(com.freechat.i18n.localizedConvTitle(conv, s), selected = filterConvId == conv.id, colors) {
-                            onFilterSelect(conv.id)
-                        }
-                    }
-                }
-                TuneLevel.SORT -> Column {
-                    TuneMenuHeader(s.sortBy, colors) { onLevelChange(TuneLevel.MAIN) }
-                    TuneMenuItem(s.sortFavoriteTime, selected = sortMode == FavSort.FAVORITE_TIME, colors) {
-                        onSortSelect(FavSort.FAVORITE_TIME)
-                    }
-                    TuneMenuItem(s.sortConvTime, selected = sortMode == FavSort.CONV_TIME, colors) {
-                        onSortSelect(FavSort.CONV_TIME)
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** 主菜单项：文字 + 右侧箭头（进入子菜单） */
-@Composable
-private fun TuneMenuParentItem(label: String, colors: FreeChatColors, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 13.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = colors.TextPrimary,
-            modifier = Modifier.weight(1f)
-        )
-        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
-    }
-}
-
-/** 子菜单项：文字 + （选中时）对勾 */
-@Composable
-private fun TuneMenuItem(label: String, selected: Boolean, colors: FreeChatColors, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (selected) colors.Primary else colors.TextPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        if (selected) {
-            Icon(Icons.Filled.Check, null, tint = colors.Primary, modifier = Modifier.size(18.dp))
-        }
-    }
-}
-
-/** 子菜单顶部返回头：返回箭头 + 标题，点击回到主菜单 */
-@Composable
-private fun TuneMenuHeader(label: String, colors: FreeChatColors, onBack: () -> Unit) {
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onBack)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = colors.Primary, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(
-                label,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                color = colors.Primary
-            )
-        }
-        HorizontalDivider(color = colors.Divider.copy(alpha = 0.5f))
     }
 }
 
@@ -518,18 +410,29 @@ private fun FavoriteRow(
                 color = colors.TextTertiary
             )
         }
-        // 多选态：右侧勾选圈（自绘，与侧滑页多选同一套视觉）
-        if (selectMode) {
+        // 多选态：右侧勾选圈（自绘，与侧滑页多选同一套视觉）；进出与选中填充都走过渡（1.1.26 补缺）
+        AnimatedVisibility(
+            visible = selectMode,
+            enter = FreeChatAnimation.expandEnter(),
+            exit = FreeChatAnimation.expandExit()
+        ) {
+            Row {
             Spacer(Modifier.width(12.dp))
+            val fill by animateColorAsState(
+                if (isSelected) colors.Primary else Color.Transparent,
+                FreeChatAnimation.colorTween, label = "checkFill")
+            val stroke by animateColorAsState(
+                if (isSelected) colors.Primary else colors.TextTertiary.copy(alpha = 0.6f),
+                FreeChatAnimation.colorTween, label = "checkStroke")
             Box(
                 modifier = Modifier
                     .padding(top = 2.dp)
                     .size(20.dp)
                     .clip(CircleShape)
-                    .background(if (isSelected) colors.Primary else Color.Transparent)
+                    .background(fill)
                     .border(
                         width = 1.5.dp,
-                        color = if (isSelected) colors.Primary else colors.TextTertiary.copy(alpha = 0.6f),
+                        color = stroke,
                         shape = CircleShape
                     ),
                 contentAlignment = Alignment.Center
@@ -537,6 +440,7 @@ private fun FavoriteRow(
                 if (isSelected) {
                     Icon(Icons.Filled.Check, null, tint = colors.Background, modifier = Modifier.size(13.dp))
                 }
+            }
             }
         }
     }

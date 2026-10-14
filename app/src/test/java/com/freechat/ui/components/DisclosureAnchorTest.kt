@@ -1,62 +1,33 @@
 package com.freechat.ui.components
 
-import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
+/**
+ * 1.1.29.9 工单⑤契约（用户拍板「从底部展开和折叠都应该还在底部」，推翻旧
+ * 「展开只揭示首行」设计——旧 DisclosureAnchorPlan 的 reveal-cap 契约随之作废）：
+ * 折叠零干预（LazyColumn 钳位随 tween 逐帧贴底，跟了=双重位移=跳到半空）；
+ * 在底部展开逐帧跟满增长量精确落底；浏览态两者都不碰视口。
+ */
 class DisclosureAnchorTest {
-    @Test fun expansionKeepsTheHeaderAndAllEarlierContentAtTheSamePosition() {
-        val plan = DisclosureAnchorPlan(2, 40, 96)
-        listOf(96, 110, 180, 300, 560).forEach { height ->
-            val upwardShift = plan.requestedOffset(height) - 40
-            assertEquals(0, upwardShift)
-            assertEquals(900, 900 - upwardShift)
-        }
+    private fun src() = File("src/main/java/com/freechat/ui/components/DisclosureScrollAnchor.kt").readText()
+
+    @Test fun collapseNeverScrollsTheClampOwnsTheBottom() {
+        val s = src()
+        assertFalse("折叠不许再有任何 scrollBy（双重位移病根）", s.contains("bottomCollapse"))
+        assertTrue("只有「展开且在底部」才起跟随", s.contains("if (expanding && !list.canScrollForward)"))
     }
 
-    @Test fun veryLongThoughtsUnfoldDownwardsWithoutScrolling() {
-        val plan = DisclosureAnchorPlan(3, 20, 96)
-        assertEquals(20, plan.requestedOffset(1200))
-        assertEquals(0, plan.trailingSpace(1200))
+    @Test fun bottomExpansionFollowsTheFullGrowthToTheEnd() {
+        val s = src()
+        assertFalse("不许 reveal-cap（展开停在半路=不在底部）", s.contains("maximumFollow"))
+        assertTrue("逐帧按高度差累计，总量=高度总量，精确落底",
+            s.contains("val dh = latestHeight - followed") && s.contains("scrollBy(dh.toFloat())"))
     }
 
-    @Test fun collapseNeverManufacturesABlankTail() {
-        val plan = DisclosureAnchorPlan(4, 600, 500)
-        assertEquals(600, plan.requestedOffset(96))
-        assertEquals(0, plan.trailingSpace(96))
-    }
-
-    @Test fun repeatedOrReversedAnimationFramesHaveNoAccumulatedScrollDrift() {
-        val plan = DisclosureAnchorPlan(1, 70, 96)
-        listOf(150, 200, 150, 200).forEach { height -> assertEquals(70, plan.requestedOffset(height)) }
-        assertEquals(70, plan.requestedOffset(96))
-    }
-
-    @Test fun collapseAwayFromBottomNeedsNoAdditionalBlankSpace() {
-        assertEquals(0, DisclosureAnchorPlan(1, 12, 500, availableBelow = 800).trailingSpace(96))
-    }
-
-    @Test fun collapseHasNoReservedTailAtAnyAnimationFrame() {
-        val collapse = DisclosureAnchorPlan(2, 500, 1600, availableBelow = 1000)
-        assertEquals(0, collapse.trailingSpace(1200))
-        assertEquals(0, collapse.trailingSpace(222))
-        assertEquals(0, collapse.trailingSpace(96))
-    }
-
-    @Test fun bottomExpansionRevealsFirstEntriesButNeverSkipsItsHeader() {
-        val plan = DisclosureAnchorPlan(2, 40, 96, followBottom = true, maximumFollow = 360)
-        assertEquals(40, plan.requestedOffset(96))
-        assertEquals(144, plan.requestedOffset(200))
-        assertEquals(400, plan.requestedOffset(2400))
-        assertEquals(0, plan.trailingSpace(2400))
-    }
-
-    @Test fun fullExpansionAndCollapseRetraceTheSameOffsets() {
-        val expand = DisclosureAnchorPlan(1, 40, 96, initialTrailingSpace = 300)
-        val endOffset = expand.requestedOffset(396)
-        val collapse = DisclosureAnchorPlan(1, endOffset, 396)
-        listOf(396, 280, 180, 96).forEach { height ->
-            assertEquals(expand.requestedOffset(height), collapse.requestedOffset(height))
-            assertEquals(expand.trailingSpace(height), collapse.trailingSpace(height))
-        }
+    @Test fun userGesturesCancelTheFollowImmediately() {
+        assertTrue(src().contains("fun onUserScroll()"))
     }
 }

@@ -47,6 +47,7 @@ internal fun ShareMenuRow(
     icon: ImageVector,
     label: String,
     colors: FreeChatColors,
+    labelColor: Color = colors.TextPrimary,
     onClick: () -> Unit
 ) {
     Row(
@@ -57,9 +58,9 @@ internal fun ShareMenuRow(
             .padding(horizontal = 12.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
+        Icon(icon, null, tint = if (labelColor == colors.TextPrimary) colors.Primary else labelColor, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(14.dp))
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = labelColor)
     }
 }
 

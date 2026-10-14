@@ -1,55 +1,41 @@
 package com.freechat.ui.components
 
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.animation.core.Animatable
 import androidx.compose.runtime.withFrameNanos
-import com.freechat.ui.animation.FreeChatAnimation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-/** Browsing keeps its anchor. At the conversation end an expansion may reveal its first entries. */
-data class DisclosureAnchorPlan(
-    val itemIndex: Int,
-    val scrollOffset: Int,
-    val initialHeight: Int,
-    val initialTrailingSpace: Int = 0,
-    val availableBelow: Int = 0,
-    val followBottom: Boolean = false,
-    val maximumFollow: Int = 0,
-) {
-    fun requestedOffset(height: Int) = scrollOffset + if (followBottom)
-        (height - initialHeight).coerceIn(0, maximumFollow.coerceAtLeast(0)) else 0
-    // Never manufacture scroll extent after a collapse; LazyColumn naturally clamps to its real end.
-    fun trailingSpace(@Suppress("UNUSED_PARAMETER") height: Int) = 0
-}
-
-/** 只在用户折叠动画中保持原锚点；生成内容增长和普通重测量绝不接管视口。 */
+/**
+ * 只做一件事：**在底部展开**思考/信息源时把视口钉在内容末端（1.1.29.9 工单⑤二次返修）。
+ *
+ * 折叠**不跟**：收缩让总内容变短，LazyColumn 的钳位在测量当帧就把视口逐帧拉回末端 ——
+ * 钳位量恰好等于折叠 tween 每帧的收缩量，天然丝滑贴底；再加跟随就是**双重位移**
+ * （每帧多退一格、一路退到半空才停 —— 实机截图「折叠后不在底部、闪跳」的病根）。
+ * 浏览态（不在底部）折叠同理零干预：不过冲时钳位是 no-op，锚点天然保留。
+ *
+ * 展开在底部时没有钳位可用（内容变长不会过冲），必须主动逐帧把增长量推成滚动 ——
+ * 用 onResize 报的高度差累计（跟随总量=高度总量，最终精确落在末端），不用缓动逼近：
+ * 缓动追移动目标会在动画结束时停在半路。
+ */
 class DisclosureScrollAnchor(private val list: LazyListState, private val scope: CoroutineScope) {
     val trailingSpacePx = 0
     private var activeId: String? = null
-    private var plan: DisclosureAnchorPlan? = null
-    private var bottomCollapse = false
     private var latestHeight = 0
     private var settled = false
     private var follower: Job? = null
-    private val openedAtBottom = mutableSetOf<String>()
+
     val callbacks = DisclosureCallbacks(
-        onToggle = { id, height, headerTop, expanding ->
+        onToggle = { id, height, _, expanding ->
             follower?.cancel()
-            activeId = id
-            val layout = list.layoutInfo
-            val atEnd = !list.canScrollForward
-            val lastMessageVisible = layout.visibleItemsInfo.lastOrNull()?.index == layout.totalItemsCount - 1
-            bottomCollapse = !expanding && (atEnd || (id in openedAtBottom && lastMessageVisible))
-            if (expanding && atEnd) openedAtBottom.add(id)
-            if (!expanding) openedAtBottom.remove(id)
-            latestHeight = height
-            settled = false
-            val reveal = (headerTop - layout.viewportSize.height * 0.34f).toInt().coerceAtLeast(0)
-            plan = DisclosureAnchorPlan(list.firstVisibleItemIndex, list.firstVisibleItemScrollOffset,
-                height, followBottom = expanding && atEnd, maximumFollow = reveal)
-            if (bottomCollapse || expanding && atEnd) followAnimation(id, plan!!)
+            clear()
+            // 折叠零干预（钳位贴底）；非底部展开零干预（浏览锚点）
+            if (expanding && !list.canScrollForward) {
+                activeId = id
+                latestHeight = height
+                settled = false
+                followBottom(id)
+            }
         },
         onResize = { id, height ->
             // Measurement only reports geometry. Never request another measurement from inside
@@ -63,38 +49,28 @@ class DisclosureScrollAnchor(private val list: LazyListState, private val scope:
             }
         },
     )
+
     fun onUserScroll() {
         follower?.cancel()
         clear()
-        // A manual gesture chooses a new browsing focus; do not reuse an old bottom-follow intent.
-        openedAtBottom.clear()
     }
-    private fun followAnimation(id: String, anchor: DisclosureAnchorPlan) {
+
+    private fun followBottom(id: String) {
         follower = scope.launch {
             try {
-                val progress = Animatable(0f)
-                val timing = if (bottomCollapse) null else launch {
-                    progress.animateTo(1f, FreeChatAnimation.disclosureFollowTween)
-                }
                 // One mutually exclusive scroll session, at most one update per display frame.
-                // A user's gesture cancels it. Ordinary browsing uses LazyColumn's stable keys
-                // directly, so all content above a disclosure stays exactly where it was.
+                // A user's gesture cancels it.
                 list.scroll {
-                    var applied = 0f
+                    var followed = latestHeight
                     while (activeId == id) {
                         withFrameNanos { }
                         if (activeId != id) break
-                        if (bottomCollapse) {
-                            if (list.canScrollForward) scrollBy(list.layoutInfo.viewportSize.height.toFloat() * 2f)
-                        } else {
-                            // A 2,000px thought can exceed the 400px reveal cap in its very first
-                            // spring frame. Directly following that height looked like two jumps.
-                            // Ease the bounded reveal independently; never scroll beyond real content.
-                            val desired = (anchor.requestedOffset(latestHeight) - anchor.scrollOffset) * progress.value
-                            val delta = desired - applied
-                            if (kotlin.math.abs(delta) >= 0.5f) applied += scrollBy(delta)
+                        val dh = latestHeight - followed
+                        if (dh > 0) {
+                            scrollBy(dh.toFloat())
+                            followed = latestHeight
                         }
-                        if (settled && timing?.isActive != true) break
+                        if (settled) break
                     }
                 }
             } finally {
@@ -102,5 +78,6 @@ class DisclosureScrollAnchor(private val list: LazyListState, private val scope:
             }
         }
     }
-    private fun clear() { activeId = null; plan = null; bottomCollapse = false }
+
+    private fun clear() { activeId = null }
 }

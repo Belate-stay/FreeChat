@@ -128,11 +128,15 @@ class CompanionBrain(
     )
 
     companion object {
-        /** 与 App 内置条目一致（ChatViewModel builtInList）：内置 mimo 代调、深度思考位默认关 */
-        val MIMO = ModelInfo(
-            "mimo-v2.6-flash", "MiMo-V2.6-Flash", Provider.XIAOMI,
-            "Xiaomi深度推理模型，作者自用API，不保证随时在线，可适当白嫖。",
-            supportsWebSearch = true, modelType = ModelType.LANGUAGE, isBuiltIn = true
+        /**
+         * 与 App 内置条目一致（BuiltInLanguageModel.create）：1.1.30X 换代 DeepSeek-V4.1-Flash，
+         * 深度思考与联网搜索**默认开启**（能力位置真 + 默认置真；用户显式关闭仍可关）。
+         */
+        val BRAIN_MODEL = ModelInfo(
+            "deepseek-flash", "DeepSeek-V4.1-Flash", Provider.CUSTOM,
+            "DeepSeek 快速推理模型，作者自用 API，不保证随时在线",
+            supportsWebSearch = true, modelType = ModelType.LANGUAGE, isBuiltIn = true,
+            supportsDeepThinking = true, deepThinkingDefault = true
         )
 
         // pcset 线上键（与 PerConvBridge 的常量同名——改一处必须同步另一处）
@@ -300,6 +304,10 @@ class CompanionBrain(
             allowWechatEmoji = allowWechatEmoji
         )
         val memoryContext = if (autoMem) MemoryLogic.buildMemoryContext(objs.memories, turnText, hq, assoc) else ""
+        // 联网搜索（1.1.30X 默认开启）：单发检索（AnySearch 免 Key，与 search.js 同协议），
+        // 结果以信息源块并入上下文材料；角色显式关掉（enableWebSearch=false）才不搜。
+        val searchNote = if (character.enableWebSearch != false && BRAIN_MODEL.supportsWebSearch)
+            BrainSearch.infoBlock(turnText) else ""
         val history = CompanionHistory.pickHistory(working, CompanionHistory.historyBudgetTokens(hq))
         // 深度推演（1.0.99.4 补大脑）：deepThinking ∧ 高质量记忆才跑（App 的 callCompanionApi 同条件）
         ensureWechatBindingActive()
@@ -309,13 +317,14 @@ class CompanionBrain(
         suspend fun generate(forceReply: Boolean, lengthHint: String? = null): com.freechat.core.ParsedCompanionReply {
             ensureWechatBindingActive()
             val request = CompanionRequestBuilder.build(
-                character = character, systemPrompt = systemPrompt, memoryContext = memoryContext,
+                character = character, systemPrompt = systemPrompt, memoryContext = memoryContext + searchNote,
                 deepPrepNote = deepPrepNote, history = history, forceReply = forceReply, lengthHint = lengthHint,
                 batchSize = batch.size, includeReasoningContent = false
             )
             val temperature = CompanionPrompts.companionTemperature(character.aiCreativity)
-            // 深度思考「尽力关」：与 App 的 companionDeepThink 同语义（角色开关 ∧ 模型能力位）
-            val deepThink = character.deepThinkingMode && MIMO.supportsDeepThinking
+            // 深度思考「尽力开」：与 App 的 companionDeepThink 同语义（角色开关 ∧ 模型能力位）；
+            // 1.1.30X 起模型能力位置真、角色默认开 = 默认开启
+            val deepThink = character.deepThinkingMode && BRAIN_MODEL.supportsDeepThinking
             val raw = completer.complete(request, temperature, CompanionPrompts.deepThinkExtras(deepThink))
             ensureWechatBindingActive()
             return CompanionReplyParser.parse(raw, narrative, allowWechatEmoji = allowWechatEmoji)
@@ -329,7 +338,7 @@ class CompanionBrain(
             if (!gate.tryCommit()) return ReplyResult(emotion = "", silence = true)
             val ellipsis = Message(
                 id = CompanionStore.newMessageId(), role = com.freechat.model.Role.ASSISTANT,
-                content = "…", timestamp = System.currentTimeMillis(), modelName = MIMO.displayName, mode = ChatMode.COMPANION
+                content = "…", timestamp = System.currentTimeMillis(), modelName = BRAIN_MODEL.displayName, mode = ChatMode.COMPANION
             )
             working += ellipsis
             gate.notePersisted(ellipsis.id)
@@ -362,7 +371,7 @@ class CompanionBrain(
             replyIds += id
             val m = Message(
                 id = id, role = com.freechat.model.Role.ASSISTANT,
-                content = seg, timestamp = baseTs + i, modelName = MIMO.displayName, mode = ChatMode.COMPANION
+                content = seg, timestamp = baseTs + i, modelName = BRAIN_MODEL.displayName, mode = ChatMode.COMPANION
             )
             working += m
             replyMsgs += m

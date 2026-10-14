@@ -87,6 +87,8 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var webSearchUnsupported: String = ""
     var showThinking: String = ""
     var showThinkingDesc: String = ""
+    var collapseThinking: String = ""
+    var collapseThinkingDesc: String = ""
     var autoSummarizeMemory: String = ""
     var autoSummarizeMemoryDesc: String = ""
     var useSystemFont: String = ""
@@ -416,6 +418,39 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var importSuccess: String = ""
     var importFailed: String = ""
     var exportFailed: String = ""
+    var shareDialogTitle: String = ""
+    var shareOptMemories: String = ""
+    var shareOptChats: String = ""
+    var shareOptPersona: String = ""
+    var shareOptPrompt: String = ""
+    var shareOptAvatar: String = ""
+    var shareOptAppearance: String = ""
+    var shareOptText: String = ""
+    var shareOptScene: String = ""
+    var importModelEntry: String = ""
+    var importModelHintTitle: String = ""
+    var importModelHintBody: String = ""
+    var importModelContinue: String = ""
+    var importModelPickerTitle: String = ""
+    var importBuiltinTag: String = ""
+    var imagePreset: String = ""
+    var imagePresetDesc: String = ""
+    var imagePresetAspectSection: String = ""
+    var imagePresetSubjectSection: String = ""
+    var imagePresetNone: String = ""
+    var imagePreset11: String = ""
+    var imagePreset43h: String = ""
+    var imagePreset43v: String = ""
+    var imagePreset32h: String = ""
+    var imagePreset32v: String = ""
+    var imagePresetFullScene: String = ""
+    var imagePresetFullSceneDesc: String = ""
+    var imagePresetSubjectFirst: String = ""
+    var imagePresetSubjectFirstDesc: String = ""
+    var shareExportAction: String = ""
+    var shareExportNeedOne: String = ""
+    var shareImportFailed: String = ""
+    var shareImportedConvTitle: String = ""
     var shareAsImage: String = ""
     var saveImage: String = ""
     var shareAsMarkdown: String = ""
@@ -434,6 +469,10 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var shareRevoke: String = ""
     var shareRevokeConfirm: String = ""
     var shareRevoked: String = ""
+    var shareViewContent: String = ""
+    var shareRevokeFull: String = ""
+    var shareSortCreated: String = ""
+    var shareSortTitle: String = ""
     var wechatBind: String = ""
     var modeNext: String = ""
     var modeRepick: String = ""
@@ -498,6 +537,7 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var sceneImageVisualOnly: String = ""
     var enhancedSceneContinuity: String = ""
     var enhancedSceneContinuityDesc: String = ""
+    var sceneContinuityConfirm: String = ""
     var sceneErrorNoModel: String = ""
     var sceneErrorAuth: String = ""
     var sceneErrorEndpoint: String = ""
@@ -722,6 +762,7 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var saveFailedShort: String = ""
     var noAsrModelTitle: String = ""
     var noAsrModelDesc: String = ""
+    var voiceRecognizeFailed: String = ""
     var goAddAction: String = ""
     var searchAction: String = ""
     var clearAction: String = ""
@@ -754,6 +795,17 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var networkUnreachable: String = ""
     var requestFailedWith: (Int) -> String = { "" }
     var conflictCopySuffix: String = ""
+    // 1.1.20：启动提醒弹窗（冲突副本清理 / 检查更新）
+    var copyNoticeTitle: String = ""
+    var copyNoticeBody: String = ""
+    var copyNoticeConfirm: String = ""
+    /** 「暂不」—— 两种提醒弹窗共用 */
+    var noticeLater: String = ""
+    var copyNoticeNever: String = ""
+    var updateNoticeTitle: (String) -> String = { "" }
+    var updateNoticeBody: String = ""
+    var updateNoticeConfirm: String = ""
+    var updateNoticeSnooze: String = ""
     var shareAction: String = ""
     // 文档解析（贴进聊天框的可读文本）
     var legacyBinaryFile: String = ""
@@ -818,6 +870,11 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var agreementContinue: String = ""
     var agreementReleasePage: String = ""
     var agreementWebLabel: String = ""
+    // ===== 新功能推荐导览（1.1.31）：演示文案固定中文不进语言包 =====
+    var featureRecTitle: String = ""
+    var featureRecBodyBefore: String = ""
+    var featureRecBodyAfter: String = ""
+    var featureRecCta: String = ""
 
     /** 更新日志正文（简中直接复用 ChangelogData，其余语言各写各的） */
     var changelogEntries: List<com.freechat.model.ChangelogEntry> = emptyList()
@@ -827,6 +884,10 @@ class AppStrings(val localeCode: String) {  // "zh-CN" | "zh-TW" | "en"
     var checkUpdate: String = ""
     var updateChecking: String = ""
     var updateLatest: String = ""
+    /** 1.1.29 工单⑥：检测到新版本后「检查更新」变身「获取更新」 */
+    var updateGet: String = ""
+    /** 1.1.29.5：更新内容文字流顶部小标题（主题色、左对齐） */
+    var updateContentTitle: String = ""
     var updateDownloading: String = ""
     var updateInstalling: String = ""
     var updateFailed: String = ""
@@ -959,6 +1020,8 @@ val ZhCN = AppStrings("zh-CN").apply {
     webSearchUnsupported = "当前模型不支持联网搜索"
     showThinking = "显示思考过程"
     showThinkingDesc = "展示AI推理过程"
+    collapseThinking = "默认折叠思考过程"
+    collapseThinkingDesc = "回复输出时自动折叠推理，点开可再看"
     autoSummarizeMemory = "自动总结对话以巩固AI记忆"
     autoSummarizeMemoryDesc = "每轮对话自动提炼要点写入记忆，回复时结合记忆提升精准度"
     useSystemFont = "使用系统字体"
@@ -1282,6 +1345,39 @@ val ZhCN = AppStrings("zh-CN").apply {
     importSuccess = "角色已导入"
     importFailed = "导入失败，文件格式不正确"
     exportFailed = "导出失败，请重试"
+    shareDialogTitle = "分享内容"
+    shareOptMemories = "记忆"
+    shareOptChats = "对话记录"
+    shareOptPersona = "角色设定"
+    shareOptPrompt = "提示词"
+    shareOptAvatar = "头像"
+    shareOptAppearance = "形象参考图"
+    shareOptText = "文字消息"
+    shareOptScene = "场景图"
+    importModelEntry = "导入已有多模态模型"
+    importModelHintTitle = "模态适配提醒"
+    importModelHintBody = "请确保所选模型支持当前用途所需的模态输出（如作为识图模型须具备识图能力、作为语音模型须具备语音能力），否则会导致 AI 不予回复。"
+    importModelContinue = "继续选择"
+    importModelPickerTitle = "选择要导入的模型"
+    importBuiltinTag = "内置"
+    imagePreset = "图片预设"
+    imagePresetDesc = "该预设仅作为提示词上传，实际效果由模型决定。"
+    imagePresetAspectSection = "画幅"
+    imagePresetSubjectSection = "主体"
+    imagePresetNone = "无声明"
+    imagePreset11 = "1:1"
+    imagePreset43h = "4:3横幅"
+    imagePreset43v = "4:3竖幅"
+    imagePreset32h = "3:2横幅"
+    imagePreset32v = "3:2竖幅"
+    imagePresetFullScene = "完整场景"
+    imagePresetFullSceneDesc = "还原整个场景，更偏向角色的全身与多角色融合"
+    imagePresetSubjectFirst = "主角优先"
+    imagePresetSubjectFirstDesc = "主角个人特写，更偏向主角本身的神态、动作等状态刻画"
+    shareExportAction = "导出分享"
+    shareExportNeedOne = "至少选择一项"
+    shareImportFailed = "导入失败，文件已损坏或格式不正确"
+    shareImportedConvTitle = "导入的对话"
     shareAsImage = "分享图片"
     saveImage = "保存图片"
     shareAsMarkdown = "分享 Markdown"
@@ -1300,6 +1396,10 @@ val ZhCN = AppStrings("zh-CN").apply {
     shareRevoke = "撤销"
     shareRevokeConfirm = "撤销后链接立即失效，对方将无法查看"
     shareRevoked = "已撤销"
+    shareViewContent = "查看内容"
+    shareRevokeFull = "撤销分享"
+    shareSortCreated = "创建时间"
+    shareSortTitle = "标题"
     wechatBind = "连接微信"
     modeNext = "下一步"
     modeRepick = "重新选择"
@@ -1324,7 +1424,7 @@ val ZhCN = AppStrings("zh-CN").apply {
     wechatNoticeTitle = "功能使用须知"
     wechatBetaHint = "本功能处于测试阶段，并不稳定。"
     wechatNotice1 = "本功能通过云同步实现数据互传，不依赖 FreeChat 本地后台运行，仅限登录后使用。"
-    wechatNotice2 = "本功能当前仅可使用内置模型（mimo-v2.6-flash）。"
+    wechatNotice2 = "本功能当前仅可使用内置模型（DeepSeek-V4.1-Flash）。"
     wechatNotice3 = "角色头像与备注名可在微信 ClawBot 对话的设置中修改。"
     wechatNotice4 = "微信仅作为连接用户与服务器的桥梁，不会将 FreeChat 的历史聊天记录同步至微信；角色的模拟设置仍需在 FreeChat 客户端中调整。"
     wechatNotice5 = "经微信连接后，回复时长可能增加，并存在一定的不稳定因素。"
@@ -1338,13 +1438,13 @@ val ZhCN = AppStrings("zh-CN").apply {
     modelName = "模型名称"
     modelNameHint = "自定义名称，便于区分（默认与模型 ID 一致）"
     apiKeyLabel = "API Key"
-    apiKeyHint = "例如 sk-xxxxxxxx（必填）"
+    apiKeyHint = "例如 sk-xxxxxxxx"
     modelIdLabel = "模型 ID"
-    modelIdHint = "例如 deepseek-v4-flash（必填）"
+    modelIdHint = "例如 deepseek-v4-flash"
     apiUrlLabel = "URL 地址"
-    apiUrlHint = "例如 https://api.deepseek.com（必填）"
+    apiUrlHint = "例如 https://api.deepseek.com"
     modelNote = "备注"
-    modelNoteHint = "补充说明（选填）"
+    modelNoteHint = "补充说明"
     saveModel = "保存"
     fetchModelsLabel = "获取模型列表"
     fetchingModels = "获取中…"
@@ -1359,9 +1459,10 @@ val ZhCN = AppStrings("zh-CN").apply {
     genParamsDisclaimer = "比例与分辨率以 size 参数随请求发送，预设风格附加于提示词；是否生效取决于模型服务。获取预设失败时可手动填写。"
     generateImage = "生成图片"
     generateSceneImage = "生成当前场景图"
-    sceneImageVisualOnly = "当前场景图 · 仅供视觉呈现，不写入剧情记忆"
+    sceneImageVisualOnly = "场景图仅提供视觉呈现"
     enhancedSceneContinuity = "增强同元延续"
-    enhancedSceneContinuityDesc = "使用最近保留的场景图延续服装、配饰与道具；最新剧情文字和人物设定优先。删除的场景图不再参与参考。"
+    enhancedSceneContinuityDesc = "同时上传最近场景图，增强服饰道具统一性和延续性"
+    sceneContinuityConfirm = "开启后将同时上传最近场景图参与生成，可能大幅增长回复时长。"
     sceneErrorNoModel = "未配置可用的生图模型，请检查角色的生图模型或全局生图设置。"
     sceneErrorAuth = "生图服务的 API Key 无效或没有模型权限，请检查配置。"
     sceneErrorEndpoint = "生图接口或模型不存在；有参考图时，请确认服务支持 images/edits。"
@@ -1417,7 +1518,7 @@ val ZhCN = AppStrings("zh-CN").apply {
     unfavoriteKeepsOriginal = "仅取消收藏，原聊天消息、图片及相关记忆会保留。收藏状态会同步到云端。"
     quickLocateTimeFormat = "yyyy年M月d日 HH:mm"
     generatedImageLoading = "图片加载中…"
-    generatedImageUnavailable = "图片无法加载，可能是网络异常或图片链接已失效。可重新加载；不会再次提交生图请求。"
+    generatedImageUnavailable = "图片无法加载：网络异常可重新加载；若是旧版本生成的历史图片，当时只保存了临时链接、未保存原图，链接过期后无法找回。不会再次提交生图请求。"
     generatedImageMissing = "本地图片文件已丢失或无法读取，请重新生成图片。"
     generatedImageNoResult = "这条图片记录没有可显示的文件或链接。请在原设备查看，或重新生成图片。"
     retryImageLoading = "重新加载"
@@ -1546,7 +1647,7 @@ val ZhCN = AppStrings("zh-CN").apply {
     imageLabel = "图片"
     fileLabel = "文件"
     docLabel = "文档"
-    releaseToCancel = "松开取消"
+    releaseToCancel = "松开取消发送"
     attachmentLabel = "附件"
     tapToOpenEdit = "点击打开编辑"
     tapToOpen = "点击打开"
@@ -1566,6 +1667,7 @@ val ZhCN = AppStrings("zh-CN").apply {
     saveFailedShort = "保存失败"
     noAsrModelTitle = "未添加语音识别模型"
     noAsrModelDesc = "请先添加语音识别模型后再使用语音输入。"
+    voiceRecognizeFailed = "识别失败，请重试"
     goAddAction = "去添加"
     searchAction = "搜索"
     clearAction = "清除"
@@ -1594,6 +1696,15 @@ val ZhCN = AppStrings("zh-CN").apply {
     networkUnreachable = "连不上服务器，检查一下网络"
     requestFailedWith = { "请求失败（$it）" }
     conflictCopySuffix = "（冲突副本）"
+    copyNoticeTitle = "发现多余的冲突副本"
+    copyNoticeBody = "此前版本的同步缺陷曾在设备间产生重复的「冲突副本」角色，该问题已修复。建议清理多余的副本，保留你需要的对话。"
+    copyNoticeConfirm = "去清理"
+    noticeLater = "暂不"
+    copyNoticeNever = "永不提醒"
+    updateNoticeTitle = { "已发现新版本 $it" }
+    updateNoticeBody = "当前版本不是最新版，建议更新以获得更稳定的体验。"
+    updateNoticeConfirm = "去更新"
+    updateNoticeSnooze = "近期不再提醒"
     shareAction = "分享"
     legacyBinaryFile = "（旧版二进制格式，暂不支持直接解析，请另存为 docx/xlsx/pptx 后重试）"
     readFileFailed = { "（读取文件失败：$it）" }
@@ -1635,55 +1746,70 @@ val ZhCN = AppStrings("zh-CN").apply {
     relationshipPresetLabels = listOf("女朋友", "男朋友", "闺蜜", "朋友", "同学", "同事", "网友", "助理", "老师", "学生", "兄弟", "陌生人")
     builtInModelDesc = { id ->
         when (id) {
-            "mimo-v2.6-flash" -> "Xiaomi 深度推理模型，作者自用 API，不保证随时在线。"
-            "ep-20260629143810-ffvjl" -> "Volcano Engine 轻量级生图模型，作者自用 API，不保证随时在线。"
-            "MiMo-V2.5-TTS" -> "小米语音合成模型，作者自用 API，不保证随时在线。"
+            // 1.1.28：全内置模型统一「简介，作者自用 API，不保证随时在线」，尾句无句号、渲染层染红
+            "deepseek-flash" -> "DeepSeek 快速推理模型，作者自用 API，不保证随时在线"
+            "deepseek-flash-vision" -> "DeepSeek 图像识别模型，作者自用 API，不保证随时在线"
+            "gpt-image-2.5" -> "OpenAI 旗舰生图模型，作者自用 API，不保证随时在线"
+            "ep-20260629143810-ffvjl" -> "Volcano Engine 轻量级生图模型，作者自用 API，不保证随时在线"
+            "MiMo-V2.5-TTS" -> "Xiaomi 语音合成模型，作者自用 API，不保证随时在线"
+            "MiMo-V2.5-ASR" -> "Xiaomi 语音识别模型，作者自用 API，不保证随时在线"
             else -> ""
         }
     }
 
     agreementSections = listOf(
         AgreementSectionText("一、关于本软件", listOf(
-            "FreeChat 是一款开源的 AI 聊天客户端，本身**不提供任何 AI 模型服务**，亦不承诺功能永久可用。",
-            "本软件按**「现状」**提供，作者将持续维护，但无法保证不存在缺陷或服务不中断。"
+            "FreeChat 是一款开源的 AI 聊天客户端软件，**不提供任何 AI 模型服务**。",
+            "本软件按**「现状」**提供。作者将持续维护本软件，但不对功能的永久可用、无错误或不中断作出保证。"
         )),
-        AgreementSectionText("二、模型需要自备", listOf(
-            "除作者内置的少量模型外，AI 能力需您自行配置第三方 API Key。第三方服务的可用性、价格与内容政策由服务商独立决定，与作者无关。",
-            "内置模型为作者本人使用的 API，**不保证随时保有额度**，可能随时失效。",
-            "「自定义语音音色」等语音功能会把您上传或录制的音频样本、音色描述发送至第三方语音服务（小米 MiMo）进行合成处理；音频样本仅保存在本机，不参与云同步。"
+        AgreementSectionText("二、模型服务须自行配置", listOf(
+            "除软件内置的少量模型外，AI 能力需您自行配置第三方 API Key。第三方服务的可用性、价格与内容政策由服务商独立决定，与作者无关。",
+            "内置模型为作者自用的 API，**不保证随时保有额度**，可能随时失效或调整。",
+            "「自定义语音音色」功能会将您上传或录制的音频样本、音色描述发送至第三方语音服务（小米 MiMo）进行合成处理；音频样本仅保存在本机，不参与云同步。"
         )),
-        AgreementSectionText("三、账号与服务器（可选）", listOf(
-            "您**可以不注册**。不注册时全部功能均可正常使用，数据仅保存在本设备。",
-            "注册后，服务器提供跨设备同步服务（含网页版访问），仅存储您主动同步的对话、记忆与图片等资料，不作他用。第三方 API Key **仅保存于设备本地，不会上传至服务器**。",
-            "「连接微信」功能的对话经由微信 ClawBot 与服务器转发处理。云端并非保险箱，请勿将服务器作为唯一备份。"
+        AgreementSectionText("三、账号与云同步服务（可选）", listOf(
+            "您可以选择**不注册账号**。不注册时全部功能均可正常使用，聊天等资料仅保存在本设备。",
+            "注册后，服务器为您提供跨设备同步服务（含网页版访问），仅存储您主动同步的对话、记忆与图片等资料。第三方 API Key **仅保存于设备本地，不会上传至服务器、不参与同步**。",
+            "「连接微信」功能的对话经由微信 ClawBot 与服务器转发处理。云端并非保险箱，请勿将服务器作为唯一备份。",
+            "为改进产品体验，本软件会收集**使用情况与版本信息**（启动时间、版本号、设备品牌与型号、IP 地址；登录后含账号名）以作数据分析；不采集聊天内容等个人数据。"
         )),
-        AgreementSectionText("四、您的责任", listOf(
+        AgreementSectionText("四、用户行为规范", listOf(
             "通过本软件发出的全部请求均视为**您本人的行为**，您需对输入与输出的内容负责，包括：",
             "· 确保输入内容不违反法律法规",
             "· 自行判断输出内容的合法性与准确性",
             "· 不利用本软件生成、传播违法或不良信息",
             "· 「在线网页分享」生成的公开链接可被任何持有链接者访问，请自行斟酌分享内容",
             "· 「自定义语音音色」仅限使用您本人或已获授权的声音样本，严禁克隆、模仿他人声音用于冒充身份、欺诈、诽谤或任何违法用途",
-            "AI 的输出可能包含错误，请自行判断，不应视为专业意见。"
+            "AI 的输出可能包含错误，请自行核查重要信息，不应视为专业意见。"
         )),
-        AgreementSectionText("五、未成年人", listOf(
-            "若您未满 18 周岁，请在监护人陪同下使用本软件。"
+        AgreementSectionText("五、知识产权与开源声明", listOf(
+            "本项目基于 MIT License 开源，您可自由使用、修改与分发，但须保留原始版权声明。",
+            "您使用本软件输入与输出的内容归您所有；模型输出的权属另受第三方服务条款约束。"
         )),
-        AgreementSectionText("六、开源声明", listOf(
-            "本项目基于 MIT License 开源，您可自由使用、修改与分发，但须保留原始版权声明。"
+        AgreementSectionText("六、责任限制", listOf(
+            "在法律允许的范围内，作者对因使用或无法使用本软件产生的直接或间接损失不承担责任。",
+            "若您将本软件用于违法用途，作者**不承担连带责任**。"
         )),
-        AgreementSectionText("七、责任范围", listOf(
-            "若您将本软件用于违法用途，作者**不承担连带责任**。因使用本软件产生的其他直接或间接后果，作者亦不作出超出法律要求的承诺。"
+        AgreementSectionText("七、适用法律与争议解决", listOf(
+            "本条款适用中华人民共和国法律。因本条款产生的争议，双方应友好协商解决；协商不成的，提交作者所在地有管辖权的人民法院诉讼解决。"
+        )),
+        AgreementSectionText("八、未成年人", listOf(
+            "若您未满 16 周岁，请在监护人陪同下使用本软件并取得监护人同意。"
         ))
     )
+    featureRecTitle = "新功能推荐！"
+    featureRecBodyBefore = "内置生图模型 新增"
+    featureRecBodyAfter = "欢迎使用\"生成当前场景图\"功能"
+    featureRecCta = "立即体验"
     agreementGateHead = "使用前请阅读："
+    // 1.1.26.4：须知正文=产品定稿《使用前请阅读.txt》六条（全屏页，序号由页面排版）
     agreementGateItems = listOf(
-        "1. FreeChat 为开源 AI 聊天客户端，不提供模型服务，需自行配置第三方模型 API。",
-        "2. 内置模型为作者自备的 API，不保证随时可用或保有额度。",
-        "3. 无需注册即可完整使用；注册仅用于跨设备同步，同步内容仅限您主动同步的资料。API Key 仅保存于本地，不会上传至服务器。",
-        "4. 请勿利用本软件生成、存储或传播违反法律法规的内容。",
-        "5. 「自定义语音音色」仅限使用您本人或已获授权的声音样本，严禁克隆他人声音用于冒充、欺诈等违法用途；音频样本会发送至第三方语音服务处理。",
-        "6. 本软件仅供学习与研究使用，商用请自行评估相关法律风险。"
+        "FreeChat为开源AI聊天客户端，无广告不盈利，不提供模型服务，用户需自行配置API。（当前阶段内置了作者自用的API，仅供该软件内部免费使用且不保证额度充足，禁止获取内置模型API Key用于其他用途。）",
+        "账号系统仅用于数据在不同设备下的同步，不用于其他用途，且API Key不上传服务器不参与同步，仅保留在本地。不使用账号系统也可以获得完整的功能和体验（除部分技术依赖服务器的功能外）。",
+        "一切回复都由AI生成，请自行核查重要信息准确性。API兼容OpenAI标准协议，具体回复效果因模型与模型源而异。",
+        "“自定义语音音色”功能仅限使用已授权的声音样本，严禁克隆他人声音用于冒充、欺诈等违法用途。音频样本会发送至语音模型处理并学习。",
+        "为改进产品体验，本软件会收集版本号、启动记录、设备型号与 IP 地址等使用信息做数据分析，不采集聊天内容等个人数据。",
+        "未满16周岁用户请在监护人陪同下使用本软件。"
     )
     agreementAgreePrefix = "我已阅读并同意"
     agreementDocName = "《用户协议与使用条款》"
@@ -1695,6 +1821,8 @@ val ZhCN = AppStrings("zh-CN").apply {
     checkUpdate = "检查更新"
     updateChecking = "检查中…"
     updateLatest = "已是最新版本"
+    updateGet = "获取更新"
+    updateContentTitle = "更新内容"
     updateDownloading = "发现新版本，正在下载…"
     updateInstalling = "下载完成，正在拉起安装…"
     updateFailed = "检查更新失败，请稍后重试"
@@ -1792,6 +1920,8 @@ val ZhTW = AppStrings("zh-TW").apply {
     webSearchUnsupported = "當前模型不支援聯網搜尋"
     showThinking = "顯示思考過程"
     showThinkingDesc = "展示AI推理過程"
+    collapseThinking = "預設折疊思考過程"
+    collapseThinkingDesc = "回覆輸出時自動折疊推理，點開可再看"
     autoSummarizeMemory = "自動總結對話以鞏固AI記憶"
     autoSummarizeMemoryDesc = "每輪對話自動提煉重點寫入記憶，回覆時結合記憶提升精準度"
     useSystemFont = "使用系統字體"
@@ -2117,6 +2247,39 @@ val ZhTW = AppStrings("zh-TW").apply {
     importSuccess = "角色已匯入"
     importFailed = "匯入失敗，檔案格式不正確"
     exportFailed = "匯出失敗，請重試"
+    shareDialogTitle = "分享內容"
+    shareOptMemories = "記憶"
+    shareOptChats = "對話記錄"
+    shareOptPersona = "角色設定"
+    shareOptPrompt = "提示詞"
+    shareOptAvatar = "頭像"
+    shareOptAppearance = "形象參考圖"
+    shareOptText = "文字訊息"
+    shareOptScene = "場景圖"
+    importModelEntry = "導入已有多模態模型"
+    importModelHintTitle = "模態適配提醒"
+    importModelHintBody = "請確保所選模型支援當前用途所需的模態輸出（如作為識圖模型須具備識圖能力、作為語音模型須具備語音能力），否則會導致 AI 不予回覆。"
+    importModelContinue = "繼續選擇"
+    importModelPickerTitle = "選擇要導入的模型"
+    importBuiltinTag = "內建"
+    imagePreset = "圖片預設"
+    imagePresetDesc = "該預設僅作為提示詞上傳，實際效果由模型決定。"
+    imagePresetAspectSection = "畫幅"
+    imagePresetSubjectSection = "主體"
+    imagePresetNone = "無聲明"
+    imagePreset11 = "1:1"
+    imagePreset43h = "4:3橫幅"
+    imagePreset43v = "4:3豎幅"
+    imagePreset32h = "3:2橫幅"
+    imagePreset32v = "3:2豎幅"
+    imagePresetFullScene = "完整場景"
+    imagePresetFullSceneDesc = "還原整個場景，更偏向角色的全身與多角色融合"
+    imagePresetSubjectFirst = "主角優先"
+    imagePresetSubjectFirstDesc = "主角個人特寫，更偏向主角本身的神態、動作等狀態刻畫"
+    shareExportAction = "匯出分享"
+    shareExportNeedOne = "至少選擇一項"
+    shareImportFailed = "匯入失敗，檔案已損壞或格式不正確"
+    shareImportedConvTitle = "匯入的對話"
     shareAsImage = "分享圖片"
     saveImage = "儲存圖片"
     shareAsMarkdown = "分享 Markdown"
@@ -2135,6 +2298,10 @@ val ZhTW = AppStrings("zh-TW").apply {
     shareRevoke = "撤銷"
     shareRevokeConfirm = "撤銷後連結立即失效，對方將無法查看"
     shareRevoked = "已撤銷"
+    shareViewContent = "查看內容"
+    shareRevokeFull = "撤銷分享"
+    shareSortCreated = "創建時間"
+    shareSortTitle = "標題"
     wechatBind = "連接微信"
     modeNext = "下一步"
     modeRepick = "重新選擇"
@@ -2159,7 +2326,7 @@ val ZhTW = AppStrings("zh-TW").apply {
     wechatNoticeTitle = "功能使用須知"
     wechatBetaHint = "本功能處於測試階段，並不安定。"
     wechatNotice1 = "本功能透過雲端同步實現資料互傳，不依賴 FreeChat 本地背景運行，僅限登入後使用。"
-    wechatNotice2 = "本功能目前僅可使用內建模型（mimo-v2.6-flash）。"
+    wechatNotice2 = "本功能目前僅可使用內建模型（DeepSeek-V4.1-Flash）。"
     wechatNotice3 = "角色頭像與備註名可在微信 ClawBot 對話的設定中修改。"
     wechatNotice4 = "微信僅作為連接用戶與伺服器的橋樑，不會將 FreeChat 的歷史聊天記錄同步至微信；角色的模擬設定仍需在 FreeChat 用戶端中調整。"
     wechatNotice5 = "經微信連接後，回覆時長可能增加，並存在一定的不穩定因素。"
@@ -2173,13 +2340,13 @@ val ZhTW = AppStrings("zh-TW").apply {
     modelName = "模型名稱"
     modelNameHint = "自訂名稱，便於區分（預設與模型 ID 一致）"
     apiKeyLabel = "API Key"
-    apiKeyHint = "例如 sk-xxxxxxxx（必填）"
+    apiKeyHint = "例如 sk-xxxxxxxx"
     modelIdLabel = "模型 ID"
-    modelIdHint = "例如 deepseek-v4-flash（必填）"
+    modelIdHint = "例如 deepseek-v4-flash"
     apiUrlLabel = "URL 位址"
-    apiUrlHint = "例如 https://api.deepseek.com（必填）"
+    apiUrlHint = "例如 https://api.deepseek.com"
     modelNote = "備註"
-    modelNoteHint = "補充說明（選填）"
+    modelNoteHint = "補充說明"
     saveModel = "儲存"
     fetchModelsLabel = "取得模型列表"
     fetchingModels = "取得中…"
@@ -2194,9 +2361,10 @@ val ZhTW = AppStrings("zh-TW").apply {
     genParamsDisclaimer = "比例與解析度以 size 參數隨請求傳送，預設風格附加於提示詞；是否生效取決於模型服務。取得預設失敗時可手動填寫。"
     generateImage = "生成圖片"
     generateSceneImage = "生成目前場景圖"
-    sceneImageVisualOnly = "目前場景圖 · 僅供視覺呈現，不寫入劇情記憶"
+    sceneImageVisualOnly = "場景圖僅提供視覺呈現"
     enhancedSceneContinuity = "增強同元延續"
-    enhancedSceneContinuityDesc = "使用最近保留的場景圖延續服裝、配飾與道具；最新劇情文字和人物設定優先。刪除的場景圖不再參與參考。"
+    enhancedSceneContinuityDesc = "同時上傳最近場景圖，增強服飾道具統一性和延續性"
+    sceneContinuityConfirm = "開啟後將同時上傳最近場景圖參與生成，可能大幅增長回覆時長。"
     sceneErrorNoModel = "未設定可用的生圖模型，請檢查角色或全域生圖設定。"
     sceneErrorAuth = "生圖服務的 API Key 無效或沒有模型權限，請檢查設定。"
     sceneErrorEndpoint = "生圖介面或模型不存在；有參考圖時，請確認服務支援 images/edits。"
@@ -2252,7 +2420,7 @@ val ZhTW = AppStrings("zh-TW").apply {
     unfavoriteKeepsOriginal = "僅取消收藏，原聊天訊息、圖片及相關記憶會保留。收藏狀態會同步到雲端。"
     quickLocateTimeFormat = "yyyy年M月d日 HH:mm"
     generatedImageLoading = "圖片載入中…"
-    generatedImageUnavailable = "圖片無法載入，可能是網路異常或圖片連結已失效。可重新載入；不會再次提交生圖請求。"
+    generatedImageUnavailable = "圖片無法載入：網路異常可重新載入；若是舊版本生成的歷史圖片，當時只保存了臨時連結、未保存原圖，連結過期後無法找回。不會再次提交生圖請求。"
     generatedImageMissing = "本機圖片檔案已遺失或無法讀取，請重新生成圖片。"
     generatedImageNoResult = "這筆圖片記錄沒有可顯示的檔案或連結。請在原裝置查看，或重新生成圖片。"
     retryImageLoading = "重新載入"
@@ -2381,7 +2549,7 @@ val ZhTW = AppStrings("zh-TW").apply {
     imageLabel = "圖片"
     fileLabel = "檔案"
     docLabel = "文件"
-    releaseToCancel = "鬆開取消"
+    releaseToCancel = "鬆開取消發送"
     attachmentLabel = "附件"
     tapToOpenEdit = "點擊開啟編輯"
     tapToOpen = "點擊開啟"
@@ -2401,6 +2569,7 @@ val ZhTW = AppStrings("zh-TW").apply {
     saveFailedShort = "儲存失敗"
     noAsrModelTitle = "尚未新增語音辨識模型"
     noAsrModelDesc = "請先新增語音辨識模型後再使用語音輸入。"
+    voiceRecognizeFailed = "識別失敗，請重試"
     goAddAction = "去新增"
     searchAction = "搜尋"
     clearAction = "清除"
@@ -2429,6 +2598,15 @@ val ZhTW = AppStrings("zh-TW").apply {
     networkUnreachable = "連不上伺服器，檢查一下網路"
     requestFailedWith = { "請求失敗（$it）" }
     conflictCopySuffix = "（衝突副本）"
+    copyNoticeTitle = "發現多餘的衝突副本"
+    copyNoticeBody = "先前版本的同步缺陷曾在裝置間產生重複的「衝突副本」角色，該問題已修復。建議清理多餘的副本，保留你需要的對話。"
+    copyNoticeConfirm = "去清理"
+    noticeLater = "暫不"
+    copyNoticeNever = "永不提醒"
+    updateNoticeTitle = { "已發現新版本 $it" }
+    updateNoticeBody = "目前版本不是最新版，建議更新以獲得更穩定的體驗。"
+    updateNoticeConfirm = "去更新"
+    updateNoticeSnooze = "近期不再提醒"
     shareAction = "分享"
     legacyBinaryFile = "（舊版二進位格式，暫不支援直接解析，請另存為 docx/xlsx/pptx 後重試）"
     readFileFailed = { "（讀取檔案失敗：$it）" }
@@ -2470,55 +2648,69 @@ val ZhTW = AppStrings("zh-TW").apply {
     relationshipPresetLabels = listOf("女朋友", "男朋友", "閨蜜", "朋友", "同學", "同事", "網友", "助理", "老師", "學生", "兄弟", "陌生人")
     builtInModelDesc = { id ->
         when (id) {
-            "mimo-v2.6-flash" -> "Xiaomi 深度推理模型，作者自用 API，不保證隨時在線。"
-            "ep-20260629143810-ffvjl" -> "Volcano Engine 輕量級生圖模型，作者自用 API，不保證隨時在線。"
-            "MiMo-V2.5-TTS" -> "小米語音合成模型，作者自用 API，不保證隨時在線。"
+            "deepseek-flash" -> "DeepSeek 快速推理模型，作者自用 API，不保證隨時在線"
+            "deepseek-flash-vision" -> "DeepSeek 圖像識別模型，作者自用 API，不保證隨時在線"
+            "gpt-image-2.5" -> "OpenAI 旗艦生圖模型，作者自用 API，不保證隨時在線"
+            "ep-20260629143810-ffvjl" -> "Volcano Engine 輕量級生圖模型，作者自用 API，不保證隨時在線"
+            "MiMo-V2.5-TTS" -> "Xiaomi 語音合成模型，作者自用 API，不保證隨時在線"
+            "MiMo-V2.5-ASR" -> "Xiaomi 語音識別模型，作者自用 API，不保證隨時在線"
             else -> ""
         }
     }
 
     agreementSections = listOf(
         AgreementSectionText("一、關於本軟體", listOf(
-            "FreeChat 是一款開源的 AI 聊天客戶端，本身**不提供任何 AI 模型服務**，亦不承諾功能永久可用。",
-            "本軟體按**「現狀」**提供，作者將持續維護，但無法保證不存在缺陷或服務不中斷。"
+            "FreeChat 是一款開源的 AI 聊天客戶端軟體，**不提供任何 AI 模型服務**。",
+            "本軟體按**「現狀」**提供。作者將持續維護本軟體，但不對功能的永久可用、無錯誤或不中斷作出保證。"
         )),
-        AgreementSectionText("二、模型需自備", listOf(
-            "除作者內建的少量模型外，AI 能力需您自行設定第三方 API Key。第三方服務的可用性、價格與內容政策由服務商獨立決定，與作者無關。",
-            "內建模型為作者本人使用的 API，**不保證隨時保有額度**，可能隨時失效。",
-            "「自訂語音音色」等語音功能會把您上傳或錄製的音訊樣本、音色描述傳送至第三方語音服務（小米 MiMo）進行合成處理；音訊樣本僅保存在本機，不參與雲同步。"
+        AgreementSectionText("二、模型服務須自行設定", listOf(
+            "除軟體內建的少量模型外，AI 能力需您自行設定第三方 API Key。第三方服務的可用性、價格與內容政策由服務商獨立決定，與作者無關。",
+            "內建模型為作者自用的 API，**不保證隨時保有額度**，可能隨時失效或調整。",
+            "「自訂語音音色」功能會將您上傳或錄製的音訊樣本、音色描述傳送至第三方語音服務（小米 MiMo）進行合成處理；音訊樣本僅保存在本機，不參與雲同步。"
         )),
-        AgreementSectionText("三、帳號與伺服器（可選）", listOf(
-            "您**可以不註冊**。不註冊時全部功能均可正常使用，資料僅保存在本裝置。",
-            "註冊後，伺服器提供跨裝置同步服務（含網頁版訪問），僅儲存您主動同步的對話、記憶與圖片等資料，不作他用。第三方 API Key **僅保存於裝置本地，不會上傳至伺服器**。",
-            "「連接微信」功能的對話經由微信 ClawBot 與伺服器轉發處理。雲端並非保險箱，請勿將伺服器作為唯一備份。"
+        AgreementSectionText("三、帳號與雲端同步服務（可選）", listOf(
+            "您可以選擇**不註冊帳號**。不註冊時全部功能均可正常使用，聊天等資料僅保存在本裝置。",
+            "註冊後，伺服器為您提供跨裝置同步服務（含網頁版訪問），僅儲存您主動同步的對話、記憶與圖片等資料。第三方 API Key **僅保存於裝置本地，不會上傳至伺服器、不參與同步**。",
+            "「連接微信」功能的對話經由微信 ClawBot 與伺服器轉發處理。雲端並非保險箱，請勿將伺服器作為唯一備份。",
+            "為改進產品體驗，本軟體會收集**使用情況與版本資訊**（啟動時間、版本號、設備品牌與型號、IP 位址；登入後含帳號名）以作資料分析；不採集聊天內容等個人資料。"
         )),
-        AgreementSectionText("四、您的責任", listOf(
+        AgreementSectionText("四、用戶行為規範", listOf(
             "透過本軟體發出的全部請求均視為**您本人的行為**，您需對輸入與輸出的內容負責，包括：",
             "· 確保輸入內容不違反法律法規",
             "· 自行判斷輸出內容的合法性與準確性",
             "· 不利用本軟體生成、傳播違法或不良資訊",
             "· 「線上網頁分享」生成的公開連結可被任何持有連結者訪問，請自行斟酌分享內容",
             "· 「自訂語音音色」僅限使用您本人或已獲授權的聲音樣本，嚴禁複製、模仿他人聲音用於冒充身分、詐欺、誹謗或任何違法用途",
-            "AI 的輸出可能包含錯誤，請自行判斷，不應視為專業意見。"
+            "AI 的輸出可能包含錯誤，請自行核查重要資訊，不應視為專業意見。"
         )),
-        AgreementSectionText("五、未成年人", listOf(
-            "若您未滿 18 歲，請在監護人陪同下使用本軟體。"
+        AgreementSectionText("五、智慧財產權與開源聲明", listOf(
+            "本專案基於 MIT License 開源，您可自由使用、修改與散布，但須保留原始著作權聲明。",
+            "您使用本軟體輸入與輸出的內容歸您所有；模型輸出的權屬另受第三方服務條款約束。"
         )),
-        AgreementSectionText("六、開源聲明", listOf(
-            "本專案基於 MIT License 開源，您可自由使用、修改與散布，但須保留原始著作權聲明。"
+        AgreementSectionText("六、責任限制", listOf(
+            "在法律允許的範圍內，作者對因使用或無法使用本軟體產生的直接或間接損失不承擔責任。",
+            "若您將本軟體用於違法用途，作者**不承擔連帶責任**。"
         )),
-        AgreementSectionText("七、責任範圍", listOf(
-            "若您將本軟體用於違法用途，作者**不承擔連帶責任**。因使用本軟體產生的其他直接或間接後果，作者亦不作出超出法律要求的承諾。"
+        AgreementSectionText("七、適用法律與爭議解決", listOf(
+            "本條款適用中華人民共和國法律。因本條款產生的爭議，雙方應友好協商解決；協商不成的，提交作者所在地有管轄權的人民法院訴訟解決。"
+        )),
+        AgreementSectionText("八、未成年人", listOf(
+            "若您未滿 16 歲，請在監護人陪同下使用本軟體並取得監護人同意。"
         ))
     )
+    featureRecTitle = "新功能推薦！"
+    featureRecBodyBefore = "內建生圖模型 新增"
+    featureRecBodyAfter = "歡迎使用\"生成當前場景圖\"功能"
+    featureRecCta = "立即體驗"
     agreementGateHead = "使用前請閱讀："
+    // 1.1.26.4：須知正文=產品定稿六條（與簡中逐條對應）
     agreementGateItems = listOf(
-        "1. FreeChat 為開源 AI 聊天客戶端，不提供模型服務，需自行設定第三方模型 API。",
-        "2. 內建模型為作者自備的 API，不保證隨時可用或保有額度。",
-        "3. 無需註冊即可完整使用；註冊僅用於跨裝置同步，同步內容僅限您主動同步的資料。API Key 僅保存於本地，不會上傳至伺服器。",
-        "4. 請勿利用本軟體生成、儲存或傳播違反法律法規的內容。",
-        "5. 「自訂語音音色」僅限使用您本人或已獲授權的聲音樣本，嚴禁複製他人聲音用於冒充、詐欺等違法用途；音訊樣本會傳送至第三方語音服務處理。",
-        "6. 本軟體僅供學習與研究使用，商用請自行評估相關法律風險。"
+        "FreeChat為開源AI聊天客戶端，無廣告不盈利，不提供模型服務，用戶需自行配置API。（當前階段內建了作者自用的API，僅供該軟體內部免費使用且不保證額度充足，禁止獲取內建模型API Key用於其他用途。）",
+        "帳號系統僅用於資料在不同裝置下的同步，不用於其他用途，且API Key不上傳伺服器不參與同步，僅保留在本地。不使用帳號系統也可以獲得完整的功能和體驗（除部分技術依賴伺服器的功能外）。",
+        "一切回覆都由AI生成，請自行核查重要資訊準確性。API相容OpenAI標準協議，具體回覆效果因模型與模型源而異。",
+        "「自訂語音音色」功能僅限使用已授權的聲音樣本，嚴禁複製他人聲音用於冒充、詐欺等違法用途。音訊樣本會傳送至語音模型處理並學習。",
+        "為改進產品體驗，本軟體會收集版本號、啟動記錄、設備型號與 IP 位址等使用資訊做資料分析，不採集聊天內容等個人資料。",
+        "未滿16週歲用戶請在監護人陪同下使用本軟體。"
     )
     agreementAgreePrefix = "我已閱讀並同意"
     agreementDocName = "《用戶協議與使用條款》"
@@ -2550,6 +2742,8 @@ val ZhTW = AppStrings("zh-TW").apply {
     checkUpdate = "檢查更新"
     updateChecking = "檢查中…"
     updateLatest = "已是最新版本"
+    updateGet = "取得更新"
+    updateContentTitle = "更新內容"
     updateDownloading = "發現新版本，正在下載…"
     updateInstalling = "下載完成，正在拉起安裝…"
     updateFailed = "檢查更新失敗，請稍後重試"
@@ -2667,6 +2861,8 @@ val En = AppStrings("en").apply {
     webSearchUnsupported = "Current model doesn't support web search"
     showThinking = "Show thinking process"
     showThinkingDesc = "Show AI reasoning"
+    collapseThinking = "Collapse thinking by default"
+    collapseThinkingDesc = "Auto-collapse reasoning once the reply starts streaming"
     autoSummarizeMemory = "Auto-summarize to build AI memory"
     autoSummarizeMemoryDesc = "Summarize each turn into memory for more accurate, personalized replies"
     useSystemFont = "Use system font"
@@ -2993,6 +3189,39 @@ val En = AppStrings("en").apply {
     importSuccess = "Character imported"
     importFailed = "Import failed, invalid file format"
     exportFailed = "Export failed, please retry"
+    shareDialogTitle = "Share content"
+    shareOptMemories = "Memories"
+    shareOptChats = "Chat history"
+    shareOptPersona = "Character profile"
+    shareOptPrompt = "Prompt"
+    shareOptAvatar = "Avatar"
+    shareOptAppearance = "Appearance reference"
+    shareOptText = "Text messages"
+    shareOptScene = "Scene images"
+    importModelEntry = "Import existing multimodal model"
+    importModelHintTitle = "Modality check"
+    importModelHintBody = "Make sure the selected model supports the modality this feature needs (e.g. an image-understanding model for vision, a speech model for voice), otherwise the AI will not reply."
+    importModelContinue = "Continue"
+    importModelPickerTitle = "Select a model to import"
+    importBuiltinTag = "Built-in"
+    imagePreset = "Image preset"
+    imagePresetDesc = "This preset is only sent as prompt text; the actual result is up to the model."
+    imagePresetAspectSection = "Aspect"
+    imagePresetSubjectSection = "Subject"
+    imagePresetNone = "No declaration"
+    imagePreset11 = "1:1"
+    imagePreset43h = "4:3 landscape"
+    imagePreset43v = "4:3 portrait"
+    imagePreset32h = "3:2 landscape"
+    imagePreset32v = "3:2 portrait"
+    imagePresetFullScene = "Full scene"
+    imagePresetFullSceneDesc = "Recreate the whole scene, favoring full-body characters and multi-character composition"
+    imagePresetSubjectFirst = "Protagonist first"
+    imagePresetSubjectFirstDesc = "Close-up on the protagonist, favoring their expression, posture and mood"
+    shareExportAction = "Export & Share"
+    shareExportNeedOne = "Select at least one"
+    shareImportFailed = "Import failed, file is corrupted or invalid"
+    shareImportedConvTitle = "Imported chat"
     shareAsImage = "Share as Image"
     saveImage = "Save Image"
     shareAsMarkdown = "Share Markdown"
@@ -3011,6 +3240,10 @@ val En = AppStrings("en").apply {
     shareRevoke = "Revoke"
     shareRevokeConfirm = "The link stops working immediately after revoking"
     shareRevoked = "Revoked"
+    shareViewContent = "View content"
+    shareRevokeFull = "Revoke share"
+    shareSortCreated = "Created time"
+    shareSortTitle = "Title"
     wechatBind = "Connect WeChat"
     modeNext = "Next"
     modeRepick = "Choose again"
@@ -3035,7 +3268,7 @@ val En = AppStrings("en").apply {
     wechatNoticeTitle = "Usage Notes"
     wechatBetaHint = "This feature is in beta and may be unstable."
     wechatNotice1 = "This feature syncs data through the cloud and does not rely on FreeChat running in the background; you must be signed in to use it."
-    wechatNotice2 = "Currently this feature only supports the built-in model (mimo-v2.6-flash)."
+    wechatNotice2 = "Currently this feature only supports the built-in model (DeepSeek-V4.1-Flash)."
     wechatNotice3 = "The character's avatar and display name can be changed in the WeChat ClawBot chat settings."
     wechatNotice4 = "WeChat only bridges you and the server; FreeChat chat history is not mirrored into WeChat. Character simulation settings must still be adjusted in the FreeChat app."
     wechatNotice5 = "Replies via WeChat may take longer and may be unstable."
@@ -3049,13 +3282,13 @@ val En = AppStrings("en").apply {
     modelName = "Model Name"
     modelNameHint = "Custom name (defaults to model ID)"
     apiKeyLabel = "API Key"
-    apiKeyHint = "e.g. sk-xxxxxxxx (required)"
+    apiKeyHint = "e.g. sk-xxxxxxxx"
     modelIdLabel = "Model ID"
-    modelIdHint = "e.g. deepseek-v4-flash (required)"
+    modelIdHint = "e.g. deepseek-v4-flash"
     apiUrlLabel = "URL"
-    apiUrlHint = "e.g. https://api.deepseek.com (required)"
+    apiUrlHint = "e.g. https://api.deepseek.com"
     modelNote = "Note"
-    modelNoteHint = "Optional description"
+    modelNoteHint = "Description"
     saveModel = "Save"
     fetchModelsLabel = "Fetch model list"
     fetchingModels = "Fetching…"
@@ -3070,9 +3303,10 @@ val En = AppStrings("en").apply {
     genParamsDisclaimer = "Ratio and resolution are sent as the size parameter; style presets are appended to the prompt. Whether they take effect depends on the model service. If preset fetch fails, fill in manually."
     generateImage = "Generate image"
     generateSceneImage = "Generate current scene"
-    sceneImageVisualOnly = "Scene illustration · Visual only, excluded from story memory"
+    sceneImageVisualOnly = "Scene image — visual presentation only"
     enhancedSceneContinuity = "Enhanced scene continuity"
-    enhancedSceneContinuityDesc = "Use recent retained scenes to keep clothing, accessories, and props consistent. Current story text and character settings take priority. Deleted scenes are excluded."
+    enhancedSceneContinuityDesc = "Also upload recent scene images to improve outfit and prop consistency and continuity."
+    sceneContinuityConfirm = "When enabled, recent scene images are uploaded for generation too — reply time may increase significantly."
     sceneErrorNoModel = "No image model configured. Check the character or global image model."
     sceneErrorAuth = "The image service rejected the API key or model permissions. Check configuration."
     sceneErrorEndpoint = "Image endpoint or model not found. With references, the service must support images/edits."
@@ -3128,7 +3362,7 @@ val En = AppStrings("en").apply {
     unfavoriteKeepsOriginal = "Only the favorite will be removed. Original messages, images and related memories are retained. The favorite state syncs to the cloud."
     quickLocateTimeFormat = "MMM d, yyyy HH:mm"
     generatedImageLoading = "Loading image…"
-    generatedImageUnavailable = "Couldn't load this image. The network may be unavailable or the image link may have expired. Reloading will not submit another generation request."
+    generatedImageUnavailable = "Couldn't load this image. Retry if it is a network issue. For historical images from older versions, only a temporary link was saved without the original file — once the link expires, the image cannot be recovered. Reloading will not submit another generation request."
     generatedImageMissing = "The local image is missing or unreadable. Please regenerate it."
     generatedImageNoResult = "This image record has no displayable file or link. View it on the original device or regenerate it."
     retryImageLoading = "Reload image"
@@ -3277,6 +3511,7 @@ val En = AppStrings("en").apply {
     saveFailedShort = "Save failed"
     noAsrModelTitle = "No speech recognition model"
     noAsrModelDesc = "Add a speech recognition model before using voice input."
+    voiceRecognizeFailed = "Recognition failed, please try again"
     goAddAction = "Add"
     searchAction = "Search"
     clearAction = "Clear"
@@ -3305,6 +3540,15 @@ val En = AppStrings("en").apply {
     networkUnreachable = "Can't reach the server — check your connection"
     requestFailedWith = { "Request failed ($it)" }
     conflictCopySuffix = " (conflict copy)"
+    copyNoticeTitle = "Duplicate conflict copies found"
+    copyNoticeBody = "A sync defect in earlier versions could create duplicate \"conflict copy\" characters between devices. This has been fixed. We recommend removing the extra copies and keeping the conversations you need."
+    copyNoticeConfirm = "Clean up"
+    noticeLater = "Not now"
+    copyNoticeNever = "Never remind me"
+    updateNoticeTitle = { "New version $it available" }
+    updateNoticeBody = "You are not on the latest version. Updating is recommended for the most stable experience."
+    updateNoticeConfirm = "Update"
+    updateNoticeSnooze = "Remind me in 3 days"
     shareAction = "Share"
     legacyBinaryFile = "(Legacy binary format — can't be parsed directly. Save as docx/xlsx/pptx and try again.)"
     readFileFailed = { "(Couldn't read the file: $it)" }
@@ -3346,55 +3590,69 @@ val En = AppStrings("en").apply {
     relationshipPresetLabels = listOf("Girlfriend", "Boyfriend", "Best friend", "Friend", "Classmate", "Colleague", "Online friend", "Assistant", "Teacher", "Student", "Brother", "Stranger")
     builtInModelDesc = { id ->
         when (id) {
-            "mimo-v2.6-flash" -> "Xiaomi deep-reasoning model. Author's own API — not guaranteed to be online."
+            "deepseek-flash" -> "DeepSeek fast reasoning model. Author's own API — not guaranteed to be online."
+            "deepseek-flash-vision" -> "DeepSeek vision model. Author's own API — not guaranteed to be online."
+            "gpt-image-2.5" -> "OpenAI flagship image model. Author's own API — not guaranteed to be online."
             "ep-20260629143810-ffvjl" -> "Volcano Engine lightweight image model. Author's own API — not guaranteed to be online."
             "MiMo-V2.5-TTS" -> "Xiaomi text-to-speech model. Author's own API — not guaranteed to be online."
+            "MiMo-V2.5-ASR" -> "Xiaomi speech-recognition model. Author's own API — not guaranteed to be online."
             else -> ""
         }
     }
 
     agreementSections = listOf(
         AgreementSectionText("1. About this app", listOf(
-            "FreeChat is an open-source AI chat client. It **does not provide any AI model service**, and no feature is promised to be available forever.",
-            "The app is provided **\"as is\"**. The author maintains it on a best-effort basis, but cannot guarantee it is free of defects or interruptions."
+            "FreeChat is an open-source AI chat client. It **does not provide any AI model service**.",
+            "The app is provided **\"as is\"**. The author maintains it on a best-effort basis, but does not warrant that features will be permanently available, error-free or uninterrupted."
         )),
-        AgreementSectionText("2. You supply the models", listOf(
-            "Apart from the few models built in by the author, every AI capability requires you to configure a third-party API key. The availability, pricing and content policy of those services are determined independently by the provider and are not related to the author.",
-            "The built-in models are the author's own APIs and are **not guaranteed to carry quota at any time**. They may stop working without notice.",
-            "Voice features such as \"Custom voice tone\" send the audio samples you upload or record, together with your voice description, to a third-party speech service (Xiaomi MiMo) for synthesis. Audio samples are stored on this device only and never take part in cloud sync."
+        AgreementSectionText("2. Model services must be configured by you", listOf(
+            "Apart from the few models built in by the app, every AI capability requires you to configure a third-party API key. The availability, pricing and content policy of those services are determined independently by the provider and are not related to the author.",
+            "The built-in models are the author's own APIs and are **not guaranteed to carry quota at any time**. They may stop working or change without notice.",
+            "\"Custom voice tone\" sends the audio samples you upload or record, together with your voice description, to a third-party speech service (Xiaomi MiMo) for synthesis. Audio samples are stored on this device only and never take part in cloud sync."
         )),
-        AgreementSectionText("3. Account & server (optional)", listOf(
-            "You **do not have to sign up**. All features work without an account, and your data stays on this device only.",
-            "With an account, the server provides cross-device synchronization (including web access) and stores only the conversations, memories and images you actively sync. Nothing else is done with them. Third-party API keys are **stored on your device only and are never uploaded to the server**.",
-            "Conversations conducted through the \"Connect to WeChat\" feature are relayed via WeChat ClawBot and the server. The cloud is not a safe deposit box — please do not treat the server as your only backup."
+        AgreementSectionText("3. Account & cloud sync (optional)", listOf(
+            "You **do not have to sign up**. All features work without an account, and your chats and other content stay on this device only.",
+            "With an account, the server provides cross-device synchronization (including web access) and stores only the conversations, memories and images you actively sync. Third-party API keys are **stored on your device only, never uploaded to the server and never synced**.",
+            "Conversations conducted through the \"Connect to WeChat\" feature are relayed via WeChat ClawBot and the server. The cloud is not a safe deposit box — please do not treat the server as your only backup.",
+            "To improve the product, the app collects **usage data and version information** (launch times, version number, device brand and model, IP address; your account name when signed in) for analysis. No chat content or personal data is collected."
         )),
-        AgreementSectionText("4. Your responsibility", listOf(
+        AgreementSectionText("4. User conduct", listOf(
             "Every request sent from this app counts as **your own action**. You are responsible for what you enter and what you receive, including:",
             "· keeping your input lawful",
             "· judging for yourself whether the output is lawful and accurate",
             "· not using the app to create or spread illegal or harmful content",
             "· remembering that public links created via \"Web sharing\" can be opened by anyone who holds the link — share judiciously",
             "· using \"Custom voice tone\" only with your own voice or voices you are authorized to use — never cloning or imitating someone else's voice to impersonate, defraud, defame or break the law",
-            "AI output can be wrong. Use your own judgement; do not treat it as professional advice."
+            "AI output can be wrong. Verify important information yourself; do not treat it as professional advice."
         )),
-        AgreementSectionText("5. Minors", listOf(
-            "If you are under 18, please use this app with a guardian."
+        AgreementSectionText("5. Intellectual property & open source", listOf(
+            "This project is released under the MIT License. You may freely use, modify and redistribute it, provided the original copyright notice is kept.",
+            "What you input and output through the app belongs to you; model output is additionally subject to the provider's terms."
         )),
-        AgreementSectionText("6. Open source", listOf(
-            "This project is released under the MIT License. You may freely use, modify and redistribute it, provided the original copyright notice is kept."
+        AgreementSectionText("6. Limitation of liability", listOf(
+            "To the extent permitted by law, the author is not liable for direct or indirect damages arising from the use of, or inability to use, this app.",
+            "If you use this app for unlawful purposes, the author **bears no joint liability**."
         )),
-        AgreementSectionText("7. Scope of liability", listOf(
-            "If you use this app for unlawful purposes, the author **bears no joint liability**. For other direct or indirect consequences of using the app, the author makes no promise beyond what the law requires."
+        AgreementSectionText("7. Governing law & disputes", listOf(
+            "These terms are governed by the laws of the People's Republic of China. Disputes shall first be resolved by friendly negotiation; failing that, they shall be submitted to the competent people's court at the author's place of residence."
+        )),
+        AgreementSectionText("8. Minors", listOf(
+            "If you are under 16, please use this app with a guardian and obtain your guardian's consent."
         ))
     )
+    featureRecTitle = "New feature!"
+    featureRecBodyBefore = "Built-in image model adds"
+    featureRecBodyAfter = "Welcome to \"Generate current scene image\""
+    featureRecCta = "Try it now"
     agreementGateHead = "Please read before use:"
+    // 1.1.26.4: notice content = the product's six final items (mirrors the Chinese copy)
     agreementGateItems = listOf(
-        "1. FreeChat is an open-source AI chat client. It provides no model service — configure your own third-party model APIs.",
-        "2. The built-in models are the author's own APIs and are not guaranteed to be available or to carry quota.",
-        "3. The app is fully usable without an account; signing up is only for cross-device synchronization of the data you actively sync. API keys are stored locally and are never uploaded to the server.",
-        "4. Do not use this app to create, store or spread unlawful content.",
-        "5. \"Custom voice tone\" may only use your own voice or voices you are authorized to use. Cloning others' voices for impersonation, fraud or any unlawful purpose is forbidden; audio samples are sent to a third-party speech service for processing.",
-        "6. This app is for study and research. Assess the legal risk yourself before commercial use."
+        "FreeChat is an open-source AI chat client. No ads, no profit. It provides no model service — you configure your own APIs. (At this stage the author's own APIs are built in, free for use inside this app only, with no quota guarantee. Extracting the built-in model API keys for other purposes is forbidden.)",
+        "The account system exists solely to sync your data across devices and serves no other purpose. API keys are never uploaded and never take part in sync — they stay on your device. The full feature set works without an account (except features that technically depend on the server).",
+        "Every reply is AI-generated. Verify important information yourself. The API is compatible with the OpenAI standard protocol; actual results vary by model and provider.",
+        "\"Custom voice tone\" may only use voice samples you are authorized to use. Cloning anyone's voice for impersonation, fraud or any unlawful purpose is strictly forbidden. Audio samples are sent to the speech model for processing and learning.",
+        "To improve the product, the app collects usage information for analysis — version number, launch records, device model and IP address. No chat content or personal data is collected.",
+        "Users under 16 must use this app with a guardian."
     )
     agreementAgreePrefix = "I have read and agree to"
     agreementDocName = "the User Agreement and Terms of Use"
@@ -3426,6 +3684,8 @@ val En = AppStrings("en").apply {
     checkUpdate = "Check for updates"
     updateChecking = "Checking…"
     updateLatest = "You are up to date"
+    updateGet = "Get update"
+    updateContentTitle = "Update Notes"
     updateDownloading = "New version found, downloading…"
     updateInstalling = "Download complete, opening installer…"
     updateFailed = "Update check failed, please try again later"

@@ -25,15 +25,15 @@ interface ChatCompleter {
 }
 
 /**
- * 内置 mimo-v2.6-flash 代调（方案 v2 产品第 3 条：凭据零配置、成本用户自担）。
- * OpenAI 兼容 chat/completions，非流式；深度思考「尽力关」参数组照 [com.freechat.core.CompanionPrompts.deepThinkExtras]。
+ * 内置 DeepSeek-V4.1-Flash（deepseek-flash）代调（1.1.30X 换代，替代 mimo-v2.6-flash）。
+ * OpenAI 兼容 chat/completions，非流式；深度思考「尽力开/关」参数组照 [com.freechat.core.CompanionPrompts.deepThinkExtras]。
  * 可取消（enqueue + invokeOnCancellation → call.cancel()）：过期闸门一掐就断，
  * 被并批的旧生成不白烧 180 秒、也不挡新批的锁。
  */
 class MimoChatCompleter(
-    private val baseUrl: String = "https://api.xiaomimimo.com/v1",
+    private val baseUrl: String = "https://api.deepseek.com",
     private val apiKey: String,
-    private val modelId: String = "mimo-v2.6-flash"
+    private val modelId: String = "deepseek-flash"
 ) : ChatCompleter {
 
     private val json = "application/json; charset=utf-8".toMediaType()

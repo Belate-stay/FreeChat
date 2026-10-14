@@ -87,7 +87,7 @@ class MotionPolicyTest {
     }
 
     @Test fun floatingLocatorKeepsComfortableEdgeGutterAndControlsUseSubtlePress() {
-        assertEquals(12, MotionPolicy.LocatorGutterDp)
+        assertEquals(20, MotionPolicy.LocatorGutterDp)
         assertTrue(MotionPolicy.LocatorTravelDp > MotionPolicy.LocatorGutterDp)
         assertTrue(MotionPolicy.PressScale in 0.94f..0.98f)
         assertTrue(MotionPolicy.HeaderPressScale in 0.92f..0.96f)

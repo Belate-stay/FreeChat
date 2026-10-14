@@ -24,7 +24,8 @@ internal class ImageDotShader {
         shader.setColorUniform("glossColor", appearance.gloss.toArgb())
     }
 
-    fun draw(scope: DrawScope, frame: ImageDotMotion.Frame, cell: Float, originY: Float) {
+    fun draw(scope: DrawScope, frame: ImageDotMotion.Frame, cell: Float, originY: Float, completion: Float,
+        shape: ImageRevealPolicy.Frame) {
         shader.setFloatUniform("resolution", scope.size.width, scope.size.height)
         shader.setFloatUniform("cellSize", cell)
         shader.setFloatUniform("originY", originY)
@@ -33,6 +34,8 @@ internal class ImageDotShader {
         shader.setFloatUniform("regionC", frame.cx, frame.cy, frame.cWeight)
         shader.setFloatUniform("sheen", frame.sheenCenter, frame.ramp)
         shader.setFloatUniform("growthFloor", frame.growthFloor)
+        shader.setFloatUniform("completion", completion.coerceIn(0f, 1f))
+        shader.setFloatUniform("clipFrame", shape.halfWidth, shape.halfHeight, shape.corner, shape.feather)
         with(scope) { drawRect(brush) }
     }
 
@@ -46,6 +49,8 @@ internal class ImageDotShader {
             uniform float3 regionC;
             uniform float2 sheen;
             uniform float growthFloor;
+            uniform float completion;
+            uniform float4 clipFrame;
             layout(color) uniform half4 baseColor;
             layout(color) uniform half4 dotColor;
             layout(color) uniform half4 glossColor;
@@ -58,10 +63,9 @@ internal class ImageDotShader {
             }
 
             half4 main(float2 fragCoord) {
-                float2 uv = fragCoord / resolution;
-                float2 q = abs(uv - 0.5) - 0.36;
-                float distanceToEdge = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 0.14;
-                float edgeOpacity = smoothstep(0.0, 0.08, -distanceToEdge);
+                float2 q = abs(fragCoord - resolution * 0.5) - clipFrame.xy + clipFrame.z;
+                float distanceToEdge = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - clipFrame.z;
+                float edgeOpacity = smoothstep(0.0, clipFrame.w, -distanceToEdge);
 
                 float2 grid = (fragCoord - float2(0.0, originY)) / cellSize;
                 float2 center = ((floor(grid) + 0.5) * cellSize + float2(0.0, originY)) / resolution;
@@ -71,7 +75,7 @@ internal class ImageDotShader {
 
                 // Circular cell/fract distance and antialiased mask adapted from DotGridAgsl.
                 float2 local = (fract(grid) - 0.5) * cellSize;
-                float radius = cellSize * mix(0.065, 0.24, strength);
+                float radius = cellSize * mix(mix(0.065, 0.24, strength), 0.74, smoothstep(0.02, 0.82, completion));
                 float mask = 1.0 - smoothstep(radius - 0.75, radius + 0.75, length(local));
                 half4 ink = mix(dotColor, glossColor, 0.28 * strength + 0.42 * gloss);
                 float dotAlpha = mask * ink.a * edgeOpacity;

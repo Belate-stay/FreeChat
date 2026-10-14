@@ -130,7 +130,8 @@ fun FreeChatTheme(
         if (isDark) buildDarkScheme(colors) else buildLightScheme(colors)
     }
     val motionEnabled = rememberMotionEnabled()
-    val indication = remember(motionEnabled, colors.Primary) { MotionIndication(motionEnabled, colors.Primary) }
+    // 1.1.29.5：波纹用中性墨色（TextPrimary），聚焦环仍用主题色
+    val indication = remember(motionEnabled, colors.Primary) { MotionIndication(motionEnabled, colors.Primary, colors.TextPrimary) }
 
     // 字体缩放：仅改 fontScale，sp 字号全局缩放；density 不变，dp 布局（间距/尺寸）保持原样，
     // 文字变大时自动换行重排，不会挤坏排版。scale 为 null → 跟随系统，不覆盖。

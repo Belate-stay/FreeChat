@@ -199,8 +199,6 @@ object SyncEngine {
         val ok = try {
             pull(auth, userId)
             if (accountChanged(userId)) return@withLock false
-            cleanupConflictCopies()
-            if (accountChanged(userId)) return@withLock false
             push(auth, userId)
             if (accountChanged(userId)) return@withLock false
 
@@ -279,35 +277,8 @@ object SyncEngine {
     //  拉
     // ============================================================
 
-    /**
-     * 1.0.99.3：清理存量「冲突副本」套娃（见 [ConflictCopyCleanup]）。
-     *
-     * 放在 pull 之后 push 之前 —— 云端拉回来的套娃副本当场删掉并带着墓碑推回去，
-     * **一轮收敛**：下一轮起各端都只剩「原对话 + 至多一份干净副本」。
-     * 有聊天记录的副本一律不删（[ConflictCopyCleanup.staleCopies] 的安全闸）。
-     */
-    private suspend fun cleanupConflictCopies() {
-        val convs = Relay.conversations()
-        if (convs.none { ConflictCopyCleanup.analyze(it.title).depth > 0 }) return
-        val withMessages = mutableSetOf<String>()
-        for (c in convs) {
-            if (ConflictCopyCleanup.analyze(c.title).depth > 0 &&
-                runCatching { Relay.messages(c.id).isNotEmpty() }.getOrDefault(false)
-            ) withMessages.add(c.id)
-        }
-        val stale = ConflictCopyCleanup.staleCopies(convs) { it.id in withMessages }
-        if (stale.isEmpty()) return
-        Relay.applyConversations(stale.map { Relay.ConvOp.Remove(it) })
-        // Remove 落盘后 diff 会自动标脏；这里再显式补一次 CONV 脏标记兜底（幂等），
-        // 保证墓碑这轮一定推出去 —— 副本只有推上墓碑，别的设备才不会再把它拉回来
-        for (id in stale) {
-            Adapter.markDirty(Adapter.objKey(SyncKind.CONV, id))
-            Adapter.markDirty(Adapter.objKey(SyncKind.MSGS, id))
-            Adapter.markDirty(Adapter.objKey(SyncKind.MEMS, id))
-            Adapter.markDirty(Adapter.objKey(SyncKind.PCSET, id))
-        }
-        notice(LocaleManager.strings().syncConflictCopiesCleaned(stale.size))
-    }
+    // 1.1.20：冲突副本的自动清理已撤（2026-10-10 用户改口径「不要主动帮用户删除」）。
+    // 检测与提醒移到 ChatViewModel.detectConflictCopies —— 弹窗后由用户自己在侧滑页处理。
 
     private suspend fun pull(auth: Session.Auth, userId: String) {
         var guard = 0

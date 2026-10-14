@@ -52,6 +52,7 @@ import com.freechat.ui.components.TopBarBackdropSource
 fun AgreementScreen(onBack: () -> Unit) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
+    val context = LocalContext.current
     val advancedMaterial = LocalAdvancedMaterial.current
     val hazeState = rememberHazeState()
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
@@ -62,7 +63,7 @@ fun AgreementScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(com.freechat.ui.animation.rememberTopOnEntryScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 36.dp), bottom = 40.dp)
                 .padding(horizontal = 22.dp)
         ) {
@@ -78,6 +79,21 @@ fun AgreementScreen(onBack: () -> Unit) {
                     }
                 }
             }
+            // 官网链接块（1.1.0 加在须知门槛页；1.1.26.4 须知正文按产品定稿六条后挪来本页页脚）
+            Text(s.agreementWebLabel, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
+            Text(
+                "https://freechater.com/",
+                style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
+                color = if (isSystemInDarkTheme()) Color(0xFF8AB4F8) else Color(0xFF1A73E8),
+                textDecoration = TextDecoration.Underline,
+                modifier = Modifier.clickable {
+                    runCatching {
+                        context.startActivity(
+                            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://freechater.com/"))
+                        )
+                    }
+                }
+            )
         }
 
         TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
@@ -139,93 +155,91 @@ private fun AgreementBullet(text: String, colors: FreeChatColors) {
     Spacer(Modifier.height(4.dp))
 }
 
-/** 首次进入的用户协议门槛（勾选同意才放行，任何路径绕不过） */
+/**
+ * 首次进入的「使用前请阅读」（1.1.26.4 改**全屏页面**，不再是弹窗）：勾选同意 + 确定并继续
+ * 才算进入软件；查看《用户协议与使用条款》不算进入——返回后仍在本页，启动提醒一律押后到
+ * 真正进入之后。正文就是产品须知六条（语言包 agreementGateItems），序号悬挂缩进排版。
+ */
 @Composable
-fun AgreementGateDialog(
+fun AgreementGatePage(
     onAgree: () -> Unit,
-    onOpenAgreement: () -> Unit,
-    colors: FreeChatColors
+    onOpenAgreement: () -> Unit
 ) {
-    val context = LocalContext.current
+    val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
+    val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     var agreed by remember { mutableStateOf(false) }
 
-    // 以悬浮窗形式叠加在主页上方——半透明遮罩 + 居中可滚动卡片
-    Dialog(onDismissRequest = { /* 禁点外部关闭 */ }) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            color = colors.Surface,
-            shadowElevation = 10.dp
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 36.dp), bottom = 32.dp)
+                .padding(horizontal = 22.dp)
         ) {
-            Column(
-                Modifier
-                    .padding(22.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(s.agreementGateHead, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = colors.TextPrimary)
-                s.agreementGateItems.forEach { item ->
-                    Text(item, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, lineHeight = 22.sp)
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(s.agreementReleasePage, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
+            Spacer(Modifier.height(28.dp))
+            Text(
+                s.agreementGateHead,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = colors.TextPrimary
+            )
+            Spacer(Modifier.height(20.dp))
+            // 条目排版：序号一列悬挂、正文对齐，条目间留呼吸（工单点名「文字排版优化」）
+            s.agreementGateItems.forEachIndexed { i, item ->
+                Row(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        "https://github.com/Belate-stay/FreeChat",
-                        style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-                        color = if (isSystemInDarkTheme()) Color(0xFF8AB4F8) else Color(0xFF1A73E8),
-                        textDecoration = TextDecoration.Underline,
-                        modifier = Modifier.clickable {
-                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Belate-stay/FreeChat"))) }
-                        }
-                    )
-                }
-                // 官网与发布页同款排版（标签一行 + 斜体下划线链接），不算须知条目、不编号
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(s.agreementWebLabel, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
-                    Text(
-                        "https://freechater.com/",
-                        style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-                        color = if (isSystemInDarkTheme()) Color(0xFF8AB4F8) else Color(0xFF1A73E8),
-                        textDecoration = TextDecoration.Underline,
-                        modifier = Modifier.clickable {
-                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://freechater.com/"))) }
-                        }
-                    )
-                }
-
-                Spacer(Modifier.height(4.dp))
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = agreed,
-                        onCheckedChange = { agreed = it },
-                        colors = CheckboxDefaults.colors(checkedColor = colors.Primary)
-                    )
-                    Text(s.agreementAgreePrefix, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary, modifier = Modifier.clickable { agreed = !agreed })
-                    Text(
-                        s.agreementDocName,
-                        style = MaterialTheme.typography.bodyMedium,
+                        "${i + 1}",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
                         color = colors.Primary,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.clickable { onOpenAgreement() }
+                        modifier = Modifier.width(22.dp)
+                    )
+                    Text(
+                        item,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = colors.TextPrimary,
+                        lineHeight = 26.sp
                     )
                 }
-
-                Button(
-                    onClick = onAgree,
-                    enabled = agreed,
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = colors.Primary,
-                        contentColor = colors.OnPrimary,
-                        disabledContainerColor = colors.SurfaceVariant,
-                        disabledContentColor = colors.TextTertiary
-                    )
-                ) {
-                    Text(s.agreementContinue, fontWeight = FontWeight.SemiBold)
-                }
+                Spacer(Modifier.height(12.dp))
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = agreed,
+                    onCheckedChange = { agreed = it },
+                    colors = CheckboxDefaults.colors(checkedColor = colors.Primary)
+                )
+                Text(
+                    s.agreementAgreePrefix,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.TextPrimary,
+                    modifier = Modifier.clickable { agreed = !agreed }
+                )
+                Text(
+                    s.agreementDocName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.Primary,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clickable { onOpenAgreement() }
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = onAgree,
+                enabled = agreed,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = colors.Primary,
+                    contentColor = colors.OnPrimary,
+                    disabledContainerColor = colors.SurfaceVariant,
+                    disabledContentColor = colors.TextTertiary
+                )
+            ) {
+                Text(s.agreementContinue, fontWeight = FontWeight.SemiBold)
             }
         }
     }

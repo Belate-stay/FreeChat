@@ -1,6 +1,7 @@
 package com.freechat.sync
 
 import com.freechat.data.LocalStore
+import com.freechat.data.GeneratedImageStore
 import com.google.gson.JsonElement
 import com.google.gson.JsonParser
 import java.io.File
@@ -40,7 +41,7 @@ object ImageSync {
     fun refForLocal(path: String): String? {
         if (path.isBlank()) return null
         if (isRef(path)) return path
-        val file = File(path)
+        val file = File(GeneratedImageStore.cachedSource(path) ?: path)
         if (!file.isFile) return null
         hashFromCacheName(file.name)?.let { return refOf(it) }
         val bytes = runCatching { file.readBytes() }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return null
@@ -55,7 +56,8 @@ object ImageSync {
     fun canonicalEntries(entries: List<String>): List<String> {
         data class Candidate(val source: String, val priority: Int)
         val selected = linkedMapOf<String, Candidate>()
-        for (entry in entries.distinct()) {
+        for (original in entries.distinct()) {
+            val entry = GeneratedImageStore.cachedSource(original) ?: original
             val http = entry.startsWith("http://") || entry.startsWith("https://")
             val data = entry.startsWith("data:image")
             val file = if (http || data || isRef(entry)) null else File(entry)
@@ -111,7 +113,7 @@ object ImageSync {
     fun ensureCachedFromFile(path: String): String? {
         if (path.isBlank()) return null
         if (isRef(path)) return path
-        val file = File(path)
+        val file = File(GeneratedImageStore.cachedSource(path) ?: path)
         if (!file.isFile) return null
         hashFromCacheName(file.name)?.let { h -> return refOf(h) }   // 缓存文件天然已就绪
         val raw = runCatching { file.readBytes() }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return null
@@ -229,8 +231,28 @@ object ImageSync {
     fun localCacheHashes(): List<String> =
         LocalStore.filesDir().listFiles()?.mapNotNull { hashFromCacheName(it.name) } ?: emptyList()
 
+    /** After removing the message, remove both original and sync payload if no retained image uses them. */
+    fun releaseUnreferenced(entries: List<String>): Set<String> = LocalStore.locked {
+        val sources = entries.map { GeneratedImageStore.cachedSource(it) ?: it }.distinct()
+        val removed = sources.mapNotNull { refForLocal(it)?.let(::hashOfRef) }.toSet()
+            .filterNot(::isReferencedLocally).toSet()
+        val root = LocalStore.filesDir().canonicalFile.toPath()
+        sources.forEach { path ->
+            val hash = refForLocal(path)?.let(::hashOfRef) ?: return@forEach
+            if (hash in removed) {
+                val file = File(path).canonicalFile
+                if (file.toPath().startsWith(root) && file.isFile) check(file.delete()) { "Unable to delete image ${file.name}" }
+            }
+        }
+        removed.forEach { hash ->
+            val file = cacheFile(hash)
+            if (file.exists()) check(file.delete()) { "Unable to delete image payload ${file.name}" }
+        }
+        removed
+    }
+
     private fun writeCache(hash: String, payload: ByteArray): String? = runCatching {
-        cacheFile(hash).writeBytes(payload)
+        LocalStore.writeBytes(cacheFile(hash), payload)
         refOf(hash)
     }.getOrNull()
 }

@@ -28,6 +28,12 @@ data class AppLatest(
 object AppUpdateChecker {
     const val LATEST_URL = "https://freechater.com/download/latest.json"
 
+    /**
+     * 新版本的更新日志（1.1.29 工单⑥）：官网 download 目录下的 Update.md，每次发版覆盖。
+     * 只给「检测到新版本」的在 App 老用户看 —— 网页下载区只挂 apk，不提供日志下载。
+     */
+    const val NOTES_URL = "https://freechater.com/download/Update.md"
+
     private val httpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
@@ -66,6 +72,19 @@ object AppUpdateChecker {
             }
         parseLatest(body, expectedPackage)
     }.getOrNull()
+
+    /** 新版本更新日志（Update.md 原文 markdown）；取不到返回 null，不影响下载安装主流程。 */
+    fun fetchUpdateNotes(): String? = runCatching {
+        httpClient.newCall(Request.Builder().url(NOTES_URL).build())
+            .execute().use { response ->
+                if (!response.isSuccessful) return null
+                response.body?.string()?.takeIf { it.isNotBlank() }
+            }
+    }.getOrNull()
+
+    /** 下载渠道标记（1.1.30X）：App 内下载自报 ch=app，nginx 日志按它分「APP内获取/官网获取」。 */
+    fun channelMarked(url: String): String =
+        url + (if (url.contains('?')) "&" else "?") + "ch=app"
 
     fun download(url: String, dest: File) {
         httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->

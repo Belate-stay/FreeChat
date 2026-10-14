@@ -3,7 +3,6 @@ package com.freechat.ui.screens
 import com.freechat.ui.components.HeaderIconButton
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -53,7 +52,7 @@ fun AuthorWordsScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(com.freechat.ui.animation.rememberTopOnEntryScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 36.dp), bottom = 40.dp)
                 .padding(horizontal = 22.dp)
         ) {
