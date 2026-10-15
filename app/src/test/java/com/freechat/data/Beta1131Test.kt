@@ -18,7 +18,7 @@ class Beta1131Test {
         assertTrue("播放期锁定交互（不可点改）", rec.contains("awaitPointerEvent("))
         assertTrue("结束后才亮行动按钮", rec.contains("enabled = stage >= 8"))
         assertTrue("成图是打包资源，不现场调 AI", rec.contains("R.drawable.feature_rec_scene"))
-        assertTrue("演示节奏（用户消息后立刻出球+球久转+长顿）", rec.contains("intArrayOf(400, 250, 2400"))
+        assertTrue("演示节奏（用户消息后立刻出球+思考 3.6s+长顿）", rec.contains("intArrayOf(400, 250, 3600"))
     }
 
     @Test fun modelNameIsHighlightedInBlue() {

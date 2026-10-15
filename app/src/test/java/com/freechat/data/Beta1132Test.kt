@@ -57,8 +57,13 @@ class Beta1132Test {
         assertTrue("成图不裁切（GeneratedImage 内走 Fit，演示不得再 Crop）", !rec.contains("ContentScale.Crop"))
         assertTrue("底部输入条已删除", !rec.contains("FeatureRecComposer"))
         assertTrue("生成槽等比缩小（0.72 行宽）", rec.contains("fillMaxWidth(0.72f)"))
-        assertTrue("菜单等比缩小（150dp）", rec.contains("width(150.dp)"))
+        assertTrue("菜单拟物风卡片+宽度随内容（文字恒一行）",
+            rec.contains("width(IntrinsicSize.Max)") && rec.contains("maxLines = 1"))
         assertTrue("菜单仍从左下枢轴长出", rec.contains("menuEnter(TransformOrigin(0f, 1f))"))
         assertTrue("节奏放慢+对话↔生图长顿 2.6s", rec.contains("2600"))
+        // 1.2.0 返修：思考球旁带真机思考状态（连接模型→理解内容→拟草回复）1:1 同构
+        assertTrue("思考状态 1:1 真机（labels 表+contentReplacement 逐级切换）",
+            rec.contains("generationPhaseLabels") && rec.contains("contentReplacement()") &&
+                rec.contains("GenerationPhase.UNDERSTANDING") && rec.contains("GenerationPhase.DRAFTING"))
     }
 }

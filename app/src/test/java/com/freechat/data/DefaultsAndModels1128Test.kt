@@ -50,11 +50,12 @@ class DefaultsAndModels1128Test {
         val page = source("ui/animation/PageMotion.kt")
         assertTrue("SheetOption 选中态走 colorTween 过渡", sheet.contains("animateColorAsState") && sheet.contains("FreeChatAnimation.colorTween"))
         assertTrue("frostedCard 选中铺面同节奏", frosted.contains("animateColorAsState"))
-        // 1.1.29：飞行期不再整卡降级（阴影闪一下才出来的元凶），只停流光采样 —— 阴影与稳态同链
-        assertTrue("页面飞行期阴影常驻：只停流光（inheritLiquid），不换阴影链",
-            page.contains("LocalPageFlight") &&
-                frosted.contains("LocalPageFlight.current") &&
-                frosted.contains("inheritLiquid = face == null && !selected && !flying") &&
+        // 1.2.0 工单返修：飞行期材质与稳态**完全同链** —— 停流光采样会让卡面瞬间退回新拟态
+        // 白底面色（lerp(White, Surface)），高级材质+流光炫彩同开时转场期整屏「白↔彩」频闪
+        assertTrue("页面飞行期材质零降级（流光采样不关，根治转场白闪）",
+            frosted.contains("inheritLiquid = face == null && !selected") &&
+                !frosted.contains("!flying") &&
+                !page.contains("LocalPageFlight") &&
                 !frosted.contains("一律实色卡"))
     }
 }

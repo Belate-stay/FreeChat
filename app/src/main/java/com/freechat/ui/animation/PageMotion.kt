@@ -25,13 +25,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 internal val LocalPageActive = compositionLocalOf { true }
 
 /**
- * 页面飞行中（进出转场进行时，1.1.28）。掉帧治理：飞行期双页并存，设置页几十张卡各自跑
- * 24dp 全分辨率 haze 是最大开销——飞行期卡片材质临时降级为实色（见 frostedCard），
- * 落位恢复。翻转只发生在转场起止各一次，不是每帧；用户拍板「不要严格现有的视觉动画效果」。
- */
-internal val LocalPageFlight = compositionLocalOf { false }
-
-/**
  * 滚动位置持久记忆（1.1.26.7）：ScrollState 本体随页面销毁，值实时回写 [saved]（key = 页面名），
  * 重建时按 key 恢复原位——全屏旁路（更新日志/用户协议/作者的话/模型编辑/AI语音）不再回顶。
  * 「从哪点进去还回到哪」；侧滑进设置时调用方清空 [saved] 即统一回顶部。
@@ -82,11 +75,6 @@ fun <T> PageMotion(
     val enabled = LocalMotionEnabled.current
     val parentActive = LocalPageActive.current
     val pages = updateTransition(targetState, label = label)
-    // 转场起止各翻一次的「飞行中」信号（不逐帧），给卡片材质降级用
-    val flying = remember { androidx.compose.runtime.mutableStateOf(false) }
-    LaunchedEffect(pages) {
-        snapshotFlow { pages.isRunning }.collect { flying.value = it }
-    }
     pages.AnimatedContent(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopStart,
@@ -104,8 +92,7 @@ fun <T> PageMotion(
             else FreeChatAnimation.pageFadeOutFast
         }) { state -> if (state == EnterExitState.Visible) 1f else 0f }
         CompositionLocalProvider(
-            LocalPageActive provides (parentActive && page == pages.targetState),
-            LocalPageFlight provides flying.value
+            LocalPageActive provides (parentActive && page == pages.targetState)
         ) {
             Box(Modifier.fillMaxSize().graphicsLayer {
                 translationX = travel.value

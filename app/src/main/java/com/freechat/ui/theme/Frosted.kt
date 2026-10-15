@@ -267,9 +267,9 @@ fun Modifier.frostedCard(
     )
 
     // 1.1.29 阴影常驻（用户工单⑤）：1.1.28 的「飞行期整卡降级」把阴影链也换掉了 ——
-    // 转场起止各闪一次（阴影重加载、割裂感重）。现在**阴影与稳态完全同链**，飞行期只停
-    // 流光采样（neumorphicFace 的 inheritLiquid），其余一概不动 —— 转场前后阴影零跳变。
-    val flying = com.freechat.ui.animation.LocalPageFlight.current
+    // 转场起止各闪一次（阴影重加载、割裂感重）。1.2.0 工单返修：**飞行期材质与稳态完全同链**，
+    // 连流光采样也不停 —— 停掉会让卡面瞬间退回新拟态白底面色（lerp(White, Surface) 近纯白），
+    // 高级材质+流光炫彩同开时整屏在转场里「白↔彩」频闪。流光只是几张渐变矩形，观感优先。
 
     // 阴影强度见 [softShadow] 的注释：8 层叠起来边缘的真实黑度约是 maxAlpha 的 2.4 倍，
     // 所以这里的数值看着小，实际落影刚刚好。早先非高级材质这一段写的是 0.16 —— 边缘实际
@@ -332,7 +332,7 @@ fun Modifier.frostedCard(
             maxAlpha = if (isDark) 0.04f else 0.025f, strength = { 1f - progress() })
         .then(if (recessed) Modifier else Modifier.neumorphShadow(shape, tone, recessed = false, strength = progress))
         .clip(shape)
-        .neumorphicFace(tone, plainFace, progress, inheritLiquid = face == null && !selected && !flying)
+        .neumorphicFace(tone, plainFace, progress, inheritLiquid = face == null && !selected)
         // 覆盖色（选中态的主题色）铺在这层「面」**上面**，是叠加不是替代（1.1.28 起过渡动画）
         .then(
             when {

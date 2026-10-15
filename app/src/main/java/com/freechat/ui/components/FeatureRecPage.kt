@@ -1,5 +1,6 @@
 package com.freechat.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -88,10 +90,11 @@ fun FeatureRecPage(onDone: () -> Unit) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
     var stage by remember { mutableIntStateOf(0) }
-    // 时间轴：逐级推进；1.2.4 返修=用户消息后立刻出球（250ms 响应敏捷）、球多转一会（2.4s），
-    // 第一轮对话↔生图之间仍长顿（beat[3] 2.6s）
+    // 时间轴：逐级推进；1.2.4 返修=用户消息后立刻出球（250ms 响应敏捷）、球多转一会，
+    // 第一轮对话↔生图之间仍长顿（beat[3] 2.6s）；1.2.0 返修=思考 3.6s（三个状态各 1.2s）、
+    // 生图 3.2s（相位 550ms/步）——太快显得假
     LaunchedEffect(Unit) {
-        val beats = intArrayOf(400, 250, 2400, 2600, 1200, 900, 2200, 1800)
+        val beats = intArrayOf(400, 250, 3600, 2600, 1200, 900, 3200, 1800)
         for ((i, ms) in beats.withIndex()) {
             delay(ms.toLong())
             stage = i + 1
@@ -229,7 +232,7 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
                 GenerationPhase.IMAGE_REFERENCES, GenerationPhase.IMAGE_CONNECTING,
                 GenerationPhase.IMAGE_GENERATING, GenerationPhase.IMAGE_RECEIVING
             )) {
-                delay(280)
+                delay(550)
                 genPhase = p
                 genMs = android.os.SystemClock.elapsedRealtime() - t0
             }
@@ -239,6 +242,18 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
                 delay(100)
                 genMs = android.os.SystemClock.elapsedRealtime() - t0
             }
+        }
+    }
+
+    // 思考状态逐级推进（真机 generationPhase 同序：连接模型→理解内容→拟草回复，各 1.2s）
+    var thinkPhase by remember { mutableStateOf(GenerationPhase.CONNECTING) }
+    LaunchedEffect(stage) {
+        if (stage == 2) {
+            thinkPhase = GenerationPhase.CONNECTING
+            delay(1200)
+            thinkPhase = GenerationPhase.UNDERSTANDING
+            delay(1200)
+            thinkPhase = GenerationPhase.DRAFTING
         }
     }
 
@@ -269,7 +284,7 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
             }
             // 元素间距（1.1.33 返修：小卡里也要呼吸感，别把提示词/信息流/声明/图挤成一坨）
             Spacer(Modifier.height(22.dp))
-            // —— AI 思考球（真组件）→ 退场给正文让位 ——
+            // —— AI 思考球 + 右侧思考状态（真组件，与 ChatBubble 的思考行 1:1 同构）→ 退场给正文让位 ——
             Box(Modifier.fillMaxWidth()) {
                 // Column 链内嵌 Box 的 AnimatedVisibility 必须全限定名（ColumnScope 重载歧义）
                 androidx.compose.animation.AnimatedVisibility(
@@ -277,7 +292,18 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
                     enter = fadeIn(FreeChatAnimation.overlayFadeIn),
                     exit = fadeOut(FreeChatAnimation.overlayFadeOut)
                 ) {
-                    SiriOrb(Modifier.size(30.dp), isDark = isDark)
+                    Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SiriOrb(Modifier.size(30.dp), isDark = isDark)
+                        Column {
+                            AnimatedContent(thinkPhase, transitionSpec = { FreeChatAnimation.contentReplacement() },
+                                label = "generation_stage") { p ->
+                                Text(s.generationPhaseLabels[p].orEmpty(),
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                                    color = colors.TextSecondary)
+                            }
+                        }
+                    }
                 }
             }
             // —— AI 回复（bodyEnter 同曲线 + 逐字显现真组件）——
@@ -349,8 +375,10 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
             Box(
                 Modifier
                     .padding(10.dp)
-                    .width(150.dp)
-                    .background(colors.Surface, RoundedCornerShape(17.dp))
+                    // 宽度随内容（取最大内蕴=文字单行宽）——文字恒一行不换行，三语都不折
+                    .width(IntrinsicSize.Max)
+                    // 拟物风卡片：与软件内卡片同一材质（frostedCard 新拟态面+柔影）
+                    .frostedCard(null, colors, advancedMaterial = true, RoundedCornerShape(17.dp))
             ) {
                 Row(
                     Modifier
@@ -361,7 +389,8 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
                 ) {
                     Icon(Icons.Filled.Image, null, tint = colors.Primary, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(10.dp))
-                    Text(s.generateSceneImage, style = MaterialTheme.typography.bodyMedium, color = colors.TextPrimary)
+                    Text(s.generateSceneImage, style = MaterialTheme.typography.bodyMedium,
+                        color = colors.TextPrimary, maxLines = 1)
                 }
             }
         }
