@@ -32,6 +32,8 @@ object CharacterPresentationPolicy {
         imagePresetSubject = draft.imagePresetSubject,
         deepThinkingMode = draft.deepThinkingMode,
         enableWebSearch = draft.enableWebSearch,
+        allowVoiceReply = draft.allowVoiceReply,
+        voiceTimbre = draft.voiceTimbre,
     )
 
     // Buffered conversation is not an alternating one-question/one-answer script.

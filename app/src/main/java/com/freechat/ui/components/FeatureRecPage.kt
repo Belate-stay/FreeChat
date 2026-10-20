@@ -8,10 +8,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
+import com.freechat.ui.theme.AppBoxWithConstraints as BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
@@ -21,10 +22,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Image
@@ -39,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -47,9 +54,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -66,6 +73,7 @@ import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.animation.LocalMotionEnabled
 import com.freechat.ui.animation.MotionButton as Button
 import com.freechat.ui.animation.MotionPolicy
+import com.freechat.ui.adaptive.LocalTabletDevice
 import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.frostedCard
@@ -89,6 +97,7 @@ import java.io.File
 fun FeatureRecPage(onDone: () -> Unit) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
+    val tablet = LocalTabletDevice.current
     var stage by remember { mutableIntStateOf(0) }
     // 时间轴：逐级推进；1.2.4 返修=用户消息后立刻出球（250ms 响应敏捷）、球多转一会，
     // 第一轮对话↔生图之间仍长顿（beat[3] 2.6s）；1.2.0 返修=思考 3.6s（三个状态各 1.2s）、
@@ -102,19 +111,24 @@ fun FeatureRecPage(onDone: () -> Unit) {
     }
 
     BoxWithConstraints(Modifier.fillMaxSize().pageBackground(colors.Background)) {
-        // 卡高自适应：内容（成图按原比例）优先，窄/矮屏收卡不裁内容不压行动按钮
-        val cardH = minOf((maxWidth - 44.dp) / 0.62f, maxHeight - 280.dp).coerceAtLeast(300.dp)
+        if (tablet) {
+            TabletFeatureRecContent(stage, colors, onDone)
+            return@BoxWithConstraints
+        }
+        val shortWindow = maxHeight < 520.dp
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
+                .navigationBarsPadding()
+                .then(if (shortWindow) Modifier.verticalScroll(rememberScrollState()) else Modifier)
                 .padding(top = 20.dp, start = 22.dp, end = 22.dp, bottom = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(12.dp))
             Text(
                 s.featureRecTitle,
-                style = MaterialTheme.typography.headlineMedium,
+                style = MaterialTheme.typography.headlineMedium.copy(fontSize = 24.sp, lineHeight = 32.sp),
                 fontWeight = FontWeight.Bold,
                 color = colors.TextPrimary
             )
@@ -130,29 +144,25 @@ fun FeatureRecPage(onDone: () -> Unit) {
                     append("\n")
                     append(s.featureRecBodyAfter)
                 },
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp),
                 color = colors.TextSecondary,
                 textAlign = TextAlign.Center,
-                lineHeight = 26.sp
+                lineHeight = 28.sp
             )
             Spacer(Modifier.height(20.dp))
             // 演示卡：锁定交互（整卡吞点按，含键盘聚焦），卡高随屏自适应
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(cardH)
+                    .then(if (shortWindow) Modifier.height(400.dp) else Modifier.weight(1f))
                     .frostedCard(null, colors, advancedMaterial = false, RoundedCornerShape(22.dp))
-                    .pointerInput(Unit) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
-                            }
-                        }
-                    }
             ) {
                 FeatureRecDemo(stage, colors)
+                if (stage < 8) Box(Modifier.matchParentSize().pointerInput(Unit) {
+                    detectTapGestures(onTap = {}, onLongPress = {})
+                })
             }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(20.dp))
             Button(
                 onClick = onDone,
                 enabled = stage >= 8,
@@ -165,7 +175,120 @@ fun FeatureRecPage(onDone: () -> Unit) {
                     disabledContentColor = colors.TextTertiary
                 )
             ) {
-                Text(s.featureRecCta, fontWeight = FontWeight.SemiBold)
+                Text(s.featureRecCta, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TabletFeatureRecContent(
+    stage: Int,
+    colors: FreeChatColors,
+    onDone: () -> Unit
+) {
+    val s = LocalStrings.current
+    val blue = if (isSystemInDarkTheme()) Color(0xFF8AB4F8) else Color(0xFF1A73E8)
+    val demoContent = remember {
+        movableContentOf<Pair<Int, FreeChatColors>> { (demoStage, demoColors) ->
+            FeatureRecDemo(demoStage, demoColors)
+        }
+    }
+    BoxWithConstraints(
+        Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+            .padding(horizontal = 32.dp, vertical = 28.dp)
+    ) {
+        val fontScale = LocalDensity.current.fontScale
+        val split = maxWidth >= 900.dp && maxWidth > maxHeight && maxHeight >= 520.dp && fontScale <= 1.3f
+        val cardW = if (split) minOf(420.dp, (maxWidth - 48.dp) / 2, maxHeight * 0.62f / maxOf(1f, fontScale))
+            else minOf(420.dp, maxWidth)
+        val cardH = cardW / 0.62f * maxOf(1f, fontScale)
+        val introduction: @Composable (Boolean) -> Unit = { centered ->
+            Column(
+                Modifier.widthIn(max = 640.dp).fillMaxWidth(),
+                horizontalAlignment = if (centered) Alignment.CenterHorizontally else Alignment.Start
+            ) {
+                Text(
+                    s.featureRecTitle,
+                    style = MaterialTheme.typography.headlineMedium.copy(fontSize = 28.sp, lineHeight = 36.sp),
+                    fontWeight = FontWeight.Bold,
+                    color = colors.TextPrimary,
+                    textAlign = if (centered) TextAlign.Center else TextAlign.Start
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    buildAnnotatedString {
+                        append(s.featureRecBodyBefore)
+                        withStyle(SpanStyle(color = blue, fontWeight = FontWeight.SemiBold)) {
+                            append("\"ChatGPT-Image-2.5\"")
+                        }
+                        append("\n")
+                        append(s.featureRecBodyAfter)
+                    },
+                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp),
+                    color = colors.TextSecondary,
+                    textAlign = if (centered) TextAlign.Center else TextAlign.Start,
+                    lineHeight = 30.sp
+                )
+            }
+        }
+        val action: @Composable () -> Unit = {
+            Button(
+                onClick = onDone,
+                enabled = stage >= 8,
+                modifier = Modifier.widthIn(max = 320.dp).fillMaxWidth().heightIn(min = 48.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = colors.Primary,
+                    contentColor = colors.OnPrimary,
+                    disabledContainerColor = colors.SurfaceVariant,
+                    disabledContentColor = colors.TextTertiary
+                )
+            ) {
+                Text(s.featureRecCta, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+            }
+        }
+        val demonstration: @Composable () -> Unit = {
+            Box(
+                Modifier.widthIn(max = 420.dp).width(cardW).height(cardH)
+                    .frostedCard(null, colors, advancedMaterial = false, RoundedCornerShape(22.dp))
+            ) {
+                demoContent(stage to colors)
+                // 吞掉演示中的点按与长按，同时让竖屏/大字号页面继续接收滚动手势。
+                if (stage < 8) Box(Modifier.matchParentSize().pointerInput(Unit) {
+                    detectTapGestures(onTap = {}, onLongPress = {})
+                })
+            }
+        }
+        if (split) {
+            Row(
+                Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(48.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { demonstration() }
+                Column(
+                    Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    introduction(false)
+                    Spacer(Modifier.height(32.dp))
+                    action()
+                }
+            }
+        } else {
+            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(
+                    Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    introduction(true)
+                    Spacer(Modifier.height(24.dp))
+                    demonstration()
+                    Spacer(Modifier.height(24.dp))
+                }
+                Spacer(Modifier.height(24.dp))
+                action()
             }
         }
     }
@@ -207,6 +330,14 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
     val context = LocalContext.current
     val isDark = isSystemInDarkTheme()
     val motionOn = LocalMotionEnabled.current
+    val tablet = LocalTabletDevice.current
+    val demoScroll = rememberScrollState()
+    val demoTextStyle = if (tablet) MaterialTheme.typography.bodyLarge
+        else MaterialTheme.typography.bodyMedium
+    LaunchedEffect(stage) {
+        if (stage >= 8) demoScroll.animateScrollTo(demoScroll.maxValue,
+            tween(FreeChatAnimation.DURATION_MESSAGE, easing = FreeChatAnimation.arrivalEase))
+    }
 
     // 成图资源落缓存文件：生成槽走真组件 GeneratedImage，占位→变形→成图与真机同一条管线
     var scenePath by remember { mutableStateOf<String?>(null) }
@@ -266,7 +397,8 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
     val demoAiId = remember { "feature_rec_ai_" + java.util.UUID.randomUUID() }
 
     Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 16.dp)) {
+        Column(Modifier.fillMaxSize().verticalScroll(demoScroll, enabled = stage >= 8)
+            .padding(horizontal = 12.dp, vertical = 16.dp)) {
             // —— 用户消息（右侧绿泡）——
             demoMessageEnter(stage >= 1) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -277,8 +409,8 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
                             .background(colors.UserBubble)
                             .padding(horizontal = 12.dp, vertical = 10.dp)
                     ) {
-                        Text(DEMO_USER_TEXT, style = MaterialTheme.typography.bodySmall,
-                            color = colors.UserBubbleText, lineHeight = 19.sp)
+                        Text(DEMO_USER_TEXT, style = demoTextStyle,
+                            color = colors.UserBubbleText, lineHeight = if (tablet) 26.sp else 22.sp)
                     }
                 }
             }
@@ -299,7 +431,7 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
                             AnimatedContent(thinkPhase, transitionSpec = { FreeChatAnimation.contentReplacement() },
                                 label = "generation_stage") { p ->
                                 Text(s.generationPhaseLabels[p].orEmpty(),
-                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp),
                                     color = colors.TextSecondary)
                             }
                         }
@@ -313,7 +445,7 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
                     messageId = demoAiId,
                     timestampMs = System.currentTimeMillis(),
                     enabled = motionOn,
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = demoTextStyle,
                     color = colors.TextPrimary,
                     modifier = Modifier.fillMaxWidth().padding(end = 24.dp)
                 )
@@ -322,7 +454,7 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
             Spacer(Modifier.height(20.dp))
             demoMessageEnter(stage >= 6) {
                 Column(Modifier.fillMaxWidth().padding(end = 24.dp)) {
-                    Text(s.sceneImageVisualOnly, style = MaterialTheme.typography.bodySmall,
+                    Text(s.sceneImageVisualOnly, style = MaterialTheme.typography.bodyMedium,
                         color = colors.TextSecondary, modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp))
                     // 生成槽等比缩小（1.1.33：小卡里占位图/成图别占满行宽，文本不缩只缩元素）
                     Box(Modifier.fillMaxWidth(0.72f)) {
@@ -358,7 +490,7 @@ private fun FeatureRecDemo(stage: Int, colors: FreeChatColors) {
                     }
                 }
             }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(8.dp))
             // （1.1.33 工单：底部输入条删除——下方直接弹出「生成当前场景图」选项）
         }
 

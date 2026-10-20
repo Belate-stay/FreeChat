@@ -7,34 +7,33 @@ import com.freechat.model.SearchCitation
  * 解析只做纯文本侧（指令剥离/情绪标签/分条/方括号清洗）；「格式自检+重写」是独立 HTTP 小调用，留在端上。
  */
 
-/** 拟人模式结构化回复：模型输出的情绪标签 + 分条回复 + 主动智能指令 */
+/** 拟人模式结构化回复：模型输出的情绪标签 + 分条回复（2026-10-20 本地主动指令链退役——云端主动智能不走输出指令） */
 data class CompanionReply(
-    val emotion: String, val segments: List<String>, val proactive: ProactiveSignal? = null,
+    val emotion: String, val segments: List<String>,
     val sources: List<SearchCitation> = emptyList()
 )
 
-/** [CompanionReplyParser.parse] 的产出：正文行 + 情绪 + 指令（sources 由端上合并检索证据后补） */
+/** [CompanionReplyParser.parse] 的产出：正文行 + 情绪（sources 由端上合并检索证据后补） */
 data class ParsedCompanionReply(
-    val emotion: String, val bodyLines: List<String>, val proactive: ProactiveSignal?
+    val emotion: String, val bodyLines: List<String>
 )
 
 object CompanionReplyParser {
 
     /**
      * 模型原文 → 结构化。顺序是行为的一部分：
-     * ① 主动智能指令行先剥掉（它是指令不是正文，绝不能出现在气泡里）；
-     * ② 叙事档不解析情绪标签、整段一条（空行仅排版）；
-     * ③ 微信档解析首行情绪标签（标准 [情绪:开心]，兼容裸 [开心]，识别不了当正文留着）；
-     * ④ 默认剥掉正文里的短方括号标签；已验证的微信通道仅保留已知内置表情。
+     * ① 叙事档不解析情绪标签、整段一条（空行仅排版）；
+     * ② 微信档解析首行情绪标签（标准 [情绪:开心]，兼容裸 [开心]，识别不了当正文留着）；
+     * ③ 默认剥掉正文里的短方括号标签；已验证的微信通道仅保留已知内置表情。
      *    表情词与情绪同名时（如 [委屈]），允许微信表情的通道以正文表情为准；
-     *    显式 [情绪:委屈] 与主动智能指令仍按原有规则解析。
+     *    显式 [情绪:委屈] 按原有规则解析。
      */
     fun parse(
         rawOrig: String,
         narrativeMode: Boolean,
         allowWechatEmoji: Boolean = false
     ): ParsedCompanionReply {
-        val (raw, proactiveSignal) = stripProactiveDirective(rawOrig)
+        val raw = rawOrig
 
         val emotion: String
         val bodyLines: List<String>
@@ -42,7 +41,7 @@ object CompanionReplyParser {
             emotion = ""
             bodyLines = listOf(WechatEmojiTokens.stripKnownTokens(raw).trim()).filter { it.isNotEmpty() }
         } else {
-            val lines = raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+            val lines = splitMessagesKeepingVoiceBlocks(raw)
             val emotionTag = Regex("""^\s*\[(?:情绪|emotion)?\s*[:：]?\s*([^\]]+)]\s*$""")
             val first = lines.firstOrNull()
             val parsed = first?.takeUnless { allowWechatEmoji && WechatEmojiTokens.isKnownToken(it) }
@@ -55,11 +54,32 @@ object CompanionReplyParser {
             val bracketToken = if (allowWechatEmoji) Regex("""\[[^\[\]\r\n]+]\s*""") else
                 Regex("""\[[^\]]{1,6}]\s*""")
             bodyLines = rawBodyLines.map { line ->
-                line.replace(bracketToken) { match ->
+                // 语音消息行原样保留——标签里的台词不做方括号清洗（2026-10-19）
+                if (line.startsWith("<voice", ignoreCase = true)) line
+                else line.replace(bracketToken) { match ->
                     if (allowWechatEmoji && WechatEmojiTokens.isKnownToken(match.value.trimEnd())) match.value else ""
                 }.trim()
             }.filter { it.isNotEmpty() }
         }
-        return ParsedCompanionReply(emotion, bodyLines, proactiveSignal)
+        return ParsedCompanionReply(emotion, bodyLines)
+    }
+
+    /**
+     * 分条（2026-10-19）：`<voice>…</voice>` 块**跨行不可拆**——一条语音就是一条消息，
+     * 哪怕台词里带换行；块外的文字照旧按行分条。文字/语音可任意交替、可连发多条语音。
+     */
+    internal fun splitMessagesKeepingVoiceBlocks(raw: String): List<String> {
+        val out = mutableListOf<String>()
+        val block = Regex("<voice[\\s\\S]*?</voice>", RegexOption.IGNORE_CASE)
+        var rest = raw
+        while (true) {
+            val m = block.find(rest) ?: break
+            rest.substring(0, m.range.first).split("\n").map { it.trim() }
+                .filter { it.isNotEmpty() }.forEach { out.add(it) }
+            out.add(m.value.trim())
+            rest = rest.substring(m.range.last + 1)
+        }
+        rest.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.forEach { out.add(it) }
+        return out
     }
 }

@@ -10,9 +10,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
+import com.freechat.ui.theme.AppBoxWithConstraints as BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -35,13 +37,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
+import com.freechat.ui.theme.AppDialog as Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.freechat.i18n.LocalStrings
 import java.io.File
@@ -74,8 +75,6 @@ fun AvatarCropDialog(
     onError: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val density = LocalDensity.current
-    val config = LocalConfiguration.current
     val s = LocalStrings.current
 
     fun openInput(uri: Uri): java.io.InputStream? =
@@ -94,141 +93,152 @@ fun AvatarCropDialog(
         return
     }
 
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
-    // 初始 scale=1 时图正好铺满取景框（ContentScale.Crop 语义），用户只能放大不能缩小 ——
-    // 缩到比框还小会露出黑边，那不是裁剪该有的样子
-    val frameSizeDp = minOf(config.screenWidthDp - 48, 320).dp
-    val frameSizePx = with(density) { frameSizeDp.toPx() }
-
-    val bw = bitmap.width.toFloat()
-    val bh = bitmap.height.toFloat()
-    // 让短边铺满取景框所需的缩放（相对 Image 的 Crop 基线，所以从 1 起步）
-    val cover = maxOf(frameSizePx / bw, frameSizePx / bh)
-    val baseW = bw * cover
-    val baseH = bh * cover
-
-    /**
-     * 位移必须夹住：图得**始终盖满取景框**，往外最多能挪「图边长 − 框边长」的一半，
-     * 再过去就露黑底了。缩放的锚点是取景框中心，所以放大之后允许的范围也跟着变大，
-     * 每次都要按新 scale 重新夹一遍。
-     */
-    fun clampOffset(x: Float, y: Float, atScale: Float): Offset {
-        val maxX = maxOf(0f, (baseW * atScale - frameSizePx) / 2f)
-        val maxY = maxOf(0f, (baseH * atScale - frameSizePx) / 2f)
-        return Offset(x.coerceIn(-maxX, maxX), y.coerceIn(-maxY, maxY))
-    }
-
-    fun cropAndSave() {
-        // ===== 取景框在源图上盖住的那块正方形 =====
-        // 屏幕坐标 → 源图素要反掉两层：
-        //   ① graphicsLayer 的 scale/translation（回到「铺满」坐标系，原点在取景框左上角）
-        //   ② ContentScale.Crop 的居中偏移（长边会被切掉一截，x/y 各自不同）
-        // ②原先漏了，于是映射整体偏上：竖图铺满时上下各切一截，用户框里看到的是中间那块，
-        // 实际裁的是偏上那块，重选范围也没用 —— 这就是「裁切无效」的根子。
-        // 两个方向除的是同一个 cover、乘的是同一个 1/scale，所以映射出来的边长必然相等：
-        // 成品天然是正方形，**不能**再逐边 coerceIn（那会把方图挤成长条，脸就扁了）。
-        val half = frameSizePx / 2f
-        fun toSrcX(screenX: Float) = ((screenX - offset.x - half) / scale + half - (half - baseW / 2f)) / cover
-        fun toSrcY(screenY: Float) = ((screenY - offset.y - half) / scale + half - (half - baseH / 2f)) / cover
-
-        val side = (frameSizePx / (scale * cover)).toInt().coerceAtLeast(1)
-        val maxLeft = (bitmap.width - side).coerceAtLeast(0)
-        val maxTop = (bitmap.height - side).coerceAtLeast(0)
-        // 以取景框中心为准取正方形，再整体推进图内。拖动时已经夹过位移，
-        // 这里的 coerce 只是兜底，保证任何情况下都裁得出一块合法的方图，不会静默罢工
-        val left = (toSrcX(half) - side / 2f).toInt().coerceIn(0, maxLeft)
-        val top = (toSrcY(half) - side / 2f).toInt().coerceIn(0, maxTop)
-
-        val cropped = runCatching { Bitmap.createBitmap(bitmap, left, top, side, side) }.getOrNull() ?: return
-        // 一律缩到 OUTPUT_SIZE 见方：小图放大也照做，头像显示就那么点大，
-        // 尺寸统一比「有的 200 有的 512」好收拾
-        val output = runCatching { Bitmap.createScaledBitmap(cropped, OUTPUT_SIZE, OUTPUT_SIZE, true) }
-            .getOrNull() ?: return
-
-        val file = File(context.filesDir, "avatar_${System.currentTimeMillis()}.jpg")
-        runCatching {
-            FileOutputStream(file).use { out -> output.compress(Bitmap.CompressFormat.JPEG, 92, out) }
-        }.getOrNull() ?: return
-
-        // 原图（已转正、已降到 2048 以内）也压一份交出去。走在内存里不走盘：
-        // 它只用来给下一次「编辑头像」兜底，落盘再读回来多一次 IO 和一次漏文件的可能。
-        // 压不出来不算失败 —— 成品已经在手，大不了下次编辑退回用当前头像
-        val original = runCatching {
-            java.io.ByteArrayOutputStream().use { out ->
-                if (bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)) out.toByteArray() else null
-            }
-        }.getOrNull()
-        onDone(file.absolutePath, original)
-    }
-
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.92f)), contentAlignment = Alignment.Center) {
-            Box(
-                modifier = Modifier
-                    .size(frameSizeDp)
-                    .clip(CircleShape)
-                    .pointerInput(Unit) {
-                        detectTransformGestures { centroid, pan, zoom, _ ->
-                            val next = (scale * zoom).coerceIn(1f, MAX_SCALE)
-                            // 以双指中心为锚点缩放：手指底下那块像素得待在原地。
-                            // graphicsLayer 是绕取景框中心缩的，不补这一下，两指一捏画面会整体跳一下。
-                            //   u  = 双指中心相对取景框中心的偏移
-                            //   保持「缩放前后，u 处对应的源图像素不变」→ t' = u(1−r) + r·t
-                            val ratio = next / scale
-                            val ux = centroid.x - frameSizePx / 2f
-                            val uy = centroid.y - frameSizePx / 2f
-                            scale = next
-                            offset = clampOffset(
-                                ux * (1f - ratio) + ratio * offset.x + pan.x,
-                                uy * (1f - ratio) + ratio * offset.y + pan.y,
-                                next
-                            )
-                        }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            scaleX = scale
-                            scaleY = scale
-                            translationX = offset.x
-                            translationY = offset.y
-                        },
-                    contentScale = ContentScale.Crop
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.92f))) {
+            var frameSizePx by remember(sourceUri) { mutableFloatStateOf(0f) }
+            var scale by remember(sourceUri) { mutableFloatStateOf(1f) }
+            var offset by remember(sourceUri) { mutableStateOf(Offset.Zero) }
+            // 初始 scale=1 时图正好铺满取景框（ContentScale.Crop 语义），用户只能放大不能缩小 ——
+            // 缩到比框还小会露出黑边，那不是裁剪该有的样子
+            val bw = bitmap.width.toFloat()
+            val bh = bitmap.height.toFloat()
+            // 让短边铺满取景框所需的缩放（相对 Image 的 Crop 基线，所以从 1 起步）
+            val cover = maxOf(frameSizePx / bw, frameSizePx / bh)
+            val baseW = bw * cover
+            val baseH = bh * cover
+
+            /**
+             * 位移必须夹住：图得**始终盖满取景框**，往外最多能挪「图边长 − 框边长」的一半，
+             * 再过去就露黑底了。缩放的锚点是取景框中心，所以放大之后允许的范围也跟着变大，
+             * 每次都要按新 scale 重新夹一遍。
+             */
+            fun clampOffset(x: Float, y: Float, atScale: Float): Offset {
+                val maxX = maxOf(0f, (baseW * atScale - frameSizePx) / 2f)
+                val maxY = maxOf(0f, (baseH * atScale - frameSizePx) / 2f)
+                return Offset(x.coerceIn(-maxX, maxX), y.coerceIn(-maxY, maxY))
+            }
+
+            fun cropAndSave() {
+                // ===== 取景框在源图上盖住的那块正方形 =====
+                // 屏幕坐标 → 源图素要反掉两层：
+                //   ① graphicsLayer 的 scale/translation（回到「铺满」坐标系，原点在取景框左上角）
+                //   ② ContentScale.Crop 的居中偏移（长边会被切掉一截，x/y 各自不同）
+                // ②原先漏了，于是映射整体偏上：竖图铺满时上下各切一截，用户框里看到的是中间那块，
+                // 实际裁的是偏上那块，重选范围也没用 —— 这就是「裁切无效」的根子。
+                // 两个方向除的是同一个 cover、乘的是同一个 1/scale，所以映射出来的边长必然相等：
+                // 成品天然是正方形，**不能**再逐边 coerceIn（那会把方图挤成长条，脸就扁了）。
+                val half = frameSizePx / 2f
+                fun toSrcX(screenX: Float) = ((screenX - offset.x - half) / scale + half - (half - baseW / 2f)) / cover
+                fun toSrcY(screenY: Float) = ((screenY - offset.y - half) / scale + half - (half - baseH / 2f)) / cover
+                val side = (frameSizePx / (scale * cover)).toInt().coerceAtLeast(1)
+                val maxLeft = (bitmap.width - side).coerceAtLeast(0)
+                val maxTop = (bitmap.height - side).coerceAtLeast(0)
+                // 以取景框中心为准取正方形，再整体推进图内。拖动时已经夹过位移，
+                // 这里的 coerce 只是兜底，保证任何情况下都裁得出一块合法的方图，不会静默罢工
+                val left = (toSrcX(half) - side / 2f).toInt().coerceIn(0, maxLeft)
+                val top = (toSrcY(half) - side / 2f).toInt().coerceIn(0, maxTop)
+
+                val cropped = runCatching { Bitmap.createBitmap(bitmap, left, top, side, side) }.getOrNull() ?: return
+                // 一律缩到 OUTPUT_SIZE 见方：小图放大也照做，头像显示就那么点大，
+                // 尺寸统一比「有的 200 有的 512」好收拾
+                val output = runCatching { Bitmap.createScaledBitmap(cropped, OUTPUT_SIZE, OUTPUT_SIZE, true) }
+                    .getOrNull() ?: return
+                val file = File(context.filesDir, "avatar_${System.currentTimeMillis()}.jpg")
+                runCatching {
+                    FileOutputStream(file).use { out -> output.compress(Bitmap.CompressFormat.JPEG, 92, out) }
+                }.getOrNull() ?: return
+
+                // 原图（已转正、已降到 2048 以内）也压一份交出去。走在内存里不走盘：
+                // 它只用来给下一次「编辑头像」兜底，落盘再读回来多一次 IO 和一次漏文件的可能。
+                // 压不出来不算失败 —— 成品已经在手，大不了下次编辑退回用当前头像
+                val original = runCatching {
+                    java.io.ByteArrayOutputStream().use { out ->
+                        if (bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)) out.toByteArray() else null
+                    }
+                }.getOrNull()
+                onDone(file.absolutePath, original)
+            }
+
+            Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally) {
+                // Column 先测量提示与操作行；剩余空间决定正方形边长，不假定提示只占一行。
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    val frameSizeDp = avatarCropFrameSideDp(maxWidth.value, maxHeight.value).dp
+                    Box(
+                        modifier = Modifier
+                            .size(frameSizeDp)
+                            .onSizeChanged { size ->
+                                if (frameSizePx != size.width.toFloat()) {
+                                    frameSizePx = size.width.toFloat()
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                }
+                            }
+                            .clip(CircleShape)
+                            .pointerInput(sourceUri, frameSizePx) {
+                                detectTransformGestures { centroid, pan, zoom, _ ->
+                                    val next = (scale * zoom).coerceIn(1f, MAX_SCALE)
+                                    // 以双指中心为锚点缩放：手指底下那块像素得待在原地。
+                                    // graphicsLayer 是绕取景框中心缩的，不补这一下，两指一捏画面会整体跳一下。
+                                    //   u  = 双指中心相对取景框中心的偏移
+                                    //   保持「缩放前后，u 处对应的源图像素不变」→ t' = u(1−r) + r·t
+                                    val ratio = next / scale
+                                    val ux = centroid.x - frameSizePx / 2f
+                                    val uy = centroid.y - frameSizePx / 2f
+                                    scale = next
+                                    offset = clampOffset(
+                                        ux * (1f - ratio) + ratio * offset.x + pan.x,
+                                        uy * (1f - ratio) + ratio * offset.y + pan.y,
+                                        next
+                                    )
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    scaleX = scale
+                                    scaleY = scale
+                                    translationX = offset.x
+                                    translationY = offset.y
+                                },
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                    // 取景圈画在最上层：它只负责"告诉你边界在哪"，不该被拖动的手势吃掉
+                    Box(
+                        Modifier
+                            .size(frameSizeDp)
+                            .border(2.dp, Color.White.copy(alpha = 0.9f), CircleShape)
+                    )
+                }
+
+                Text(
+                    s.avatarCropHint,
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 12.dp)
                 )
-            }
-            // 取景圈画在最上层：它只负责"告诉你边界在哪"，不该被拖动的手势吃掉
-            Box(
-                Modifier
-                    .size(frameSizeDp)
-                    .border(2.dp, Color.White.copy(alpha = 0.9f), CircleShape)
-            )
 
-            Row(
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = onDismiss) { Text(s.cancel, color = Color.White) }
-                Box(Modifier.size(28.dp))
-                Button(onClick = { cropAndSave() }) { Text(s.confirm, fontWeight = FontWeight.Medium) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onDismiss) { Text(s.cancel, color = Color.White) }
+                    Box(Modifier.size(28.dp))
+                    Button(onClick = { cropAndSave() }, enabled = frameSizePx > 0f) {
+                        Text(s.confirm, fontWeight = FontWeight.Medium)
+                    }
+                }
             }
-
-            Text(
-                s.avatarCropHint,
-                color = Color.White.copy(alpha = 0.6f),
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 84.dp)
-            )
         }
     }
 }
+
+/** The actual remaining preview space already excludes padding, hint and actions. */
+internal fun avatarCropFrameSideDp(widthDp: Float, heightDp: Float): Float =
+    minOf(widthDp, heightDp, 320f).coerceAtLeast(1f)
 
 /** 成品边长 —— 头像最大显示到 80dp，512 已经过剩，但留点余量给未来 */
 private const val OUTPUT_SIZE = 512

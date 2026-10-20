@@ -18,6 +18,31 @@ data class ChangelogEntry(
 object ChangelogData {
     val entries: List<ChangelogEntry> = listOf(
         ChangelogEntry(
+            version = "Version 1.2.1",
+            date = "2026-10-20",
+            sections = listOf(
+                ChangelogSection("拟人优化", listOf(
+                    "新增 “允许语音回复”功能，在 微信聊天 对话模式下开启后角色可能会发送语音回复，同时长按语音键不再转文字而是直接发送语音。",
+                    "重写 “主动智能”功能，由本地计时改为服务器主动调用API，不依赖FreeChat后台运行，但依赖微信消息推送。仅支持接入微信后的角色且仅支持内置模型（DeepSeek-V4.1-Flash）。",
+                    "优化 AI对角色提示词的理解，优化系统提示词，修复角色普遍回复偏高冷的问题。"
+                )),
+                ChangelogSection("新增功能", listOf(
+                    "新增 “获取API教程”，以 \"DeepSeek\" 为例指导用户获取自己的API并填入数据添加模型。"
+                )),
+                ChangelogSection("体验优化", listOf(
+                    "适配 平板布局，并添加平板独属的操作逻辑、动画等，提升设备兼容性，增强用户体验。"
+                )),
+                ChangelogSection("漏洞修补", listOf(
+                    "修复 高级材质下“添加模型”页面部分文字流无法正常进入高斯模糊图层的问题。",
+                    "修复 添加自定义音色后无法正常调用音色的问题。"
+                )),
+                ChangelogSection("其他更新", listOf(
+                    "优化 弹窗显示逻辑。",
+                    "更新 FreeChat官网页面设计大焕新：\nhttps://freechater.com"
+                ))
+            )
+        ),
+        ChangelogEntry(
             version = "Version 1.2.0",
             date = "2026-10-14",
             sections = listOf(

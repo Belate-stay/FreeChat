@@ -15,11 +15,10 @@ import android.util.Log
 import com.freechat.data.MiMoAsr
 import com.freechat.ui.animation.AnimationReplay
 import com.freechat.core.CompanionMood
+import com.freechat.core.CompanionPrompts
 import com.freechat.data.CompanionApiReply as CompanionReply
 import com.freechat.core.CompanionRhythm
 import com.freechat.core.MemoryDraft
-import com.freechat.core.ProactiveFire
-import com.freechat.core.ProactiveSignal
 import com.freechat.util.DocumentParser
 import com.freechat.util.pairedIndices
 import com.freechat.util.OoxmlGenerator
@@ -70,9 +69,6 @@ import com.freechat.data.VoiceConfigurationException
 import com.freechat.data.SceneReferenceSelector
 import com.freechat.i18n.AppLanguage
 import com.freechat.model.*
-import com.freechat.proactive.ProactiveRequest
-import com.freechat.proactive.ProactiveScheduler
-import com.freechat.proactive.ProactiveStore
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.InstanceCreator
@@ -124,10 +120,10 @@ import java.util.concurrent.atomic.AtomicReference
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
+        // 2026-10-18：内置模型 Key 已收口服务器（BuiltInProxy），包里不再有 Key；
+        // 这两个厂商地址只剩「模型编辑页-获取模型列表」的开发路径在用（无 Key 自然 401，正常）。
         private const val DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-        private val DOUBAO_API_KEY = BuildConfig.DOUBAO_API_KEY
         private const val XIAOMI_BASE_URL = "https://api.xiaomimimo.com/v1"
-        private val XIAOMI_API_KEY = BuildConfig.XIAOMI_API_KEY
         private val nativeSearchFailures = mutableMapOf<String, Long>()
 
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
@@ -147,7 +143,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         /**
          * 主动智能被闹钟唤醒时，用它拿到「该用哪个 VM 干活」：
          * App 开着 → 用现成的实例（状态、缓冲管线、前后台标记全对得上）；
-         * App 没开着 → 返回 null，由 ProactiveService 新建一个专供这次生成。
+         * App 没开着 → 返回 null。
          * 这样保证同一个进程里只有一个 VM 在写同一个对话文件（两个 VM 同时写会互相覆盖）。
          */
         fun live(): ChatViewModel? = liveRef?.get()
@@ -158,7 +154,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * 主动消息已经失去意义；而且两条写入撞在一起还会互相覆盖。
          * 之所以不放在 VM 实例上：App 冷启动时生成跑在服务新建的 VM 上，用户发消息走的是另一个 VM。
          */
-        private val proactiveJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
         /**
          * 主动智能收尾工作（读账本、挂闹钟）用的进程级作用域。
@@ -166,17 +161,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * （Activity 销毁 → ViewModelStore 清空 → viewModelScope 已取消），
          * 那样「给自己定下一次」会静默失败——表现为「只主动找过一次，之后再也没动静」。
          */
-        private val proactiveScope = CoroutineScope(
-            SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
-                // 这个作用域在别的线程上跑，抛出去没人接就是整个进程崩。
-                // 主动智能是「锦上添花」的功能，任何意外都不该把用户正在看的聊天带走。
-                Log.e("FreeChat", "proactiveScope failed", e)
-            }
-        )
     }
 
     private val settingsRepo = SettingsRepository(application)
     private val voicePresetRepo = VoicePresetRepository.get(application)
+    /** 自建音色（音色设计/复刻）列表——设置页「音色」子设置的选择源 */
+    val voicePresets = voicePresetRepo.presets
     private val searchConfigStore = SearchConfigStore(application)
     private val _searchConfig = MutableStateFlow(searchConfigStore.load())
     val searchConfig: StateFlow<SearchConfig> = _searchConfig.asStateFlow()
@@ -189,6 +179,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val memoryManager = MemoryManager()
     // OkHttp 客户端：这里的每一项都为「切后台 / 锁屏后还能收到回复」服务
     private val client = OkHttpClient.Builder()
+        .addInterceptor(com.freechat.data.BuiltInProxy.interceptor()) // 内置模型/代理身份头（2026-10-18）
         .connectTimeout(15, TimeUnit.SECONDS)  // 30s→15s：连不上就早点失败重试，别让用户干等半分钟
         .readTimeout(180, TimeUnit.SECONDS)    // 流式+搜索需要更久（这是「多久没收到任何字节」的上限）
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -315,14 +306,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // 每对话生成状态（loading / typing），与「当前显示对话」解耦
     private val convLoading = mutableMapOf<String, Boolean>()
+    private val _busyConversationIds = MutableStateFlow<Set<String>>(emptySet())
+    val busyConversationIds: StateFlow<Set<String>> = _busyConversationIds.asStateFlow()
+
+    fun isConversationBusy(conversationId: String?): Boolean = conversationId != null &&
+        (convLoading[conversationId] == true || convTyping[conversationId] == true)
+
+    private fun publishBusyConversations() {
+        _busyConversationIds.value = (convLoading.keys + convTyping.keys)
+            .filterTo(mutableSetOf()) { isConversationBusy(it) }
+    }
     private val convTyping = mutableMapOf<String, Boolean>()
 
     // 主动智能的本地账本（计划 + 每日配额），懒加载：不用这个功能的人不会碰到一次文件读取
-    private val proactiveStore by lazy { ProactiveStore(getApplication()) }
     // 主动消息强制发通知：进程被闹钟冷启动时 appInForeground 还停在默认值 true（没人调过
     // onAppForegroundChanged），据此判断「用户在看」会得出完全相反的结论 —— 于是 TA 好不容易
     // 主动找你一次，却静悄悄地什么都没发生。
-    private var proactiveForceNotify = false
 
     // 本轮发送的起始索引（停止时据此截断「用户消息 + AI 回复」；-1 表示无进行中的普通发送轮）
     private var activeRoundStartIndex = -1
@@ -399,7 +398,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun notifyReplyIfBackground(title: String, content: String) {
         if (content.isBlank()) return
         // 主动消息是「闹钟把 App 从死里叫醒」这条路径，前台标记不可信，一律照发
-        if (appInForeground && !proactiveForceNotify) return
+        if (appInForeground) return
         ReplyService.showReply(getApplication(), title, content)
     }
 
@@ -422,7 +421,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun clearAttachmentNotice() { _attachmentNotice.value = "" }
 
     private val _selectedModel = MutableStateFlow(
-        com.freechat.data.BuiltInLanguageModel.create(BuildConfig.DEEPSEEK_API_KEY)
+        com.freechat.data.BuiltInLanguageModel.create()
     )
     val selectedModel: StateFlow<ModelInfo> = _selectedModel.asStateFlow()
 
@@ -493,6 +492,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // 输入框状态（1.0.71）：自动隐藏 = 现状；永久固定 = 不触发隐藏动画（含底部渐变模糊层）
     private val _inputBarState = MutableStateFlow(InputBarState.AUTO_HIDE)
     val inputBarState: StateFlow<InputBarState> = _inputBarState.asStateFlow()
+
+    val tabletDisplayMode: StateFlow<TabletDisplayMode> = settingsRepo.tabletDisplayMode
+        .stateIn(viewModelScope, SharingStarted.Eagerly, TabletDisplayMode.EMBEDDED)
+    val tabletFloatingSide: StateFlow<TabletFloatingSide> = settingsRepo.tabletFloatingSide
+        .stateIn(viewModelScope, SharingStarted.Eagerly, TabletFloatingSide.BOTH)
+    val tabletUnderlyingTouch: StateFlow<Boolean> = settingsRepo.tabletUnderlyingTouch
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     // ===== TTS 语音输出 =====
     private val _voiceModel = MutableStateFlow("MiMo-V2.5-TTS")
@@ -660,24 +666,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Beta 1.0.96: built-in model definitions are fixed. The legacy preference table now
     // contributes only the global per-model reasoning usage switch, never editable capabilities.
     private val builtInLanguageModels = listOf(
-        com.freechat.data.BuiltInLanguageModel.create(BuildConfig.DEEPSEEK_API_KEY)
+        com.freechat.data.BuiltInLanguageModel.create()
     )
+    // 2026-10-18：内置模型收口代理 —— apiBaseUrl 一律 BuiltInProxy.BASE、无 Key（包里没有）；
+    // 名称/备注等显示字段由「模型选择」页拉 /api/ai/catalog 实时覆盖，这里是断网兜底。
     private val builtInVisualModels = listOf(
-        ModelInfo("ep-20260629143810-ffvjl", "Doubao-Seedream-5.0-Lite", Provider.DOUBAO, "Volcano Engine 轻量级生图模型，${com.freechat.data.BuiltInLanguageModel.RED_TAIL}", modelType = ModelType.VISUAL, isBuiltIn = true),
-        // 1.1.26.1：OpenAI 兼容 images 端点（中转站），键入 BuildConfig 不落编辑页——用户只能选不能看。
+        ModelInfo("ep-20260629143810-ffvjl", "Doubao-Seedream-5.0-Lite", Provider.DOUBAO, "Volcano Engine 轻量级生图模型，${com.freechat.data.BuiltInLanguageModel.RED_TAIL}", modelType = ModelType.VISUAL, apiBaseUrl = com.freechat.data.BuiltInProxy.BASE, apiKey = "", isBuiltIn = true),
         ModelInfo("gpt-image-2.5", "ChatGPT-Image-2.5", Provider.CUSTOM, "OpenAI 旗舰生图模型，${com.freechat.data.BuiltInLanguageModel.RED_TAIL}",
-            modelType = ModelType.VISUAL, apiBaseUrl = "https://qiuqiutoken.net/",
-            apiKey = BuildConfig.CHATGPT_IMAGE_KEY, isBuiltIn = true)
+            modelType = ModelType.VISUAL, apiBaseUrl = com.freechat.data.BuiltInProxy.BASE,
+            apiKey = "", isBuiltIn = true)
     )
     // 1.1.28：音色设计/音色复刻不进模型池（哪儿都不显示，只在「自定义语音」页经常量 id 调用）——池只留 STOCK
-    private val builtInTtsModels = BuiltInVoiceModel.createAll(BuildConfig.MIMO_TTS_KEY)
+    private val builtInTtsModels = BuiltInVoiceModel.createAll()
         .filter { it.id == BuiltInVoiceModel.STOCK_ID }
-    // 1.1.28 新增内置识图/语音识别：识图=DeepSeek（与语言模型共用 Key），ASR=MiMo（与语音合成共用 Key）
+    // 1.1.28 新增内置识图/语音识别
     private val builtInVisionModels = listOf(
-        com.freechat.data.BuiltInLanguageModel.createVision(BuildConfig.DEEPSEEK_API_KEY)
+        com.freechat.data.BuiltInLanguageModel.createVision()
     )
     private val builtInAsrModels = listOf(
-        BuiltInVoiceModel.createAsr(BuildConfig.MIMO_TTS_KEY)
+        BuiltInVoiceModel.createAsr()
     )
 
     // 1.1.28 默认模型（没显式选择时的落点；老用户生图默认由 SettingsRepository v3 迁移钉旧值）
@@ -687,8 +694,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     /** Legacy storage key: only deepThinkingDefault is consumed as a usage preference. */
     private val _builtInParams = MutableStateFlow<Map<String, ModelInfo>>(emptyMap())
 
+    // 云端内置模型目录（2026-10-18）：版本号一动，五个模型列表 StateFlow 就重建
+    private val _catalogVersion = MutableStateFlow(0)
+
     private fun builtInList(type: ModelType, params: Map<String, ModelInfo>): List<ModelInfo> {
-        val base = when (type) {
+        val local = when (type) {
             ModelType.LANGUAGE -> builtInLanguageModels
             ModelType.VISUAL -> builtInVisualModels
             ModelType.VISION -> builtInVisionModels
@@ -696,6 +706,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ModelType.ASR -> builtInAsrModels
             else -> emptyList()
         }
+        // catalog 是权威（换模型/改名/下架实时同步），本地定义只做断网兜底
+        val base = com.freechat.data.BuiltInCatalog.merge(
+            local, com.freechat.data.BuiltInCatalog.entries(getApplication()), type
+        )
         return base.map { b ->
             com.freechat.data.ModelAccessPolicy.withUsagePreference(b, params["${b.modelType}|${b.id}"])
                 // 非开源：开发者编辑的外观覆盖（无覆盖时原样返回，正常用户零影响）
@@ -735,32 +749,84 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * （内置+自定义都在里面），不再是只查内置。
      */
     private fun refreshSelectedFromCatalog() {
-        ModelSelectionResolver.find(ModelSelectionResolver.selectionKey(_selectedModel.value), ModelType.LANGUAGE,
-            modelsOfType(ModelType.LANGUAGE))?.let { _selectedModel.value = it }
-        modelsOfType(ModelType.VISUAL).find { it.id == _selectedVisualModel.value.id }?.let { _selectedVisualModel.value = it }
+        // 云端换模型后旧 id 可能消失：兜底落到该类型第一个（内置目录权威，2026-10-18）
+        val langs = modelsOfType(ModelType.LANGUAGE)
+        (ModelSelectionResolver.find(ModelSelectionResolver.selectionKey(_selectedModel.value), ModelType.LANGUAGE, langs)
+            ?: langs.firstOrNull())?.let { _selectedModel.value = it }
+        val visuals = modelsOfType(ModelType.VISUAL)
+        (visuals.find { it.id == _selectedVisualModel.value.id } ?: visuals.firstOrNull())
+            ?.let { _selectedVisualModel.value = it }
         _selectedVisionModel.value?.let { v ->
             modelsOfType(ModelType.VISION).find { it.id == v.id }?.let { _selectedVisionModel.value = it }
         }
     }
 
-    // 各类型模型列表（内置 + 用户自定义），UI 读这些 StateFlow
-    val languageModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams) { customs, params ->
+    /** 拉云端内置模型目录（「模型选择」页打开/启动都调）：变了就重建列表并兜底选中项。 */
+    fun refreshBuiltInCatalog() {
+        viewModelScope.launch {
+            if (com.freechat.data.BuiltInCatalog.refresh(getApplication())) {
+                _catalogVersion.value = _catalogVersion.value + 1
+                refreshSelectedFromCatalog()
+            }
+        }
+    }
+
+    // ===== 云端弹窗（2026-10-18）：启动拉取，alert/fullscreen 两种外壳，弹出与选择全留痕 =====
+    // trigger=manual 走排队弹出；update/copy/feature 是三个内置弹窗的云控内容源（显示效果
+    // 与原版完全一致——只替换文字/按钮文案/启停，动画排版勾选项零变化）。
+    private val _remoteNotices = MutableStateFlow<List<com.freechat.data.RemoteNotices.Notice>>(emptyList())
+    val remoteNotices: StateFlow<List<com.freechat.data.RemoteNotices.Notice>> = _remoteNotices.asStateFlow()
+    private val _reservedNotices = MutableStateFlow<Map<String, com.freechat.data.RemoteNotices.Notice>>(emptyMap())
+    val reservedNotices: StateFlow<Map<String, com.freechat.data.RemoteNotices.Notice>> = _reservedNotices.asStateFlow()
+
+    /** 云端弹窗配置是否已拉过一轮（内置弹窗的启停门要等它，防冷启动先按默认弹了再被云关掉） */
+    private val _remoteConfigLoaded = MutableStateFlow(false)
+    val remoteConfigLoaded: StateFlow<Boolean> = _remoteConfigLoaded.asStateFlow()
+
+    fun refreshRemoteNotices() {
+        viewModelScope.launch {
+            val list = com.freechat.data.RemoteNotices.fetch()
+            val now = System.currentTimeMillis()
+            _remoteNotices.value = com.freechat.data.RemoteNotices.eligible(
+                list.filter { it.trigger == "manual" }, com.freechat.BuildConfig.VERSION_NAME,
+                { com.freechat.data.RemoteNotices.impressionCount(getApplication(), it) },
+                { com.freechat.data.RemoteNotices.lastShownAt(getApplication(), it) },
+                now
+            )
+            _reservedNotices.value = list
+                .filter { it.trigger != "manual" && com.freechat.data.RemoteNotices.targets(it, com.freechat.BuildConfig.VERSION_NAME) }
+                .associateBy { it.id }
+            _remoteConfigLoaded.value = true
+        }
+    }
+
+    fun onRemoteNoticeShown(id: String) {
+        com.freechat.data.RemoteNotices.markShown(getApplication(), id)
+        viewModelScope.launch { com.freechat.data.RemoteNotices.report(id, "impression") }
+    }
+
+    fun onRemoteNoticeChoice(noticeId: String, buttonId: String) {
+        viewModelScope.launch { com.freechat.data.RemoteNotices.report(noticeId, "choice", buttonId) }
+    }
+
+    // 各类型模型列表（内置 + 用户自定义），UI 读这些 StateFlow（_catalogVersion：云端目录一变就重建）
+    val languageModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams, _catalogVersion) { customs, params, _ ->
         builtInList(ModelType.LANGUAGE, params) + customs.filter { it.modelType == ModelType.LANGUAGE }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInLanguageModels)
 
-    val visualModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams) { customs, params ->
+    val visualModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams, _catalogVersion) { customs, params, _ ->
         builtInList(ModelType.VISUAL, params) + customs.filter { it.modelType == ModelType.VISUAL }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInVisualModels)
 
-    val visionModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams) { customs, params ->
+    val visionModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams, _catalogVersion) { customs, params, _ ->
         builtInList(ModelType.VISION, params) + customs.filter { it.modelType == ModelType.VISION }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInVisionModels)
 
-    val ttsModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams) { customs, params ->
+    val ttsModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams, _catalogVersion) { customs, params, _ ->
         builtInList(ModelType.TTS, params) + customs.filter { it.modelType == ModelType.TTS }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInTtsModels)
 
-    val asrModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams) { customs, params ->
+    val asrModels: StateFlow<List<ModelInfo>> = combine(_customModels, _builtInParams, _catalogVersion) { customs, params, _ ->
         builtInList(ModelType.ASR, params) + customs.filter { it.modelType == ModelType.ASR }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, builtInAsrModels)
 
@@ -837,7 +903,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     if (gone.isNotEmpty()) {
                         gone.forEach(::cancelConversationGeneration)
                         viewModelScope.launch(Dispatchers.IO) {
-                            gone.forEach { id -> runCatching { ProactiveScheduler.cancel(getApplication(), id) } }
                         }
                         val table = _perConvSettings.value
                         if (table.keys.any { it in gone }) {
@@ -908,7 +973,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * 「新规则」的三条都**以盘上那份为准**，改完再让内存跟着刷一遍。
          *
          * 不直接改 `_perConvSettings` 是有原因的：它是**一整张表**，而同步拿到的是**一行**。
-         * 在本机那份还没从盘上装进内存的时候（App 刚起来、或 `ProactiveService` 自己 new 的那个
+         * 在本机那份还没从盘上装进内存的时候（App 刚起来、或服务新建的那个
          * ViewModel 还没跑完 init）拿内存里的空表去合并再整份写回，会把**其它所有对话的新规则一次抹光**。
          * 走 `PerConvStore` 就是老老实实"读-改-写"，不管内存醒没醒都不会丢东西。
          */
@@ -943,6 +1008,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // 把"内存里那两份真相"交给同步引擎（见 syncRelay）。装在这里而不是 Application 里：
         // 没有 ViewModel 的时候引擎自己会回落到读盘，两边不会打架。
         Relay.install(syncRelay)
+        // 云端模型目录 + 云端弹窗（2026-10-18）：启动各拉一次，失败静默用兜底
+        refreshBuiltInCatalog()
+        refreshRemoteNotices()
+
         // 默认值换代的一次性迁移不在这儿另起协程 —— 它挂在 SettingsRepository 那几条
         // 受影响的 Flow 的 onStart 上（见 afterDefaultMigration），另起协程挡不住
         // 「先按新默认值画一帧」那个窗口。
@@ -1497,6 +1566,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _inputBarState.value = state
         viewModelScope.launch { settingsRepo.saveInputBarState(state.ordinal) }
     }
+    fun setTabletDisplayMode(mode: TabletDisplayMode) {
+        viewModelScope.launch { settingsRepo.saveTabletDisplayMode(mode) }
+    }
+    fun setTabletFloatingSide(side: TabletFloatingSide) {
+        viewModelScope.launch { settingsRepo.saveTabletFloatingSide(side) }
+    }
+    fun setTabletUnderlyingTouch(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.saveTabletUnderlyingTouch(enabled) }
+    }
     fun setVoiceModel(model: String) {
         _voiceModel.value = model
         viewModelScope.launch { settingsRepo.saveVoiceModel(model) }
@@ -1585,23 +1663,84 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 朗读某条 AI 消息（合成 + 播放；内置 MiMo / 用户自定义 OpenAI TTS）。用**这条对话**的语音模型 */
-    fun speakMessage(messageId: String, text: String) {
+    // ===== AI 语音未读台账（2026-10-19）：播放过即已读；持久化，重启不复活红点 =====
+    private val _playedVoiceIds = MutableStateFlow(loadPlayedVoiceIds())
+    val playedVoiceIds: StateFlow<Set<String>> = _playedVoiceIds.asStateFlow()
+
+    fun markVoicePlayed(messageId: String) {
+        if (messageId.isBlank() || _playedVoiceIds.value.contains(messageId)) return
+        _playedVoiceIds.value = _playedVoiceIds.value + messageId
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                getApplication<Application>().getSharedPreferences("voice_played", android.content.Context.MODE_PRIVATE)
+                    .edit().putStringSet("ids", _playedVoiceIds.value.toList().takeLast(500).toSet()).apply()
+            }
+        }
+    }
+
+    private fun loadPlayedVoiceIds(): Set<String> = runCatching {
+        getApplication<Application>().getSharedPreferences("voice_played", android.content.Context.MODE_PRIVATE)
+            .getStringSet("ids", emptySet())?.toSet() ?: emptySet()
+    }.getOrDefault(emptySet())
+
+    /** 用户语音消息的录音落盘（可重放；音频本体不随同步走） */
+    fun saveVoiceRecording(wav: ByteArray?): String? {
+        if (wav == null || wav.isEmpty()) return null
+        return try {
+            val dir = java.io.File(getApplication<Application>().filesDir, "voice_messages").apply { mkdirs() }
+            val f = java.io.File(dir, "vm_${System.currentTimeMillis()}_${wav.size}.wav")
+            f.writeBytes(wav)
+            f.absolutePath
+        } catch (_: Exception) { null }
+    }
+
+    /** 音色解析（2026-10-19 二稿·只选音色）：角色只定音色不定模型——引擎是音色的实现细节：
+     *  自建音色（音色设计/复刻产物）统一走复刻回放（playbackConfig，与 AI语音页「已使用音色」同链），
+     *  MiMo 预设音色名走 MiMo-V2.5-TTS；空=跟随全局。已删/无效音色落复刻链，播放时精确报「本机音色已不存在」。 */
+    private fun resolveVoiceModelAndTimbre(convId: String?): Pair<ModelInfo?, String?> {
+        val profile = _conversations.value.find { it.id == convId }?.characterProfile
+        val timbre = profile?.voiceTimbre?.takeIf { it.isNotBlank() }
+        if (timbre == null) {
+            // 跟随全局：全局「语音模型」仍是 AI语音页的旧三选——设计/复刻**不在模型池**（1.1.28：
+            // 哪儿都不显示，只按常量 id 调用），拿池校验找不到会回落 STOCK 把预设 id 当音色名
+            // 发给 MiMo =「未接受此次请求」同款病根，这里按常量 id 直通。
+            val globalId = effectiveTtsModelId(convId)
+            val tts = when (globalId) {
+                BuiltInVoiceModel.DESIGN_ID, BuiltInVoiceModel.CLONE_ID ->
+                    BuiltInVoiceModel.createAll().find { it.id == globalId }
+                else -> currentTtsModel(convId)
+            }
+            return tts to null
+        }
+        val engineId = if (timbre in ttsVoices) BuiltInVoiceModel.STOCK_ID else BuiltInVoiceModel.CLONE_ID
+        return BuiltInVoiceModel.createAll().find { it.id == engineId } to timbre
+    }
+
+    /** MiMo 音色配置装配（引擎/音色已由 resolveVoiceModelAndTimbre 解析好）——点播与预加载共用 */
+    private suspend fun mimoVoiceConfig(tts: ModelInfo?, timbre: String?, style: String): MiMoVoiceConfig =
+        when (BuiltInVoiceModel.apiModelId(tts?.id ?: BuiltInVoiceModel.STOCK_ID)) {
+            BuiltInVoiceModel.STOCK_API_ID -> MiMoVoiceConfig(
+                stockVoice = timbre ?: _ttsVoice.value, speakerStyle = style)
+            BuiltInVoiceModel.CLONE_API_ID -> voicePresetRepo.playbackConfig(timbre ?: _ttsPresetId.value)
+                .let { if (style.isBlank()) it else it.copy(speakerStyle = listOf(it.speakerStyle, style).filter { v -> v.isNotBlank() }.joinToString("，")) }
+            BuiltInVoiceModel.DESIGN_API_ID -> {
+                val preset = voicePresetRepo.presets.value.find { it.id == (timbre ?: _ttsPresetId.value) }
+                    ?: throw VoiceConfigurationException("请先在 AI语音的高级自定义中创建并选择音色。")
+                MiMoVoiceConfig(modelId = BuiltInVoiceModel.DESIGN_API_ID,
+                    designPrompt = preset.sourcePrompt,
+                    speakerStyle = listOf(preset.speakerStyle, style).filter { v -> v.isNotBlank() }.joinToString("，"))
+            }
+            else -> throw VoiceConfigurationException("不支持的 MiMo 音色，请重新选择。")
+        }
+
+    fun speakMessage(messageId: String, text: String, style: String = "") {
+        markVoicePlayed(messageId) // 播放即已读（未读红点熄灭）
         val convId = _currentConversationId.value
         viewModelScope.launch {
-            val tts = currentTtsModel(convId)
+            val (tts, timbre) = resolveVoiceModelAndTimbre(convId)
             if (tts == null || tts.isBuiltIn) {
                 try {
-                    val config = when (BuiltInVoiceModel.apiModelId(tts?.id ?: BuiltInVoiceModel.STOCK_ID)) {
-                        BuiltInVoiceModel.STOCK_API_ID -> MiMoVoiceConfig(stockVoice = _ttsVoice.value)
-                        BuiltInVoiceModel.CLONE_API_ID -> voicePresetRepo.playbackConfig(_ttsPresetId.value)
-                        BuiltInVoiceModel.DESIGN_API_ID -> {
-                            val preset = voicePresetRepo.presets.value.find { it.id == _ttsPresetId.value }
-                                ?: throw VoiceConfigurationException("请先在 AI语音的高级自定义中创建并选择音色。")
-                            MiMoVoiceConfig(modelId = BuiltInVoiceModel.DESIGN_API_ID,
-                                designPrompt = preset.sourcePrompt, speakerStyle = preset.speakerStyle)
-                        }
-                        else -> throw VoiceConfigurationException("不支持的 MiMo 音色，请重新选择。")
-                    }
+                    val config = mimoVoiceConfig(tts, timbre, style)
                     MiMoVoiceRequest.validate(config)
                     TtsController.speak(messageId, text, config, _ttsSpeed.value, _ttsPitch.value)
                 } catch (cancelled: CancellationException) {
@@ -1616,6 +1755,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    /**
+     * 语音消息预加载（2026-10-19 工单）：AI 发语音就自动合成落盘，点按命中缓存秒播。
+     * 自定义 TTS 模型不预载（点按现合成）；预载尽力而为、错误静默不打扰。
+     */
+    fun preloadVoiceMessage(convId: String, messageId: String, text: String, style: String? = null) {
+        if (text.isBlank()) return
+        viewModelScope.launch {
+            val (tts, timbre) = resolveVoiceModelAndTimbre(convId)
+            if (tts != null && !tts.isBuiltIn) return@launch
+            try {
+                TtsController.preload(messageId, text, mimoVoiceConfig(tts, timbre, style ?: ""))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // 预载失败不影响使用——点按时还会正常合成
+            }
+        }
+    }
+
+    /** 打开对话时把最近的语音消息预载一遍（顺序队列在 TtsController 内部，不会打爆并发） */
+    fun preloadVoiceMessages(convId: String, messages: List<Message>) {
+        messages.filter { it.role == Role.ASSISTANT && !it.voiceText.isNullOrBlank() }
+            .takeLast(40)
+            .forEach { m -> preloadVoiceMessage(convId, m.id, m.voiceText.orEmpty(), m.voiceStyle) }
     }
 
     private fun currentTtsModel(convId: String? = null): ModelInfo? =
@@ -1766,8 +1931,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 编辑当前对话的拟人角色档案（只更新角色，不新建对话） */
     fun updateCurrentCharacter(profile: CharacterProfile) {
-        _currentCharacter.value = profile
         val convId = _currentConversationId.value ?: return
+        updateCharacter(convId, profile)
+    }
+
+    /** 连接微信成功后自动关闭「允许语音回复」（用户拍板：该功能不支持连接微信后使用） */
+    fun disableVoiceReplyForWechat(conversationId: String) {
+        val profile = _conversations.value.find { it.id == conversationId }?.characterProfile ?: return
+        if (!profile.allowVoiceReply) return
+        updateCharacter(conversationId, profile.copy(allowVoiceReply = false))
+    }
+
+    /** Explicit form commit, bound to the opened character rather than the selected chat. */
+    fun updateCharacter(conversationId: String, profile: CharacterProfile): Boolean {
+        if (isConversationBusy(conversationId) || _conversations.value.none { it.id == conversationId }) return false
+        val convId = conversationId
+        if (_currentConversationId.value == convId) _currentCharacter.value = profile
         _conversations.value = _conversations.value.map {
             if (it.id == convId) it.copy(characterProfile = profile, title = profile.name.ifBlank { it.title })
             else it
@@ -1775,7 +1954,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         saveConversations()
         // 主动智能：刚把开关关掉就立刻撤掉已挂的闹钟，别等到下次回复才清
         // （sig=null：开关还开着时「保持原计划不变」，关掉了就走取消分支）
-        proactiveScope.launch { applyProactiveSignalBlocking(convId, profile, null) }
+        return true
     }
 
     fun switchToConversation(conversation: Conversation) {
@@ -1786,6 +1965,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = loadMessages(conversation.id)
         syncDisplayGenerationState(conversation.id)
         recoverLegacyImages(conversation.id, _messages.value)
+        // 打开对话即预载最近的语音消息（2026-10-19）：点按秒播、不等合成
+        preloadVoiceMessages(conversation.id, _messages.value)
     }
 
     private fun recoverLegacyImages(convId: String, rows: List<Message>) {
@@ -1941,10 +2122,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         companionPipelines.remove(conversation.id)
         convLoading.remove(conversation.id)
         convTyping.remove(conversation.id)
+        publishBusyConversations()
         // 主动智能：对话都没了，别再定时把它唤醒（否则到点会去读一个不存在的会话）
-        proactiveJobs.remove(conversation.id)?.cancel()
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { ProactiveScheduler.cancel(getApplication(), conversation.id) }
         }
         // 「新规则」那条记录也摘掉，并**点名让同步把云端那条一起清掉**。
         // 光靠"文件改了自动 diff"不够：这台设备可能压根没有它的定制记录，而云端那条是
@@ -2621,7 +2801,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ========== 消息（流式） ==========
-    fun sendMessage(text: String) {
+    fun sendMessage(text: String, voicePath: String? = null) {
         val trimmedText = text.trim()
         // 引用：捕获引用内容（后台发给 AI），不在前台消息框里显示额外文字
         val quoteConvId = _currentConversationId.value
@@ -2649,7 +2829,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (_currentMode.value == ChatMode.COMPANION) {
             val imageSnapshot = _pendingImages.value.map { it.path }
             if (hasImage) _pendingImages.value = emptyList()
-            sendCompanionMessage(trimmedText, imageSnapshot, quotedText, quotedImagePath)
+            sendCompanionMessage(trimmedText, imageSnapshot, quotedText, quotedImagePath, voicePath)
             return
         }
 
@@ -2705,7 +2885,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 quotedImagePath = quotedImagePath
             ))
         } else if (trimmedText.isNotBlank()) {
-            newUserMessages.add(Message(role = Role.USER, content = trimmedText, quotedText = quotedText, quotedImagePath = quotedImagePath))
+            newUserMessages.add(Message(role = Role.USER, content = trimmedText, quotedText = quotedText, quotedImagePath = quotedImagePath, voicePath = voicePath))
         }
         activeRoundStartIndex = _messages.value.size  // ★ 停止即删除本轮：记录用户消息起点
         activeRoundConvId = convId
@@ -2804,7 +2984,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 拟人模式：用户消息进缓冲池（含图片），缓冲窗口内无新消息则合并统一理解回复；按对话隔离 */
-    private fun sendCompanionMessage(trimmedText: String, imagePaths: List<String>, quotedText: String? = null, quotedImagePath: String? = null) {
+    private fun sendCompanionMessage(trimmedText: String, imagePaths: List<String>, quotedText: String? = null, quotedImagePath: String? = null, voicePath: String? = null) {
         if (_currentConversationId.value == null && _messages.value.isEmpty()) {
             _currentConversationId.value = UUID.randomUUID().toString()
         }
@@ -2813,9 +2993,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         // 用户主动来了：掐掉「正在自己冒出来的那句话」——TA 已经到了，主动消息失去意义；
         // 而且两边同时写同一个对话文件会互相覆盖（主动那条会被这次回复的旧快照抹掉）。
-        // 注意 proactiveJobs 是进程级静态表：App 冷启动时主动生成跑在服务新建的 VM 上，
-        // 用户发消息走的是另一个 VM，放实例字段上根本够不着。
-        proactiveJobs.remove(convId)?.cancel()
 
         // 记录「晚安/睡了」短期状态（按对话）：短时间内用户再发消息，AI 有时间概念（「不是说睡了吗」）
         if (detectGoodnight(trimmedText)) {
@@ -2842,7 +3019,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 quotedImagePath = quotedImagePath
             )
         } else if (trimmedText.isNotBlank()) {
-            _messages.value = _messages.value + Message(role = Role.USER, content = trimmedText, mode = ChatMode.COMPANION, quotedText = quotedText, quotedImagePath = quotedImagePath)
+            _messages.value = _messages.value + Message(role = Role.USER, content = trimmedText, mode = ChatMode.COMPANION, quotedText = quotedText, quotedImagePath = quotedImagePath, voicePath = voicePath)
         }
         touchCurrentConversation()
         persistConversationMessages(convId, _messages.value)
@@ -2930,6 +3107,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun wechatAttachedNow(convId: String): Boolean = isWeChatAttached(convId)
 
     /**
+     * 微信当前绑到哪个对话（null=没绑/未知/未登录）。模拟设置页「连接微信」前置判定用：
+     * 绑在别的对话上 → 先确认换绑（只能连一个，再连断旧）。
+     */
+    suspend fun wechatBoundConvId(): String? {
+        val auth = Session.loadAuth() ?: return null
+        return runCatching {
+            val o = ApiClient.wechatStatus(auth.token)
+            if (o.get("bound")?.asBoolean == true) o.get("conv_id")?.asString else null
+        }.getOrNull()
+    }
+
+    /**
      * 同步预读（UI 首帧用）：只读缓存不发请求。
      * null=还不知道（真值交给 [wechatAttachedNow]）；非 null=30s 内查过的确定答案。
      * 有了它，打开已接微信的对话不会先闪一帧输入框再换成告知条。
@@ -3012,7 +3201,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun prepareForIconRestart() {
         saveCurrentConversation()
         val activeIds = (convLoading.keys + convTyping.keys + companionPipelines.keys +
-            proactiveJobs.keys + listOfNotNull(standardGenerationConvId)).toSet()
+            listOfNotNull(standardGenerationConvId)).toSet()
         activeIds.forEach(::cancelConversationGeneration)
         currentCall.getAndSet(null)?.cancel()
         generationPending = false
@@ -3212,6 +3401,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val convId = _currentConversationId.value ?: return
 
         if (_currentMode.value == ChatMode.COMPANION) {
+            // A retained/late editor callback must never rewrite a different conversation's last turn.
+            if (_messages.value.none { it.id == messageId && it.role == Role.USER }) return
             // 拟人模式（含动作演绎/剧情补足）已有完整实现：保留原消息的图片、删掉旧回复、
             // 清掉这一轮记忆、按新文本重新生成
             editCompanionLastMessage(trimmed)
@@ -3571,308 +3762,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // —— 文本解析在 freechat-core；Android 包装额外保留工具调用所需的推理历史 ——
-
-    // —— ProactiveSignal / ProactiveFire 已抽进 freechat-core（CompanionProactive.kt，见文件头 import）——
-
-    private fun stripProactiveDirective(raw: String): Pair<String, ProactiveSignal?> = com.freechat.core.stripProactiveDirective(raw)
-
-    private fun decodeProactivePayload(payload: String): ProactiveSignal = com.freechat.core.decodeProactivePayload(payload)
-
-    private fun parseProactiveTime(t: String): Long? = com.freechat.core.parseProactiveTime(t)
-
-    /** 拟人模式的一轮用户输入：文本 + 附带的图片路径 */
-    private data class CompanionTurn(val text: String, val imagePaths: List<String> = emptyList())
-
-    /** 拟人陪伴：非流式生成 + 随机思考延迟 + 情绪化随机条数/间隔，逐条显示，模拟真人节奏（按对话隔离） */
-    private suspend fun generateCompanionReply(convId: String, character: CharacterProfile?, working: MutableList<Message>, text: String, imagePaths: List<String>, startTime: Long, batchSize: Int = 1, proactive: ProactiveFire? = null, regenerating: Boolean = false, replyTimestamp: Long? = null): Unit = withContext(resolveModels(convId, character)) {
-        val langModelName = requestModels().language.displayName
-        val replyStart = working.size
-        val replyId = convGenerationReplyIds[convId] ?: UUID.randomUUID().toString()
-        if (regenerating) AnimationReplay.mark(replyId)
-        val userSourceIds = working.filterNot { it.sceneVisualization }.takeLastWhile { it.role == Role.USER }.map { it.id }
-        val snapshot = applyCharacterSettings(character)
-        // ⚠️ 拟人模式**不叠**「新规则」（PerConvSettings），这一层只属于标准模式 ——
-        // 「新规则」页在拟人对话里根本进不去（对话页那个调节按钮按模式分流：拟人 → 模拟设定 /
-        // 角色档案，标准 → 新规则），两个模式各有一套「只管这条对话」的机制，别互相串。
-        // 所以这里只叠角色档案那一层，用户拍板（2026-09-19）：新规则不该影响拟人模式。
-        // 曾一度在这里补过 applyPerConvSettings(convId)：那在正常路径上是空操作
-        // （拟人对话不会有新规则记录），但语义是错的，已撤。
-        // 返回值不接：外层 finally 的 restoreSettings(snapshot) 会把它还原成全局。
-        // 主动智能：这次不是「回用户」，而是「闹钟把 TA 叫醒了，现在决定要不要主动开口」
-        val proactivePrompt = proactive?.let { buildProactiveFirePrompt(it, character) }
-        val elapsedJob = if (character?.isNarrativeMode() == true) CoroutineScope(coroutineContext).launch {
-            while (isActive) {
-                if (_currentConversationId.value == convId) _thinkingTimeMs.value = System.currentTimeMillis() - startTime
-                delay(200)
-            }
-        } else null
-        try {
-            // 模拟作息：睡觉窗口内沉默不回复（记录漏回，起床后自然解释）
-            if (!regenerating && isSleepingNow(convId, character)) {
-                sleepingMissedMessages[convId] = (sleepingMissedMessages[convId] ?: 0) + 1
-                return@withContext
-            }
-            // 模拟真人：先随机等待，不刚发就显示「正在输入」
-            delay(com.freechat.core.CompanionRhythm.initialTypingDelayMs())
-            setConvTyping(convId, true)
-
-            // 图片：先识图分析，把识图结果作为上下文喂给回复（拟人结合人设评论图片）
-            var imageContext = ""
-            if (imagePaths.isNotEmpty() && com.freechat.data.CharacterPresentationPolicy.usesPhotoRecognition(character?.normalized()?.dialogueMode)) {
-                val encoded = encodeImagesForApi(imagePaths.map { PendingImage(it, detectMime(it)) })
-                if (encoded.isNotEmpty()) {
-                    imageContext = callVisionChat(encoded,
-                        "结合对话中用户关心的内容分析图片，描述画面事实和相关细节；不要猜测看不见的信息，也不要代替角色回复。",
-                        convId, working, character).text
-                    // 回填到用户图片消息，后续追问时作为「图片内容」注入，避免识图结果丢失
-                    val ui = working.indexOfLast { it.role == Role.USER && it.imagePaths.isNotEmpty() }
-                    if (ui >= 0 && imageContext.isNotBlank()) working[ui] = working[ui].copy(imageContext = imageContext)
-                }
-            }
-
-            var reply = callCompanionApi(convId, character, working, text, imageContext, batchSize = batchSize, proactivePrompt = proactivePrompt)
-            var segments = reply.segments
-
-            // 主动智能：模型在这一轮选择了不开口（只输出指令行/空正文）是合法的，且**不加兜底重试**——
-            // 硬逼它说点什么，就变成「每次到点都必须冒一句话」，恰恰是这功能最该避免的黏人。
-            // 但指令必须在这里就落地：提示词教的「跳过 +30m」「只定 +2h」正是这种「正文为空、只剩指令」
-            // 的形态，直接 return 会把模型刚给自己定的下一次一起丢掉，而服务收尾又会把旧计划清掉
-            // → 整条链无声消失（表现为「明明说了半小时后再来，之后再也没动静」）。
-            if (proactive != null && segments.isEmpty()) {
-                applyProactiveSignal(convId, character, reply.proactive)
-                setConvTyping(convId, false)
-                return@withContext
-            }
-
-            // 空回复兜底：重试一次（强调必须输出正文），仍空则发个省略号（自然无语，不显示「（空回复）」）
-            if (segments.isEmpty()) {
-                reply = callCompanionApi(convId, character, working, text, imageContext, forceReply = true, batchSize = batchSize)
-                segments = reply.segments
-            }
-
-            if (segments.isEmpty()) {
-                setConvTyping(convId, false)
-                working.add(Message(
-                    id = replyId,
-                    role = Role.ASSISTANT, content = "…",
-                    timestamp = replyTimestamp ?: System.currentTimeMillis(),
-                    modelName = langModelName, mode = ChatMode.COMPANION,
-                    thinkingTimeMs = System.currentTimeMillis() - startTime
-                ))
-                persistConversationMessages(convId, working)
-                return@withContext
-            }
-
-            // 情绪：模型输出优先，本地关键词兜底（动作演绎/剧情补足不解析情绪，走简化节奏）
-            val narrativeMode = character?.isNarrativeMode() == true
-            // 叙事模式长度校验：偏离区间太多则带纠偏指令重试一次，尽量把字数压进设定区间
-            if (narrativeMode) {
-                // 篇幅不再用绝对字数卡（避免「短档被写死成 50 字」），只留一道防塌陷下限：
-                // 选了「长/超长」却只回三行时补一次，提示也不提具体字数
-                val totalLen = countChars(segments.joinToString(""))
-                if (totalLen < plotLengthFloor(character?.plotLength ?: 1)) {
-                    val retried = callCompanionApi(
-                        convId, character, working, text, imageContext,
-                        forceReply = true, batchSize = batchSize,
-                        lengthHint = "上次回复太短了，明显达不到当前「单次回复长度」档应有的体量。请把这一段按该档的篇幅写足。"
-                    )
-                    if (retried.segments.isNotEmpty()) {
-                        reply = retried
-                        segments = retried.segments
-                    }
-                }
-            }
-            val mood = if (narrativeMode) CompanionMood.NEUTRAL else (parseEmotionLabel(reply.emotion) ?: moodWithResidue(text, getPerConvSettings(convId)))
-
-            // 情绪决定回复条数（随机）；叙事模式最多 3 段、全部展示
-            val maxCount = com.freechat.core.CompanionRhythm.segmentCount(mood, narrativeMode, regenerating, segments.size)
-            val toShow = segments.take(maxCount)
-
-            if (toShow.isEmpty()) {
-                // 生气不回复也是「这一轮的结果」，指令同样要落地（比如「气还没消，改到 +2h」）
-                applyProactiveSignal(convId, character, reply.proactive)
-                setConvTyping(convId, false)
-                return@withContext  // 生气不回复
-            }
-
-            for ((i, seg) in toShow.withIndex()) {
-                setConvTyping(convId, true)
-                // 每条间隔随机（情绪影响），时而快时而慢
-                val interval = com.freechat.core.CompanionRhythm.segmentIntervalMs(mood, narrativeMode)
-                delay(interval)
-                setConvTyping(convId, false)
-                val segId = if (i == 0) replyId else UUID.randomUUID().toString()
-                if (regenerating) AnimationReplay.mark(segId)
-                working.add(Message(
-                    id = segId,
-                    role = Role.ASSISTANT, content = seg,
-                    timestamp = replyTimestamp?.plus(i) ?: System.currentTimeMillis(),
-                    modelName = langModelName, mode = ChatMode.COMPANION,
-                    thinkingTimeMs = System.currentTimeMillis() - startTime,
-                    searchSources = reply.sources,
-                    reasoningContent = if (i == 0) reply.reasoningContent else ""
-                ).let { separateCitationLinks(it, text) })
-                persistConversationMessages(convId, working)
-                if (i < toShow.size - 1) setConvTyping(convId, true)
-            }
-
-            // ★ 回复完成收尾：清零漏回计数（已在提示词里解释过），异步写入记忆
-            // 注：关系/亲密度不再由这里评估更新——没有亲密度数值、没有按等级映射的关系模板，亲疏尺度全靠提示词里让 AI 结合人设与上下文自行判断
-            sleepingMissedMessages[convId] = 0
-            val replyText = toShow.joinToString("\n")
-            // 主动智能：模型可以在这条回复里给自己定下一次（也可以撤销上一次）。
-            // sent=true 表示这一轮真的开口了 —— 额度只在这里记（由 applyProactiveSignal 在
-            // 同一个后台任务里先记再挂新闹钟：先记后挂，最小间隔才会把「刚发过」算进去）
-            applyProactiveSignal(convId, character, reply.proactive, sent = proactive != null)
-            proactiveForceNotify = proactive?.forceNotify == true
-            try {
-                notifyReplyIfBackground(character?.name?.ifBlank { "FreeChat" } ?: "FreeChat", replyText)
-            } finally {
-                proactiveForceNotify = false
-            }
-            // 主动开口这一轮不写记忆：喂给摘要器的「用户说了什么」是空的，
-            // 硬造一条只会污染记忆库；这段话本身已经落在聊天记录里，下次上下文照样带上
-            if (replyText.isNotBlank() && proactive == null) {
-                viewModelScope.launch {
-                    summarizeAndRemember(convId, text, Message(role = Role.ASSISTANT, content = replyText, mode = ChatMode.COMPANION),
-                        character?.highQualityMemory == true, character?.isNarrativeMode() == true, character,
-                        sourceMessageIds = userSourceIds + working.drop(replyStart).map { it.id })
-                }
-            }
-        } finally {
-            elapsedJob?.cancel()
-            restoreSettings(snapshot)
-            setConvTyping(convId, false)
-        }
-    }
-
-    // ===================== 主动智能 =====================
-
-    /**
-     * 落地模型给的主动智能指令。
-     * 没给指令（null）= 保持原有计划不变 —— 这是**有意的**：模型只在「想改」的时候才写那一行，
-     * 若每次回复都强制它重新表态，它会在没想清楚的时候乱定时间。
-     */
-    private fun applyProactiveSignal(convId: String, character: CharacterProfile?, sig: ProactiveSignal?, sent: Boolean = false) {
-        // 读账本、挂闹钟都是磁盘与系统调用，而普通回复的收尾在主线程上，别占着它。
-        // 例外：闹钟唤醒的冷路径（跑在服务里）本来就在后台线程 —— 那就同步做完。
-        // 异步派发会让「服务收尾删旧计划」跑在「新计划落盘」前面，中间那段时间差里新计划会被误删。
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            proactiveScope.launch { applyProactiveSignalBlocking(convId, character, sig, sent) }
-        } else {
-            applyProactiveSignalBlocking(convId, character, sig, sent)
-        }
-    }
-
-    private fun applyProactiveSignalBlocking(convId: String, character: CharacterProfile?, sig: ProactiveSignal?, sent: Boolean = false) {
-        val app = getApplication<Application>()
-        // 先记额度再挂新闹钟：挂的时候会按「上一条主动消息」压最小间隔，
-        // 顺序反了的话刚发出去的这条不算数，模型写「+5m」就能立刻再发一条
-        if (sent) proactiveStore.markFired(convId)
-        val existing = proactiveStore.get(convId)
-        // 开关关了、或档位不是「微信聊天」：清掉遗留计划（留着闹钟到点会白唤醒一次，
-        // 还会让模型收到一条它已经不该管的「你之前定的提醒」）。
-        // 主动智能只属于微信聊天档，另外两档是用户自己在推剧情，角色不该自己跳出来说话。
-        if (character?.proactiveEnabled != true || character.dialogueMode != DialogueMode.WECHAT) {
-            if (existing != null) ProactiveScheduler.cancel(app, convId)
-            return
-        }
-        when {
-            sig == null -> Unit                                   // 没表态：原计划不动
-            sig.cancel -> ProactiveScheduler.cancel(app, convId)
-            sig.atMillis != null -> ProactiveScheduler.schedule(app, ProactiveRequest(
-                convId = convId,
-                characterName = character.name,
-                dueAt = sig.atMillis!!,   // when 分支已判非空；跨模块字段不能 smart cast
-                reason = sig.reason,
-                createdAt = System.currentTimeMillis()
-            ))
-            else -> Unit                                          // 空指令（如「跳过」）：什么都不改
-        }
-    }
-
-    /**
-     * 【主动智能】闹钟到点后的这一次判断：把上下文交给模型，由它决定现在开不开口、说什么。
-     * 由 ProactiveService 调用 —— App 被划掉时这个 VM 是服务新建的实例，
-     * 所以这里的一切状态都必须能从磁盘重建，不能依赖任何内存里的会话状态。
-     */
-    suspend fun runProactive(convId: String, forceNotify: Boolean = false) {
-        val req = proactiveStore.get(convId) ?: return
-        // 这个对话正在生成中（用户刚发消息 / 上一条还在回）：这次计划已经过时了，
-        // 正在跑的那一轮回复会拿到「你之前定的提醒」，由模型决定要不要重新定。
-        if (proactiveJobs.containsKey(convId) || convLoading[convId] == true || convTyping[convId] == true) return
-
-        // 冷启动时设置还没从 DataStore 流过来（init 里的收集器是异步的），
-        // 不先等一次就会拿内置默认模型发请求 —— 用户自定义的 key / 模型全被绕过去了
-        awaitSettingsLoaded()
-
-        // 同理：_conversations 也可能还是空的，直接从磁盘读（它才是权威）。
-        // 置顶集合也必须先读：落盘时 isPinned 取自 pinnedIds，冷启动时它还是空集，
-        // 会把这个对话的置顶状态顺手抹成 false（侧滑栏上就是「置顶突然没了」）。
-        pinnedIds.value = settingsRepo.pinnedConversationIds.first()
-        val convs = withContext(Dispatchers.IO) { loadConversations() }
-        _conversations.value = sortConversations(convs)
-        val conv = convs.firstOrNull { it.id == convId } ?: return
-        val character = conv.characterProfile?.normalized() ?: return
-        if (!character.proactiveEnabled) return
-
-        // 主动智能只在「微信聊天」档生效：小说文本 / 动作演绎是用户在主导演剧情，
-        // 角色不该自己跳出来发消息。切档之后残留的旧闹钟也要在这里就地取消掉，
-        // 否则用户会把档位切走了、过一会儿仍然收到一条主动消息，说不清是哪来的。
-        if (character.dialogueMode != DialogueMode.WECHAT) {
-            Log.d("FreeChat", "Proactive skipped: mode=${character.dialogueMode}")
-            ProactiveScheduler.cancel(getApplication(), convId)
-            return
-        }
-
-        // 每日上限：到点 ≠ 必须开口。额度用完了就挪到明天早上，**不是把计划删掉** ——
-        // 删掉就是「今天聊得晚，明天 TA 再也不会想起你」，额度限制的是频率，不是承诺
-        if (!proactiveStore.canFire(convId)) {
-            if (req.retries < 3) ProactiveScheduler.schedule(getApplication(), req.copy(
-                dueAt = proactiveStore.nextMorning(System.currentTimeMillis()),
-                retries = req.retries + 1
-            ))
-            return
-        }
-
-        val working = withContext(Dispatchers.IO) { loadMessages(convId).toMutableList() }
-        if (working.isEmpty()) return
-        // 定下这个时间之后用户又说过话 —— 这里**不**直接放弃（旧版就是这么写的，结果提示词里
-        // 「还想在那个时间找他，就什么都不用写」那条路彻底走不通：用户哪怕只回一个「好」，
-        // 到点也会被判定过期而静默删掉）。该不该提、现在还想不想说，让模型拿着完整上下文自己判断，
-        // 它手上本来就有一个「跳过」的选项。我们只把「对方之后又说过话」这件事告诉它。
-        val sinceCount = working.count { it.timestamp > req.createdAt && it.role == Role.USER }
-        // 作息模拟：到点时 TA 正在睡觉 → 不打扰，改到睡醒之后（不消耗当天额度）
-        if (isSleepingNow(convId, character)) { rescheduleAfterWake(convId, character, req); return }
-
-        val self = coroutineContext[Job]
-        if (self != null) proactiveJobs[convId] = self
-        try {
-            generateCompanionReply(
-                convId, character, working,
-                // 这段文字只用于「检索记忆」和「判断要不要联网搜索」，不会作为用户消息发给模型
-                req.reason.ifBlank { "想找对方说说话" },
-                emptyList(), System.currentTimeMillis(),
-                proactive = ProactiveFire(req.reason, sinceCount, forceNotify)
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // 断网 / 服务端 5xx：这次没发出去。别让计划就这么没了（额度还没记、话也没说），
-            // 过几分钟再试一次，连试几次都不行才放弃 —— 否则「到点没网」就等于永久失去这条计划
-            Log.e("FreeChat", "Proactive generation failed", e)
-            if (req.retries < ProactiveStore.MAX_RETRIES) {
-                ProactiveScheduler.schedule(getApplication(), req.copy(
-                    dueAt = System.currentTimeMillis() + ProactiveStore.RETRY_DELAY_MS,
-                    retries = req.retries + 1
-                ))
-            }
-        } finally {
-            if (proactiveJobs[convId] === self) proactiveJobs.remove(convId)
-        }
-    }
-
     /**
      * 等设置从 DataStore 首次加载完成（只用于后台冷启动这条路径）。
      * 直接把几个关键项各读一次：比等收集器跑完更确定，也不用给整个 init 加一个「加载完成」标志位。
@@ -3895,61 +3784,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             Log.e("FreeChat", "awaitSettingsLoaded failed", e)
         }
-    }
-
-    /** 到点时 TA 正在睡觉：挪到睡醒之后。理由改成「刚睡醒」，createdAt 保持不动 ——
-     *  它是「这条计划定于何时」的标记，到点时要拿它数「对方之后又说过几条」。 */
-    private fun rescheduleAfterWake(convId: String, character: CharacterProfile, req: ProactiveRequest) {
-        if (req.retries >= 3) return
-        val wh = wakeAtHour[convId] ?: return
-        val cal = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, wh)
-            set(Calendar.MINUTE, 40)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-            if (timeInMillis <= System.currentTimeMillis()) add(Calendar.DAY_OF_YEAR, 1)
-        }
-        ProactiveScheduler.schedule(getApplication(), req.copy(
-            dueAt = cal.timeInMillis + kotlin.random.Random.nextLong(0, 40 * 60 * 1000L),
-            reason = "你刚睡醒，之前想找对方",
-            retries = req.retries + 1
-        ))
-    }
-
-    /** 到点唤醒后的那一轮提示：不是「回用户」，而是「你自己定的时间到了，现在决定要不要开口」 */
-    private fun buildProactiveFirePrompt(fire: ProactiveFire, character: CharacterProfile?): String =
-        com.freechat.core.buildProactiveFirePrompt(fire, character)
-
-    /** 从模型输出里提取 JSON 对象（容错：兼容首尾多余文字 / markdown 代码块） */
-    private fun extractJsonObject(raw: String): JsonObject? = com.freechat.core.JsonLoose.extractObject(raw)
-
-    /**
-     * 拟人模式非流式请求：只在「连接层失败」时重试一次。
-     * 读超时不重试（请求已经发出去了，重试只会让用户多等一遍）、DNS 解析失败也不重试（那是没网）。
-     * 返回 (HTTP 状态码, 响应体文本)，body 保证已经读完并关闭，连接会归还连接池。
-     */
-    private suspend fun executeCompanionCall(request: Request): Pair<Int, String> {
-        var lastError: IOException? = null
-        for (attempt in 0..1) {
-            // 已经取消：不要再补发一次请求（和流式那边同一个道理）
-            if (!coroutineContext.isActive) throw CancellationException("cancelled before retry")
-            if (attempt > 0) {
-                Log.w("FreeChat", "Companion retry: 换新连接重发一次")
-                // 半死的连接池成员是「切后台后偶发失败」的元凶，重试必须换一条新连接
-                client.connectionPool.evictAll()
-            }
-            try {
-                // use{}：不论成功失败，body 都会被关闭，连接才会归还连接池
-                client.newCall(request).execute().use { resp ->
-                    return resp.code to (resp.body?.string() ?: "")
-                }
-            } catch (e: IOException) {
-                lastError = e
-                Log.w("FreeChat", "Companion call failed (attempt ${attempt + 1})", e)
-                if (!isConnectionLevelFailure(e)) throw e
-            }
-        }
-        throw lastError ?: IOException("connection failed")
     }
 
     /**
@@ -4047,7 +3881,208 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 拟人模式非流式 API 调用：返回结构化结果（情绪标签 + 分条回复）；按对话隔离传入 convId/角色/历史 */
-    private suspend fun callCompanionApi(convId: String, character: CharacterProfile?, working: List<Message>, text: String, imageContext: String = "", forceReply: Boolean = false, batchSize: Int = 1, lengthHint: String? = null, proactivePrompt: String? = null): CompanionReply = withContext(Dispatchers.IO) {
+    private data class CompanionTurn(val text: String, val imagePaths: List<String> = emptyList())
+
+    /** 拟人陪伴：非流式生成 + 随机思考延迟 + 情绪化随机条数/间隔，逐条显示，模拟真人节奏（按对话隔离） */
+    private suspend fun generateCompanionReply(convId: String, character: CharacterProfile?, working: MutableList<Message>, text: String, imagePaths: List<String>, startTime: Long, batchSize: Int = 1, regenerating: Boolean = false, replyTimestamp: Long? = null): Unit = withContext(resolveModels(convId, character)) {
+        val langModelName = requestModels().language.displayName
+        val replyStart = working.size
+        val replyId = convGenerationReplyIds[convId] ?: UUID.randomUUID().toString()
+        if (regenerating) AnimationReplay.mark(replyId)
+        val userSourceIds = working.filterNot { it.sceneVisualization }.takeLastWhile { it.role == Role.USER }.map { it.id }
+        val snapshot = applyCharacterSettings(character)
+        // ⚠️ 拟人模式**不叠**「新规则」（PerConvSettings），这一层只属于标准模式 ——
+        // 「新规则」页在拟人对话里根本进不去（对话页那个调节按钮按模式分流：拟人 → 模拟设定 /
+        // 角色档案，标准 → 新规则），两个模式各有一套「只管这条对话」的机制，别互相串。
+        // 所以这里只叠角色档案那一层，用户拍板（2026-09-19）：新规则不该影响拟人模式。
+        // 曾一度在这里补过 applyPerConvSettings(convId)：那在正常路径上是空操作
+        // （拟人对话不会有新规则记录），但语义是错的，已撤。
+        // 返回值不接：外层 finally 的 restoreSettings(snapshot) 会把它还原成全局。
+        // 主动智能：这次不是「回用户」，而是「闹钟把 TA 叫醒了，现在决定要不要主动开口」
+        val elapsedJob = if (character?.isNarrativeMode() == true) CoroutineScope(coroutineContext).launch {
+            while (isActive) {
+                if (_currentConversationId.value == convId) _thinkingTimeMs.value = System.currentTimeMillis() - startTime
+                delay(200)
+            }
+        } else null
+        try {
+            // 模拟作息：睡觉窗口内沉默不回复（记录漏回，起床后自然解释）
+            if (!regenerating && isSleepingNow(convId, character)) {
+                sleepingMissedMessages[convId] = (sleepingMissedMessages[convId] ?: 0) + 1
+                return@withContext
+            }
+            // 模拟真人：先随机等待，不刚发就显示「正在输入」
+            delay(com.freechat.core.CompanionRhythm.initialTypingDelayMs())
+            setConvTyping(convId, true)
+
+            // 图片：先识图分析，把识图结果作为上下文喂给回复（拟人结合人设评论图片）
+            var imageContext = ""
+            if (imagePaths.isNotEmpty() && com.freechat.data.CharacterPresentationPolicy.usesPhotoRecognition(character?.normalized()?.dialogueMode)) {
+                val encoded = encodeImagesForApi(imagePaths.map { PendingImage(it, detectMime(it)) })
+                if (encoded.isNotEmpty()) {
+                    imageContext = callVisionChat(encoded,
+                        "结合对话中用户关心的内容分析图片，描述画面事实和相关细节；不要猜测看不见的信息，也不要代替角色回复。",
+                        convId, working, character).text
+                    // 回填到用户图片消息，后续追问时作为「图片内容」注入，避免识图结果丢失
+                    val ui = working.indexOfLast { it.role == Role.USER && it.imagePaths.isNotEmpty() }
+                    if (ui >= 0 && imageContext.isNotBlank()) working[ui] = working[ui].copy(imageContext = imageContext)
+                }
+            }
+
+            var reply = callCompanionApi(convId, character, working, text, imageContext, batchSize = batchSize)
+            var segments = reply.segments
+
+            // 主动智能：模型在这一轮选择了不开口（只输出指令行/空正文）是合法的，且**不加兜底重试**——
+            // 硬逼它说点什么，就变成「每次到点都必须冒一句话」，恰恰是这功能最该避免的黏人。
+            // 但指令必须在这里就落地：提示词教的「跳过 +30m」「只定 +2h」正是这种「正文为空、只剩指令」
+            // 的形态，直接 return 会把模型刚给自己定的下一次一起丢掉，而服务收尾又会把旧计划清掉
+            // → 整条链无声消失（表现为「明明说了半小时后再来，之后再也没动静」）。
+            if (segments.isEmpty()) {
+                setConvTyping(convId, false)
+                return@withContext
+            }
+
+            // 空回复兜底：重试一次（强调必须输出正文），仍空则发个省略号（自然无语，不显示「（空回复）」）
+            if (segments.isEmpty()) {
+                reply = callCompanionApi(convId, character, working, text, imageContext, forceReply = true, batchSize = batchSize)
+                segments = reply.segments
+            }
+
+            if (segments.isEmpty()) {
+                setConvTyping(convId, false)
+                working.add(Message(
+                    id = replyId,
+                    role = Role.ASSISTANT, content = "…",
+                    timestamp = replyTimestamp ?: System.currentTimeMillis(),
+                    modelName = langModelName, mode = ChatMode.COMPANION,
+                    thinkingTimeMs = System.currentTimeMillis() - startTime
+                ))
+                persistConversationMessages(convId, working)
+                return@withContext
+            }
+
+            // 情绪：模型输出优先，本地关键词兜底（动作演绎/剧情补足不解析情绪，走简化节奏）
+            val narrativeMode = character?.isNarrativeMode() == true
+            // 叙事模式长度校验：偏离区间太多则带纠偏指令重试一次，尽量把字数压进设定区间
+            if (narrativeMode) {
+                // 篇幅不再用绝对字数卡（避免「短档被写死成 50 字」），只留一道防塌陷下限：
+                // 选了「长/超长」却只回三行时补一次，提示也不提具体字数
+                val totalLen = countChars(segments.joinToString(""))
+                if (totalLen < plotLengthFloor(character?.plotLength ?: 1)) {
+                    val retried = callCompanionApi(
+                        convId, character, working, text, imageContext,
+                        forceReply = true, batchSize = batchSize,
+                        lengthHint = "上次回复太短了，明显达不到当前「单次回复长度」档应有的体量。请把这一段按该档的篇幅写足。"
+                    )
+                    if (retried.segments.isNotEmpty()) {
+                        reply = retried
+                        segments = retried.segments
+                    }
+                }
+            }
+            val mood = if (narrativeMode) CompanionMood.NEUTRAL else (parseEmotionLabel(reply.emotion) ?: moodWithResidue(text, getPerConvSettings(convId)))
+
+            // 情绪决定回复条数（随机）；叙事模式最多 3 段、全部展示
+            val maxCount = com.freechat.core.CompanionRhythm.segmentCount(mood, narrativeMode, regenerating, segments.size)
+            val toShow = segments.take(maxCount)
+
+            if (toShow.isEmpty()) {
+                // 生气不回复也是「这一轮的结果」，指令同样要落地（比如「气还没消，改到 +2h」）
+                setConvTyping(convId, false)
+                return@withContext  // 生气不回复
+            }
+
+            // 微信聊天语音测试（开发者选项）：强制每条都走语音——解析层兜底（没 <voice> 标记也整条转语音），
+            // 与提示词 voiceReplyAlways 档双保险；连接微信的对话照旧不支持
+            val forceVoiceReply = com.freechat.dev.DevMode.testVoiceReply(getApplication()) &&
+                wechatAttachedCached(convId) != true
+            for ((i, seg) in toShow.withIndex()) {
+                setConvTyping(convId, true)
+                // 每条间隔随机（情绪影响），时而快时而慢
+                val interval = com.freechat.core.CompanionRhythm.segmentIntervalMs(mood, narrativeMode)
+                delay(interval)
+                setConvTyping(convId, false)
+                val segId = if (i == 0) replyId else UUID.randomUUID().toString()
+                if (regenerating) AnimationReplay.mark(segId)
+                // 语音消息（2026-10-19）：<voice> 段=口播台词——voiceText 随消息存、content 同台词（长按展开即见）
+                val voiceLine = CompanionPrompts.extractVoice(seg)
+                    ?: if (forceVoiceReply && seg.isNotBlank()) CompanionPrompts.VoiceLine(seg, "") else null
+                working.add(Message(
+                    id = segId,
+                    role = Role.ASSISTANT, content = voiceLine?.text ?: seg,
+                    timestamp = replyTimestamp?.plus(i) ?: System.currentTimeMillis(),
+                    modelName = langModelName, mode = ChatMode.COMPANION,
+                    thinkingTimeMs = System.currentTimeMillis() - startTime,
+                    searchSources = reply.sources,
+                    reasoningContent = if (i == 0) reply.reasoningContent else "",
+                    voiceText = voiceLine?.text,
+                    voiceStyle = voiceLine?.style
+                ).let { separateCitationLinks(it, text) })
+                persistConversationMessages(convId, working)
+                // AI 发语音即预载：合成落盘，点按秒播（预载单条队列不抢并发）
+                voiceLine?.let { preloadVoiceMessage(convId, segId, it.text, it.style) }
+                if (i < toShow.size - 1) setConvTyping(convId, true)
+            }
+
+            // ★ 回复完成收尾：清零漏回计数（已在提示词里解释过），异步写入记忆
+            // 注：关系/亲密度不再由这里评估更新——没有亲密度数值、没有按等级映射的关系模板，亲疏尺度全靠提示词里让 AI 结合人设与上下文自行判断
+            sleepingMissedMessages[convId] = 0
+            val replyText = toShow.joinToString("\n")
+            // 主动智能：模型可以在这条回复里给自己定下一次（也可以撤销上一次）。
+            // 同一个后台任务里先记再挂新闹钟：先记后挂，最小间隔才会把「刚发过」算进去）
+            // （2026-10-20 本地主动智能退役）
+            try {
+                notifyReplyIfBackground(character?.name?.ifBlank { "FreeChat" } ?: "FreeChat", replyText)
+            } finally {
+            }
+            // 主动开口这一轮不写记忆：喂给摘要器的「用户说了什么」是空的，
+            // 硬造一条只会污染记忆库；这段话本身已经落在聊天记录里，下次上下文照样带上
+            if (replyText.isNotBlank()) {
+                viewModelScope.launch {
+                    summarizeAndRemember(convId, text, Message(role = Role.ASSISTANT, content = replyText, mode = ChatMode.COMPANION),
+                        character?.highQualityMemory == true, character?.isNarrativeMode() == true, character,
+                        sourceMessageIds = userSourceIds + working.drop(replyStart).map { it.id })
+                }
+            }
+        } finally {
+            elapsedJob?.cancel()
+            restoreSettings(snapshot)
+            setConvTyping(convId, false)
+        }
+    }
+
+    private fun extractJsonObject(raw: String): JsonObject? = com.freechat.core.JsonLoose.extractObject(raw)
+
+    /**
+     * 拟人模式非流式请求：只在「连接层失败」时重试一次。
+     * 读超时不重试（请求已经发出去了，重试只会让用户多等一遍）、DNS 解析失败也不重试（那是没网）。
+     * 返回 (HTTP 状态码, 响应体文本)，body 保证已经读完并关闭，连接会归还连接池。
+     */
+    private suspend fun executeCompanionCall(request: Request): Pair<Int, String> {
+        var lastError: IOException? = null
+        for (attempt in 0..1) {
+            // 已经取消：不要再补发一次请求（和流式那边同一个道理）
+            if (!coroutineContext.isActive) throw CancellationException("cancelled before retry")
+            if (attempt > 0) {
+                Log.w("FreeChat", "Companion retry: 换新连接重发一次")
+                // 半死的连接池成员是「切后台后偶发失败」的元凶，重试必须换一条新连接
+                client.connectionPool.evictAll()
+            }
+            try {
+                // use{}：不论成功失败，body 都会被关闭，连接才会归还连接池
+                client.newCall(request).execute().use { resp ->
+                    return resp.code to (resp.body?.string() ?: "")
+                }
+            } catch (e: IOException) {
+                lastError = e
+                Log.w("FreeChat", "Companion call failed (attempt ${attempt + 1})", e)
+                if (!isConnectionLevelFailure(e)) throw e
+            }
+        }
+        throw lastError ?: IOException("connection failed")
+    }
+
+    private suspend fun callCompanionApi(convId: String, character: CharacterProfile?, working: List<Message>, text: String, imageContext: String = "", forceReply: Boolean = false, batchSize: Int = 1, lengthHint: String? = null): CompanionReply = withContext(Dispatchers.IO) {
         val model = requestModels().language
         val searchOn = _enableWebSearch.value
         val searchToolAvailable = searchOn && supportsFunctionTools(model) && !isChitchat(text)
@@ -4087,7 +4122,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             imageContext = imageContext,
             forceReply = forceReply,
             lengthHint = lengthHint,
-            proactivePrompt = proactivePrompt,
             batchSize = batchSize,
             serpBlock = serpBlock,
             searchGuidance = if (searchToolAvailable) SearchIntent.guidance else "",
@@ -4152,9 +4186,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // ★ 格式自检（1.0.53）：本地先判一眼「这段话像不像当前档位写的」，一眼能判的违规
         //   （三档互相穿帮的写法，见 isFormatViolation）就带指令**只改格式重写一次**。
         //   重写是独立的一趟小调用，失败或改完仍不合规就原样放行 —— 格式差一点总比回复丢掉强。
+        //   2026-10-19：**带 <voice> 的回复整体免检**——重写器不认识语音标签，一重写就把
+        //   标签洗掉、语音变文字（长语音必哑的真凶之一）。语音行本身也已在 isFormatViolation 豁免。
         val mode = character?.normalized()?.dialogueMode ?: DialogueMode.WECHAT
         val joinedBody = bodyLines.joinToString("\n")
-        if (joinedBody.isNotBlank() && isFormatViolation(joinedBody, mode)) {
+        val hasVoice = joinedBody.contains("<voice", ignoreCase = true)
+        if (joinedBody.isNotBlank() && !hasVoice && isFormatViolation(joinedBody, mode)) {
             val fixed = repairFormat(joinedBody, mode)
             if (fixed.isNotBlank() && !isFormatViolation(fixed, mode)) {
                 Log.d("FreeChat", "格式自检：$mode 档违规，已按格式重写一次")
@@ -4165,7 +4202,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         CompanionReply(
-            com.freechat.core.CompanionReply(parsed.emotion, bodyLines, parsed.proactive, searchSources),
+            com.freechat.core.CompanionReply(parsed.emotion, bodyLines, searchSources),
             reply.optString("reasoning_content").orEmpty()
         )
     }
@@ -4231,31 +4268,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 用户自定义模型：用其 apiBaseUrl + 标准 OpenAI 路径 + 其 apiKey。
-     *  兼容用户填「根路径」「带版本号」或「完整端点」（任意版本前缀都行）：
-     *  - 完整端点（.../v1/chat/completions、.../api/v3/chat/completions）→ 原样使用
-     *  - 带版本（https://xxx.com/v1、/v3、/api/v3）→ 只补端点 /chat/completions，不叠加版本，避免双版本 404
-     *  - 根路径（https://api.deepseek.com）→ 补标准 /v1/chat/completions */
+     *  2026-10-18 用户钉死「URL 填什么就用什么，不许自动加 /v1、/api」：
+     *  - 完整端点（.../chat/completions、.../api/v3/chat/completions）→ 原样使用
+     *  - 其余（根路径 https://api.deepseek.com、带版本 https://xxx.com/v1）→ 只补端点段
+     *    （chat/completions），**绝不自动加版本前缀**（要 /v1 的自己把 /v1 填进 URL）
+     *  - 内置模型恒走代理 BuiltInProxy.BASE（URL 栏是显示件，怎么填都弄不断模型） */
     private fun customEndpoint(model: ModelInfo, path: String): Pair<String, String> {
-        val base = model.apiBaseUrl.trim().trimEnd('/')
-        // 端点后缀：去掉 /v1 版本前缀（如 /v1/chat/completions → chat/completions）
-        val endpoint = path.trim('/').substringAfter('/')
-        val url = when {
-            base.endsWith("/$endpoint") -> base
-            hasApiVersionSegment(base) -> "$base/$endpoint"
-            else -> base + path
+        if (model.isBuiltIn) {
+            val endpoint = path.trim('/').substringAfter('/')
+            return "${com.freechat.data.BuiltInProxy.BASE}/$endpoint" to ""
         }
-        return url to model.apiKey
+        // 2026-10-20：URL 规整统一走 ApiUrls——用户加不加 /v1、/api、端点后缀都能用（根路径填对即可）
+        return com.freechat.data.ApiUrls.endpoint(model.apiBaseUrl, path) to model.apiKey
     }
 
     /** 判断 base URL 末尾是否已带版本段：/v1、/v2、/api/v2 等（大小写不敏感） */
     private fun hasApiVersionSegment(base: String): Boolean =
         Regex("""/(?:v[0-9]+|api/v[0-9]+)$""", RegexOption.IGNORE_CASE).containsMatchIn(base)
 
-    /** 按 provider 路由模型 → 端点 + 密钥 */
-    private fun routeModelEndpoint(model: ModelInfo): Pair<String, String> = when (model.provider) {
-        Provider.XIAOMI -> "$XIAOMI_BASE_URL/chat/completions" to XIAOMI_API_KEY
-        Provider.DOUBAO -> "$DOUBAO_BASE_URL/chat/completions" to DOUBAO_API_KEY
-        Provider.CUSTOM -> customEndpoint(model, "/v1/chat/completions")
+    /** 按 provider 路由模型 → 端点 + 密钥（内置模型一律走代理、无 Key） */
+    private fun routeModelEndpoint(model: ModelInfo): Pair<String, String> = when {
+        model.isBuiltIn -> customEndpoint(model, "/v1/chat/completions")
+        model.provider == Provider.XIAOMI -> "$XIAOMI_BASE_URL/chat/completions" to ""
+        model.provider == Provider.DOUBAO -> "$DOUBAO_BASE_URL/chat/completions" to ""
+        else -> customEndpoint(model, "/v1/chat/completions")
     }
 
     /**
@@ -4264,8 +4300,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * 自定义模型用表单里现填的地址 + Key。
      */
     fun editorFetchEndpoint(provider: Provider, apiBaseUrl: String, apiKey: String): Pair<String, String> = when (provider) {
-        Provider.XIAOMI -> XIAOMI_BASE_URL to XIAOMI_API_KEY
-        Provider.DOUBAO -> DOUBAO_BASE_URL to DOUBAO_API_KEY
+        Provider.XIAOMI -> XIAOMI_BASE_URL to ""   // 内置 Key 已收口服务器（2026-10-18）
+        Provider.DOUBAO -> DOUBAO_BASE_URL to ""
         Provider.CUSTOM -> apiBaseUrl.trim() to apiKey.trim()
     }
 
@@ -4273,12 +4309,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // —— 提示词总装已抽进 freechat-core（CompanionPrompts），同码保证两端「完全还原」——
     private fun buildCompanionSystemPrompt(character: CharacterProfile?, convId: String, messages: List<Message>): String {
         val per = getPerConvSettings(convId)
+        // 微信聊天语音测试（开发者选项）：强制每条都走语音输出；连接微信的对话照旧不支持
+        val forceVoice = com.freechat.dev.DevMode.testVoiceReply(getApplication()) &&
+            wechatAttachedCached(convId) != true
         val base = com.freechat.core.CompanionPrompts.buildCompanionSystemPrompt(
             character = character,
             messages = messages,
             convRules = convRulesBlock(convId),
-            pendingReminder = proactiveStore.get(convId)?.let { com.freechat.core.PendingReminder(it.dueAt, it.reason) },
-            timeState = timeStateFor(convId)
+            timeState = timeStateFor(convId),
+            // 允许语音回复（2026-10-19）：模型自决用不用；连接微信的对话一律不教（功能不支持）
+            allowVoiceReply = (character?.allowVoiceReply == true || forceVoice) && wechatAttachedCached(convId) != true,
+            voiceReplyAlways = forceVoice
         )
         // 1.1.29.2 ①（用户拍板方案B）：产品知识库**不再进拟人系统提示词**——
         // 产品手册注进角色扮演=出戏污染（旧触发词还和微信语境撞车，「怎么+微信」就误触发）；
@@ -4566,7 +4607,7 @@ ${com.freechat.data.CharacterOriginalLearning.prompt(p, com.freechat.data.Charac
 2. 把这个人的性格和 MBTI 展开成具体、立体、多面的行为模式（比如 TA 什么时候开心、什么时候生气、生气是什么样子、怎么安慰人、怎么吐槽、怎么敷衍）。展开时只能用用户给出的性格素材，不要擅自给角色添加用户没写过的性格特质或生理反应。
 3. 描述 TA 和用户的关系与相处方式（基于「人物关系」和「记忆感知」里的前提故事）。亲疏尺度不要写死、不要套模板：要让 TA 依据自己的性格和当下的相处进展自行判断——同样一句话，随便的人可能顺势暧昧，矜持的人可能直接拒绝甚至反感。可以写清 TA 的底线和分寸感，但不要写成「什么关系就必须做什么」的固定剧本。
 4. 强调 TA 是一个有独立思想、会主动聊天、有情绪起伏的真实的人，不是 AI 助手，永远不要暴露自己是 AI。
-5. 严格保留用户设定的性格强度和底线：用户写坚强、强势、高冷、有原则、毒舌、傲娇，就照实写成这样，绝不能弱化成「温柔讨好、委曲求全、动不动就哭、卑微求全」。性格多样化的角色（强势、冷静、独立、犀利、傲娇、毒舌）都如实还原，不要把所有角色都磨平成一种软绵绵的讨好型模板。特别注意用户写的「不卑微、有底线、不轻易流泪、保持自我」这类反弱化描述，要原样写进人设，绝不能在生成时丢弃或稀释。
+5. 严格保留用户设定的性格强度和底线：用户写坚强、强势、高冷、有原则、毒舌、傲娇，就照实写成这样，绝不能弱化成「温柔讨好、委曲求全、动不动就哭、卑微求全」。性格多样化的角色（强势、冷静、独立、犀利、傲娇、毒舌）都如实还原，不要把所有角色都磨平成一种软绵绵的讨好型模板。特别注意用户写的「不卑微、有底线、不轻易流泪、保持自我」这类反弱化描述，要原样写进人设，绝不能在生成时丢弃或稀释。反方向同样要防：**「冷静理智」「沉稳」「成熟」「内敛」写的是处事方式和情绪稳定，不是高冷疏离**——展开行为模式时不要把它们写成话少冷淡、对恋人不耐烦或刻意保持距离；亲密关系里的温柔、关心、依恋、撒娇都是正常温度，除非用户明确写了「高冷」「冷淡」「疏离」。也不要走向另一个极端把人写成无脑黏人热忱——如实还原用户写下的这个人即可。
 6. ★ 否定式设定必须原样照抄：用户写的禁止性/否定性要求（例如「不轻易脸红害羞」「不轻易害羞」「不娇气」「情绪内敛」「不轻易心动」「不爱撒娇」）必须一字不改地保留为禁止性描述。绝对禁止把这类否定改写成肯定式的行为特征（比如把「不轻易脸红害羞」写成「容易害羞、会脸红」），也绝对禁止给角色添加用户没有写过的生理反应描写（脸红、发烫、耳尖发热、心跳加速、呼吸一滞、攥紧衣角、别开脸、咬唇等）。不要预设所有角色都容易害羞脸红——是否害羞完全由人设决定，冷静、成熟、强势、毒舌、直率、见多识广的角色本来就不会轻易害羞，请如实还原。同样地，用户写下的**肯定式特质**（例如「容易脸红害羞」「爱撒娇」「热情」「黏人」「主动」）必须原样保留并**充分体现**——这是这个人设的标志，不得淡化、不得打折扣、不得用「适度」「偶尔」这类词稀释；这个人多害羞、多热情、多黏人，完全由用户写下的设定决定。
 7. 如果设定了开场白，开场白就是 TA 跟你说的第一句话（可能有多句），要理解它的语境、情绪和可能埋下的故事，让后续对话接得住、有延续感。
 7.1 「配角」和「世界规则」是这个世界里已经存在的人和规矩（可能有很多条、很多个人），要理解并当成硬性事实，但**不要把名单和条款抄进人设提示词里**——提示词写的是「你」这个人，不是世界说明书。
@@ -4814,7 +4855,6 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     }
 
     private fun cancelConversationGeneration(convId: String) {
-        proactiveJobs.remove(convId)?.cancel()
         if (standardGenerationConvId == convId) {
             standardSettingsSnapshot?.let(::restoreSettings)
             standardSettingsSnapshot = null
@@ -5102,12 +5142,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         val usePlainTools = !supportsFunctionTools(model)
         val functionTools = if (usePlainTools) emptyList() else tools
         val plainTools = if (usePlainTools && needsSearch) tools + SearchIntent.toolDefinition else tools
-        // 按 provider 路由到对应端点与密钥
-        val (apiUrl, apiKey) = when (model.provider) {
-            Provider.XIAOMI -> "$XIAOMI_BASE_URL/chat/completions" to XIAOMI_API_KEY
-            Provider.DOUBAO -> "$DOUBAO_BASE_URL/chat/completions" to DOUBAO_API_KEY
-            Provider.CUSTOM -> customEndpoint(model, "/v1/chat/completions")
-        }
+        // 按 provider 路由到对应端点与密钥（内置模型走代理，见 routeModelEndpoint）
+        val (apiUrl, apiKey) = routeModelEndpoint(model)
         val messagesJson = standardRequestMessages(convId, history, tools.isNotEmpty())
         if (needsSearch || tools.any { (it["function"] as? Map<*, *>)?.get("name") == SearchIntent.TOOL_NAME })
             messagesJson.add(0, mapOf("role" to "system", "content" to SearchIntent.guidance))
@@ -5267,7 +5303,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
                             // 末帧（choices 为空）里带 usage.web_search_usage —— 服务端实际搜了几次、
                             // 读了几页。tool_usage=0 就是「这一轮压根没搜」，是判断成败的硬指标。
-                            json.getAsJsonObject("usage")?.getAsJsonObject("web_search_usage")?.let { u ->
+                            // ⚠ usage 可能是 JsonNull（include_usage 未启用时每 chunk 都带 "usage":null）——
+                            // Gson 的 getAsJsonObject 碰到 JsonNull 会抛 CCE 把整段正文带跑（2026-10-18 空回复根因），
+                            // 这里必须按元素类型守卫。
+                            json.get("usage")?.takeIf { it.isJsonObject }?.asJsonObject
+                                ?.get("web_search_usage")?.takeIf { it.isJsonObject }?.asJsonObject?.let { u ->
                                 sawWebSearchUsage = true
                                 webSearchUsed = u.get("tool_usage")?.takeUnless { it.isJsonNull }?.asInt ?: 0
                             }
@@ -5542,7 +5582,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 persistConversationMessages(convId, loadMessages(convId) + Message(id = replyId, role = Role.ASSISTANT,
                     content = s.sceneImageVisualOnly, imageUrls = urls, modelName = model.displayName,
                     thinkingTimeMs = generationTimer.elapsedMs(), mode = ChatMode.COMPANION, sceneVisualization = true))
-                // Deliberately no summarization, mood update, proactive signal, or user prompt row.
+                // Deliberately no summarization, mood update, or user prompt row.
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -5637,14 +5677,18 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             val seedream = com.freechat.data.ImageApiRequest.usesSeedream(modelId, visualModel.apiBaseUrl,
                 visualModel.provider == Provider.DOUBAO)
             // Actual image files, not just descriptions. No silent reference-dropping fallback.
-            val (url, key) = if (isCustom) {
+            val (url, key) = if (visualModel.isBuiltIn) {
+                // 内置生图走代理（2026-10-18）：无 Key，身份头由 BuiltInProxy 拦截器挂
+                com.freechat.data.ImageApiRequest.endpoint(com.freechat.data.BuiltInProxy.BASE,
+                    edit = references.isNotEmpty() && !seedream) to ""
+            } else if (isCustom) {
                 if (visualModel.apiBaseUrl.trim().toHttpUrlOrNull() == null)
                     throw com.freechat.data.ApiFailure(0, "invalid_api_url")
                 if (visualModel.apiKey.isBlank()) throw com.freechat.data.ApiFailure(0, "invalid_api_key")
                 com.freechat.data.ImageApiRequest.endpoint(visualModel.apiBaseUrl,
                     edit = references.isNotEmpty() && !seedream) to visualModel.apiKey
             } else {
-                "$DOUBAO_BASE_URL/images/generations" to DOUBAO_API_KEY
+                "$DOUBAO_BASE_URL/images/generations" to ""
             }
             val requestPrompt = sceneRequest?.first ?: imagePrompt
             // 显式画幅（1.1.21.5）：不带 size 时画布默认方形，「改成 5:3」输出还是 1:1。
@@ -5973,11 +6017,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     private suspend fun callNonStreamingCompletion(messages: List<Map<String, String>>): String = withContext(Dispatchers.IO) {
         try {
             val model = requestModels().language
-            val (url, key) = when (model.provider) {
-                Provider.XIAOMI -> "$XIAOMI_BASE_URL/chat/completions" to XIAOMI_API_KEY
-                Provider.DOUBAO -> "$DOUBAO_BASE_URL/chat/completions" to DOUBAO_API_KEY
-                Provider.CUSTOM -> customEndpoint(model, "/v1/chat/completions")
-            }
+            val (url, key) = routeModelEndpoint(model)
             val body = gson.toJson(mapOf(
                 "model" to model.id, "messages" to messages, "stream" to false, "temperature" to 0.7
             )).toRequestBody(JSON_MEDIA)
@@ -6005,10 +6045,10 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             val start = cal.timeInMillis
             cal.add(Calendar.DAY_OF_MONTH, 7)
             val end = cal.timeInMillis
+            // 2026-10-15 合规：地点（EVENT_LOCATION）不再查询/输出，只留标题+时间
             val projection = arrayOf(
                 CalendarContract.Events.TITLE,
-                CalendarContract.Events.DTSTART,
-                CalendarContract.Events.EVENT_LOCATION
+                CalendarContract.Events.DTSTART
             )
             val cursor = context.contentResolver.query(
                 CalendarContract.Events.CONTENT_URI, projection,
@@ -6020,13 +6060,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             cursor?.use { c ->
                 val tIdx = c.getColumnIndex(CalendarContract.Events.TITLE)
                 val sIdx = c.getColumnIndex(CalendarContract.Events.DTSTART)
-                val locIdx = c.getColumnIndex(CalendarContract.Events.EVENT_LOCATION)
                 while (c.moveToNext()) {
                     val title = c.getString(tIdx) ?: "(无标题)"
                     val s = c.getLong(sIdx)
-                    val loc = if (locIdx >= 0) c.getString(locIdx) ?: "" else ""
                     val fmt = SimpleDateFormat("M月d日 HH:mm", Locale.CHINESE)
-                    events.add("• ${fmt.format(Date(s))} $title${if (loc.isNotBlank()) " @$loc" else ""}")
+                    events.add("• ${fmt.format(Date(s))} $title")
                 }
             }
             if (events.isEmpty()) "未来 7 天你的日历里没有行程安排。"
@@ -6416,6 +6454,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             }
         }
         convLoading[convId] = v
+        publishBusyConversations()
         if (!v) {
             convGenerationModels.remove(convId)
             convImageGenerations.remove(convId)
@@ -6435,6 +6474,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
     private fun setConvTyping(convId: String, v: Boolean) {
         convTyping[convId] = v
+        publishBusyConversations()
         if (_currentConversationId.value == convId) _isTyping.value = v
         if (!v && convLoading.values.none { it } && convTyping.values.none { it }) generationPending = false
         syncForegroundService()

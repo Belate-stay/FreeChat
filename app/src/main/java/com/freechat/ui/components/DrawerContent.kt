@@ -540,7 +540,7 @@ fun DrawerContent(
                     .align(Alignment.BottomStart)
                     // 整排往右挪一点（24 → 32dp），与头部卡片的落点呼应；头像现在 44dp，
                     // 比旁边两个胶囊大一圈，靠外一点三个按钮的重心才对得上
-                    .padding(start = 32.dp, bottom = 20.dp),
+                    .padding(start = if (com.freechat.ui.adaptive.LocalTabletUi.current) 16.dp else 32.dp, bottom = 20.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1288,6 +1288,11 @@ private fun FloatingDrawerButton(
     val advancedMaterial = LocalAdvancedMaterial.current
     val isDark = colors.TextPrimary.luminance() > 0.5f
 
+    val availableWidth = if (com.freechat.ui.adaptive.LocalTabletUi.current)
+        com.freechat.ui.adaptive.LocalPaneSize.current.width
+    else LocalConfiguration.current.screenWidthDp.dp * 0.9f
+    val compact = availableWidth < 340.dp
+
     Box(
         modifier = modifier
             .onGloballyPositioned { coords ->
@@ -1327,8 +1332,10 @@ private fun FloatingDrawerButton(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, label, tint = colors.TextSecondary, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(label, style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary)
+            if (!compact) {
+                Spacer(Modifier.width(8.dp))
+                Text(label, style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary, maxLines = 1)
+            }
         }
     }
 }

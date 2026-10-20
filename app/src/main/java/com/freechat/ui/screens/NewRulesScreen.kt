@@ -1,6 +1,10 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.FloatingWindowBackButton
+import com.freechat.ui.adaptive.floatingHeaderInset
+
 import com.freechat.ui.components.HeaderIconButton
+import com.freechat.ui.adaptive.paneImePadding
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -9,7 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import com.freechat.ui.animation.jellyOverscroll
-import com.freechat.ui.animation.rememberTopOnEntryScrollState
+import com.freechat.ui.adaptive.rememberPaneScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -156,7 +160,7 @@ fun NewRulesScreen(
         }
     }
 
-    BackHandler(enabled = true) { onBack() }
+    BackHandler(enabled = com.freechat.ui.animation.LocalPageActive.current) { onBack() }
 
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
@@ -176,12 +180,12 @@ fun NewRulesScreen(
                 // 键盘让位（1.0.50）：最底下那个「规则」输入框原来一敲键盘就被盖住。
                 // 必须在 verticalScroll **之前**给：这样缩的是视口本身，内容才滚得上得来；
                 // 给在后面只是往滚动内容尾巴上添一段留白，视口还是被键盘压着的那一整屏。
-                .imePadding()
+                .paneImePadding()
                 // 果冻边界冗余（1.1.26.6）：顶/底继续拖跟手位移带阻尼，松手回弹
                 .jellyOverscroll()
-                .verticalScroll(rememberTopOnEntryScrollState())
+                .verticalScroll(rememberPaneScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 16.dp + com.freechat.ui.adaptive.tabletReadingGutter()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // ──── 模型选择 ────
@@ -396,18 +400,20 @@ fun NewRulesScreen(
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            HeaderIconButton(onClick = onBack) {
+            FloatingWindowBackButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
                 s.newRulesTitle,
+                modifier = Modifier.weight(1f),
                 color = colors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.titleLarge
             )
+            com.freechat.ui.adaptive.PaneExpandButton()
         }
 
         // ===== 二级选择框 / 三态菜单（底部磨砂玻璃弹层，窗口内浮层）=====

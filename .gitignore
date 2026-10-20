@@ -9,6 +9,8 @@ build/
 *.iml
 .idea/
 *.log
+# Isolated tablet QA emulator state, not a source fixture.
+_verify/v1202/emulator/
 secrets.properties
 # 非开源部分（用户点名不随 push 上 GitHub）：启动信标 + 开发者模式后门
 # 连同它们的内部契约测试（test/dev/）一起排除——开发者调试与用户信息收集的相关代码一律不入开源

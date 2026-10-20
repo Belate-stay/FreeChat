@@ -1,5 +1,7 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.floatingHeaderInset
+
 import com.freechat.ui.components.HeaderIconButton
 
 import androidx.compose.foundation.layout.*
@@ -67,7 +69,7 @@ fun AuthorWordsScreen(onBack: () -> Unit) {
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             HeaderIconButton(onClick = onBack) {

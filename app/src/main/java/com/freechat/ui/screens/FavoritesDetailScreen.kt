@@ -1,5 +1,9 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.floatingHeaderInset
+
+import com.freechat.ui.adaptive.pageActionWidth
+
 import com.freechat.ui.components.HeaderIconButton
 
 import android.content.Context
@@ -31,7 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
+import com.freechat.ui.theme.AppDialog as Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
@@ -133,7 +137,8 @@ fun FavoritesDetailScreen(
                 .fillMaxSize()
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier),
             contentPadding = PaddingValues(
-                start = 16.dp, end = 16.dp,
+                start = 16.dp + com.freechat.ui.adaptive.tabletReadingGutter(),
+                end = 16.dp + com.freechat.ui.adaptive.tabletReadingGutter(),
                 top = HazeSpec.topContentPaddingDp(statusBarHeightDp),
                 bottom = 120.dp
             ),
@@ -161,7 +166,7 @@ fun FavoritesDetailScreen(
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             HeaderIconButton(onClick = onBack) {
@@ -174,6 +179,7 @@ fun FavoritesDetailScreen(
                 style = MaterialTheme.typography.titleLarge
             )
             Spacer(Modifier.weight(1f))
+            com.freechat.ui.adaptive.PaneExpandButton()
             // 已收藏图标：爱心划一道（HeartBroken），点击弹确认后取消收藏
             HeaderIconButton(onClick = { showUnfavoriteConfirm = true }) {
                 Icon(
@@ -217,6 +223,7 @@ fun FavoritesDetailScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 36.dp)
+                .pageActionWidth()
         ) {
             if (advancedMaterial) {
                 // 磨砂哑光玻璃：与 Chat 输入框同款 frostedGlass（Haze 真模糊 + 白 tint + 描边）

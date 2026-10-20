@@ -33,6 +33,16 @@ data class Message(
     val searchSources: List<SearchCitation>? = emptyList(),
     /** Visual-only companion scene. Never feed this row to a model or memory summarizer. */
     val sceneVisualization: Boolean = false,
+    /**
+     * 语音回复（2026-10-19）：非空=这一条是 AI 自选的「说出口」回复，内容即口播台词。
+     * 气泡按微信式语音样式渲染、点按播放（音频本地按用户所选音色合成，不随同步走——
+     * 其他设备首次播放时现合成）。模型自决是否语音（见 CompanionPrompts 语音标记）。
+     */
+    val voiceText: String? = null,
+    /** 用户语音消息的录音文件（本地路径；与微信语音一致可重放）。音频本体不随同步走。 */
+    val voicePath: String? = null,
+    /** AI 语音的语态/风格（<voice style="…">，如「撒娇、轻快」）——合成时进 speakerStyle */
+    val voiceStyle: String? = null,
     /** null = legacy row; true only when the user asked for usable URLs rather than citations. */
     val answerLinksRequested: Boolean? = null,
     /** The executed image prompt, so model changes and image follow-ups keep the same requirements. */

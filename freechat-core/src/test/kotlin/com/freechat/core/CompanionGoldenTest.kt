@@ -22,11 +22,10 @@ class CompanionGoldenTest {
         personality: String = "",
         memory: String = "",
         hq: Boolean = false,
-        proactive: Boolean = false
     ) = CharacterProfile(
         name = name, dialogueMode = mode, personaPrompt = persona,
         personalityText = personality, memoryPerception = memory,
-        highQualityMemory = hq, proactiveEnabled = proactive
+        highQualityMemory = hq
     )
 
     private fun msg(role: Role, content: String, ts: Long = 1000L, scene: Boolean = false) =
@@ -63,21 +62,6 @@ class CompanionGoldenTest {
         assertTrue(with.contains("只取内容，不取写法"))
     }
 
-    @Test
-    fun proactiveBlockOnlyForWechatWithSwitchOn() {
-        val on = CompanionPrompts.buildCompanionSystemPrompt(char(proactive = true), emptyList())
-        val off = CompanionPrompts.buildCompanionSystemPrompt(char(proactive = false), emptyList())
-        val plotOn = CompanionPrompts.buildCompanionSystemPrompt(char(DialogueMode.PLOT, proactive = true), emptyList())
-        assertTrue(on.contains("[主动智能]"))
-        assertFalse(off.contains("[主动智能]"))
-        assertFalse(plotOn.contains("[主动智能]"))   // 只在微信聊天档
-        assertTrue(on.contains("你手头没有待触发的提醒"))
-        val pending = CompanionPrompts.buildCompanionSystemPrompt(
-            char(proactive = true), emptyList(), pendingReminder = PendingReminder(1791115000000L, "约好了三点")
-        )
-        assertTrue(pending.contains("你给自己定的提醒"))
-        assertTrue(pending.contains("约好了三点"))
-    }
 
     @Test
     fun atmosphereAndConvRulesBlocksAppearWhenProvided() {
@@ -204,38 +188,6 @@ class CompanionGoldenTest {
 
     // ============ 主动智能编解码 ============
 
-    @Test
-    fun proactiveDirectiveIsStrippedFromVisibleText() {
-        val (text, sig) = stripProactiveDirective("那我三点找你\n[主动智能] 15:00 | 约好了三点")
-        assertEquals("那我三点找你", text)
-        assertNotNull(sig)
-        assertEquals("约好了三点", sig!!.reason)
-        // 同行混写：标记到行尾全是指令，标记前正文保留
-        val (t2, s2) = stripProactiveDirective("好嘞 [主动智能] +30m | 待会儿再讲")
-        assertEquals("好嘞", t2)
-        val delta = s2!!.atMillis!! - System.currentTimeMillis()
-        assertTrue("delta=$delta", delta in 29 * 60_000L..31 * 60_000L)
-    }
 
-    @Test
-    fun proactivePayloadPriorityPrefersScheduleOverCancel() {
-        val (_, sig) = stripProactiveDirective("[主动智能] 取消\n[主动智能] +30m | 改个时间")
-        assertNotNull(sig)
-        assertNotNull(sig!!.atMillis)      // 定时 > 取消
-        val (_, cancel) = stripProactiveDirective("[主动智能] 取消 | 他来了")
-        assertTrue(cancel!!.cancel)
-    }
 
-    @Test
-    fun proactiveTimeParsingHandlesRelativeAndAbsolute() {
-        val now = 1_791_115_000_000L
-        assertEquals(now + 45 * 60_000L, parseProactiveTime("+45m", now))
-        assertEquals(now + 2 * 3_600_000L, parseProactiveTime("+2h", now))
-        assertNull(parseProactiveTime("45m", now))            // 裸相对时间不认
-        assertEquals(now + 24 * 3_600_000L, parseProactiveTime("+48h", now))   // 压到 24h 视界
-        // 12 小时制前缀矫正：「下午3:00」= 15:00 不是凌晨 3 点
-        val abs = parseProactiveTime("下午3:00", now)!!
-        val cal = java.util.Calendar.getInstance().apply { timeInMillis = abs }
-        assertEquals(15, cal.get(java.util.Calendar.HOUR_OF_DAY))
-    }
 }

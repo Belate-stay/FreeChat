@@ -50,7 +50,8 @@ class Beta1127NavAndShareTest {
         assertTrue("模型编辑返回走深链闩回来源模型列表", main.contains("settingsOpenModelList = modelEditorType"))
         assertTrue("模型列表闩被设置页消费", settings.contains("openModelListOnLaunch"))
         assertTrue("三级页返回上一级（作者/开发者→关于）",
-            settings.contains("SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS -> subScreen = SubScreen.ABOUT_FREECHAT"))
+            settings.contains("SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS -> returnToAbout()") &&
+                settings.contains("subScreen = if (showTabletCategories) null else SubScreen.ABOUT_FREECHAT"))
     }
 
     @Test fun scrollPositionsSurviveFullScreenDetours() {
@@ -60,7 +61,8 @@ class Beta1127NavAndShareTest {
         assertTrue("滚动记忆由 MainActivity 持有", main.contains("val settingsScrolls = remember"))
         assertTrue("侧滑进设置清空 = 统一回顶部", main.contains("settingsScrolls.clear()"))
         assertTrue("持久化助手实时回写", motion.contains("snapshotFlow { state.value }.collect { saved[key] = it }"))
-        assertTrue("主列表接持久记忆", settings.contains("rememberPersistentScrollState(\"main\", levelScrolls)"))
+        assertTrue("手机主列表沿用 main，平板分类独立保留位置",
+            settings.contains("if (showTabletCategories) \"settings_main_\" + selectedCategory.name else \"main\", levelScrolls"))
         assertTrue("二级页按页名接持久记忆", settings.contains("rememberPersistentScrollState(\"sub_\" + screen.name, levelScrolls)"))
         assertFalse("旧 levelScrolls.getOrPut 已退场", settings.contains("levelScrolls.getOrPut"))
     }
@@ -69,7 +71,8 @@ class Beta1127NavAndShareTest {
         val settings = source("ui/screens/SettingsScreen.kt")
         assertTrue("SubScreen 有深度定义", settings.contains("private fun subScreenDepth"))
         assertTrue("三级=2 二级=1 主页=0", settings.contains("SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS, SubScreen.MY_FEEDBACK -> 2"))
-        assertTrue("forward 按深度增减", settings.contains("forward = { initial, target -> subScreenDepth(target) >= subScreenDepth(initial) }"))
+        assertTrue("页面加上分类快照后仍按子页深度增减",
+            settings.contains("forward = { initial, target -> subScreenDepth(target.first) >= subScreenDepth(initial.first) }"))
         assertFalse("旧的 target != null 方向判定已删", settings.contains("forward = { _, target -> target != null }"))
     }
 

@@ -1,7 +1,7 @@
 package com.freechat.model
 
 /**
- * 字体大小档位。共 5 档，固定倍率应用到全局 sp 字号（dp 布局不变，文字变大自动重排）。
+ * 显示大小档位。共 5 档，文字与 dp 卡片、控件、间距统一缩放，并按可用空间重排。
  */
 enum class FontSize(val scale: Float) {
     SMALL(0.85f),

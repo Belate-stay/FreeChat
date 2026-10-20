@@ -16,8 +16,8 @@ class Beta1132Test {
 
     @Test fun versionMatchesWorkOrder() {
         val gradle = File("build.gradle.kts").readText()
-        assertTrue("versionCode 必须随交付升版", gradle.contains("versionCode = 249"))
-        assertTrue("versionName 必须是工单版本号", gradle.contains("versionName = \"1.2.0\""))
+        assertTrue("versionCode 必须随交付升版", gradle.contains("versionCode = 259"))
+        assertTrue("versionName 必须是工单版本号（不带前缀，显示层拼 Version——1.2.0 先例）", gradle.contains("versionName = \"1.2.1\""))
     }
 
     @Test fun releaseChangelogIsUserAuthored() {

@@ -10,10 +10,14 @@
 
     sync_state（游标 + 版本号 + 待推队列）同样排除：它指向的是**服务端针对某台设备**的
     进度，恢复到另一台设备上只会让两台机器的进度互相打架。宁可从头拉一遍。
+
+    datastore/（freechat_settings）同样排除：模型 API Key（custom_models）存在其中，
+    协议承诺 Key 仅存设备本地，绝不能跟着备份/换机走。
 -->
 <full-backup-content>
     <exclude domain="sharedpref" path="freechat_feedback_draft.xml" />
     <exclude domain="sharedpref" path="freechat_launcher_icon.xml" />
     <exclude domain="sharedpref" path="freechat_search_local.xml" />
     <exclude domain="sharedpref" path="freechat_session.xml" />
+    <exclude domain="file" path="datastore/" />
 </full-backup-content>

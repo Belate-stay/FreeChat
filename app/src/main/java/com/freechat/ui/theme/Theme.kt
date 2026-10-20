@@ -1,5 +1,6 @@
 package com.freechat.ui.theme
 
+import android.content.res.Configuration
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.material3.MaterialTheme
@@ -10,14 +11,15 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.unit.Density
 import com.freechat.model.ColorTheme
 import com.freechat.model.FontSize
 import com.freechat.model.ThemeMode
 import com.freechat.ui.animation.LocalMotionEnabled
 import com.freechat.ui.animation.MotionIndication
 import com.freechat.ui.animation.rememberMotionEnabled
+import kotlin.math.roundToInt
 
 private fun buildLightScheme(colors: FreeChatColors) = lightColorScheme(
     primary = colors.Primary,
@@ -133,10 +135,19 @@ fun FreeChatTheme(
     // 1.1.29.5：波纹用中性墨色（TextPrimary），聚焦环仍用主题色
     val indication = remember(motionEnabled, colors.Primary) { MotionIndication(motionEnabled, colors.Primary, colors.TextPrimary) }
 
-    // 字体缩放：仅改 fontScale，sp 字号全局缩放；density 不变，dp 布局（间距/尺寸）保持原样，
-    // 文字变大时自动换行重排，不会挤坏排版。scale 为 null → 跟随系统，不覆盖。
+    // 字号与卡片、图标、间距同倍率缩放；只覆盖应用内的 dp 空间，不改系统 DPI。
     val density = LocalDensity.current
-    val fontScale = fontSize.scale
+    val configuration = LocalConfiguration.current
+    val displayDensity = remember(density, fontSize) { appDisplayDensity(density, fontSize) }
+    val displayConfiguration = remember(configuration, displayDensity, fontSize) {
+        Configuration(configuration).apply {
+            screenWidthDp = appDisplayDp(configuration.screenWidthDp, fontSize)
+            screenHeightDp = appDisplayDp(configuration.screenHeightDp, fontSize)
+            smallestScreenWidthDp = appDisplayDp(configuration.smallestScreenWidthDp, fontSize)
+            densityDpi = (displayDensity.density * 160f).roundToInt()
+            fontScale = displayDensity.fontScale
+        }
+    }
 
     // 字体优化开关（useSystemFont=false 表示开启内置字体包）：关闭则全部回退系统默认字体
     val globalFont = if (useSystemFont) FontFamily.Default else NotoSansCJK
@@ -145,12 +156,13 @@ fun FreeChatTheme(
     CompositionLocalProvider(
         LocalFreeChatColors provides colors,
         LocalColorTheme provides colorTheme,
-        LocalFontScale provides fontSize.scale,
+        LocalFontScale provides displayDensity.fontScale,
         LocalChatFontFamily provides (if (useSystemFont) FontFamily.Default else HYSongYunLangHei),
         LocalLatinFontFamily provides (if (useSystemFont) FontFamily.Default else HFSandBeach),
         LocalGlobalFontFamily provides globalFont,
         LocalMonoFontFamily provides monoFont,
-        LocalDensity provides Density(density.density, fontScale = fontScale)
+        LocalDensity provides displayDensity,
+        LocalConfiguration provides displayConfiguration
     ) {
         MaterialTheme(
             colorScheme = scheme,
@@ -168,7 +180,7 @@ val LocalFreeChatColors = staticCompositionLocalOf<FreeChatColors> { LightColors
 /** Keep the selected preset identity; grayscale CUSTOM is not the BLACK/WHITE preset. */
 val LocalColorTheme = staticCompositionLocalOf { ColorTheme.BROWN }
 
-/** 当前字体缩放倍率（0.85~1.4），供 dp 布局随字号联动（气泡宽度/间距等自适应） */
+/** 相对 dp 的额外文字倍率；统一显示缩放后为 1，避免旧布局补偿重复放大。 */
 val LocalFontScale = staticCompositionLocalOf { 1f }
 
 /** 高级材质开关：开启时全屏应用半透明液态玻璃质感（液态玻璃模拟） */

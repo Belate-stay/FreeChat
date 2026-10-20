@@ -15,10 +15,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.layout.*
+import com.freechat.ui.theme.AppBoxWithConstraints as BoxWithConstraints
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -59,6 +61,8 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.TextToolbar
 import androidx.compose.ui.platform.TextToolbarStatus
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -75,7 +79,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
+import com.freechat.ui.theme.AppPopup as Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
@@ -175,7 +179,7 @@ fun ChatInput(
     onInputFocused: () -> Unit = {},
     draftText: String = "",
     onDraftChanged: (String) -> Unit = {},
-    onVoiceInput: (String) -> Unit = {},
+    onVoiceInput: (text: String, wav: ByteArray?) -> Unit = { _, _ -> },
     onRecognizeVoice: suspend (ByteArray) -> String? = { null },
     onRecordingChanged: (Boolean) -> Unit = {},
     voiceSessionKey: String? = null,
@@ -279,11 +283,28 @@ fun ChatInput(
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     var text by remember { mutableStateOf(draftText) }
+    var previousDraftSessionKey by remember { mutableStateOf(voiceSessionKey) }
+    val tabletComposer = com.freechat.ui.adaptive.LocalTabletUi.current
+    val animateDraft = tabletComposer && LocalMotionEnabled.current
+    var draftEditedByUser by remember(voiceSessionKey) { mutableStateOf(false) }
+    val draftSwapProgress = remember(voiceSessionKey) {
+        androidx.compose.animation.core.Animatable(if (animateDraft && previousDraftSessionKey != voiceSessionKey) 0f else 1f)
+    }
+    SideEffect { previousDraftSessionKey = voiceSessionKey }
+    LaunchedEffect(draftSwapProgress, animateDraft) {
+        if (animateDraft) draftSwapProgress.animateTo(1f, FreeChatAnimation.overlayFadeIn)
+        else draftSwapProgress.snapTo(1f)
+    }
+    val draftContentMotion = Modifier.graphicsLayer {
+        alpha = draftSwapProgress.value
+        translationY = (1f - draftSwapProgress.value) * 4.dp.toPx()
+    }
     // 记录光标位置：全屏输入展开时把普通输入框的光标位置带过去，保证接着原位置继续输入
     var textSelection by remember { mutableStateOf(TextRange(0)) }
     // 保留 IME 组合区（composing）：语音转文字/拼音输入靠它维持连续输入，丢了会「录入一个字就退出」
     var textComposition by remember { mutableStateOf<TextRange?>(null) }
     // 仅在草稿非空且与当前文字不同时才恢复草稿（避免发送后 draftText 清空延迟导致文字残留）
+    LaunchedEffect(voiceSessionKey) { textComposition = null }
     LaunchedEffect(draftText) {
         if (draftText != text) {
             text = draftText
@@ -297,7 +318,10 @@ fun ChatInput(
     val isComplete = inputStyle == InputStyle.COMPLETE
     // 完整样式文字区的高度上限：整卡封顶到「现在的全屏输入高度」（屏高 1/3，全屏卡片同款上限）。
     // 卡内下行 + 内边距合计约 70dp，剩下归文字区；小屏兜底 96dp，再矮就不成「两行」了
-    val maxTextAreaHeight = ((LocalConfiguration.current.screenHeightDp / 3).dp - 70.dp).coerceAtLeast(96.dp)
+    val paneSize = com.freechat.ui.adaptive.LocalPaneSize.current
+    val availableHeight = if (com.freechat.ui.adaptive.LocalTabletUi.current && paneSize != androidx.compose.ui.unit.DpSize.Unspecified)
+        paneSize.height else LocalConfiguration.current.screenHeightDp.dp
+    val maxTextAreaHeight = (availableHeight / 3 - 70.dp).coerceAtLeast(96.dp)
     // 输入框形状：完整样式恒为圆角矩形（两行卡）；简洁样式单行=胶囊(50dp)，多行/长文本=圆角矩形(20dp)，
     // 避免换行后左右变两个大「半圆」跑道
     val inputShape = if (isComplete || text.contains('\n') || text.length > 25) RoundedCornerShape(24.dp) else RoundedCornerShape(50.dp)
@@ -342,6 +366,7 @@ fun ChatInput(
                 val at = if (hasFocus) textSelection.min.coerceIn(0, text.length) else text.length
                 val end = if (hasFocus) textSelection.max.coerceIn(at, text.length) else text.length
                 text = text.substring(0, at) + pasted + text.substring(end)
+                draftEditedByUser = true
                 textSelection = TextRange(at + pasted.length)
                 textComposition = null
                 blockSelection = false
@@ -370,8 +395,8 @@ fun ChatInput(
 
     // 原输入框超过 3 行（进入第 4 行）时自动弹出全屏输入卡片。
     // 完整样式没有全屏卡片 —— 它就地长高（封顶后内部滚动），这条自动弹只属于简洁样式
-    LaunchedEffect(wrappedLineCount) {
-        if (!isComplete && wrappedLineCount > 3 && !expanded) expanded = true
+    LaunchedEffect(wrappedLineCount, draftEditedByUser) {
+        if ((!tabletComposer || draftEditedByUser) && !isComplete && wrappedLineCount > 3 && !expanded) expanded = true
     }
 
     // 展开时自动把焦点切到全屏输入框（键盘保持、光标跟上）；缩回由缩回按钮切回主输入框
@@ -393,6 +418,9 @@ fun ChatInput(
     val recorder = remember { VoiceLevelRecorder() }
     val scope = rememberCoroutineScope()
     var isRecording by remember { mutableStateOf(false) }
+    // 录音 60s 硬顶（1.2.0.9）：50s 起「即将结束语音」倒计时，60s 自动收尾发送
+    var recordStartMs by remember { mutableStateOf(0L) }
+    var recordElapsedSec by remember { mutableStateOf(0) }
     var recognitionJob by remember { mutableStateOf<Job?>(null) }
     var finishingCapture by remember { mutableStateOf(false) }
     var voiceAnchorHeld by remember { mutableStateOf(false) }
@@ -467,6 +495,8 @@ fun ChatInput(
         keyboardController?.hide()
         focusManager.clearFocus()
         isRecording = true
+        recordStartMs = System.currentTimeMillis()
+        recordElapsedSec = 0
         recordingChanged(true)
         true
     }
@@ -488,7 +518,7 @@ fun ChatInput(
                         val wav = withContext(Dispatchers.Default) { MiMoAsr.pcmToWav(pcm) }
                         val recognized = onRecognizeVoice(wav)
                         ensureActive()
-                        onVoiceInput(recognized ?: "")
+                        onVoiceInput(recognized ?: "", wav)
                     }
                 } catch (cancel: CancellationException) {
                     throw cancel
@@ -505,6 +535,19 @@ fun ChatInput(
         if (!isRecording && voiceAnchorHeld) {
             if (motionEnabled) kotlinx.coroutines.delay(FreeChatAnimation.voiceRestoreTween.durationMillis.toLong())
             voiceAnchorHeld = false
+        }
+    }
+    // 60s 录音硬顶：逐拍计时，50s 起浮层出「即将结束语音」倒计时，到 60s 自动收尾（照常识别发送）
+    LaunchedEffect(isRecording) {
+        if (!isRecording) return@LaunchedEffect
+        while (isRecording) {
+            val el = ((System.currentTimeMillis() - recordStartMs) / 1000L).toInt()
+            recordElapsedSec = el
+            if (el >= 60) {
+                if (!finishingCapture) currentFinishRecording.value(false)
+                break
+            }
+            kotlinx.coroutines.delay(200)
         }
     }
     // 保持按住时的坐标；松手后随输入框舒展平滑回到键盘收起后的位置，不跳一下。
@@ -631,6 +674,15 @@ fun ChatInput(
     ) {
         // matchParentSize 不参与父布局测量：频谱只覆盖屏幕底部，不推动聊天记录或语音键。
         Box(Modifier.matchParentSize()) {
+            if (isRecording && recordElapsedSec >= 50) {
+                // 50s 起倒计时提示（微信式收尾节奏）
+                Text(
+                    s.voiceEndingSoon(60 - recordElapsedSec),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.ErrorRed,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                )
+            }
             AnimatedVisibility(
                 visible = isRecording,
                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
@@ -772,7 +824,7 @@ fun ChatInput(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = (LocalConfiguration.current.screenHeightDp / 3).dp)
+                        .heightIn(max = availableHeight / 3)
                         .floatingSurface(hazeState, isDark, RoundedCornerShape(24.dp), backdropDarkness = glassDarkness)
                         .padding(horizontal = 14.dp, vertical = 8.dp)
                 ) {
@@ -786,11 +838,14 @@ fun ChatInput(
                         }
                         BasicTextField(
                             value = TextFieldValue(text, textSelection, if (expanded) textComposition else null),
-                            onValueChange = { v -> text = v.text; textSelection = v.selection; textComposition = v.composition },
+                            onValueChange = { v ->
+                                if (v.text != text) draftEditedByUser = true
+                                text = v.text; textSelection = v.selection; textComposition = v.composition
+                            },
                             textStyle = MaterialTheme.typography.bodyMedium.copy(color = glassText, fontSize = 15.sp, lineHeight = 20.sp, fontFamily = LocalChatFontFamily.current),
                             cursorBrush = SolidColor(glassCursor),
                             // Let the text field own scrolling so its caret and IME see the same viewport.
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp).focusRequester(fullscreenFocusRequester),
+                            modifier = Modifier.fillMaxWidth().then(draftContentMotion).heightIn(min = 80.dp).focusRequester(fullscreenFocusRequester),
                             maxLines = Int.MAX_VALUE
                         )
                     }
@@ -820,6 +875,7 @@ fun ChatInput(
                             BasicTextField(
                                 value = TextFieldValue(text, textSelection, textComposition),
                                 onValueChange = { v ->
+                                    if (v.text != text) draftEditedByUser = true
                                     text = v.text
                                     // 长按后的选区一律不收（见 blockSelection 的说明）
                                     textSelection = if (blockSelection) textSelection else v.selection
@@ -829,6 +885,7 @@ fun ChatInput(
                                 cursorBrush = SolidColor(glassCursor),
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .then(draftContentMotion)
                                     .padding(start = 6.dp, end = 2.dp)
                                     .heightIn(min = 24.dp, max = maxTextAreaHeight)
                                     .onGloballyPositioned { coords -> mainFieldWidthPx = coords.size.width }
@@ -892,8 +949,19 @@ fun ChatInput(
                         }
 
                         // ── 下行：[+] [状态快捷键] … 语音/发送圆钮 ──
+                        BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                        val chipTextStyle = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        val labelWidths = remember(textMeasurer, chipTextStyle, density, s.deepThinkingMode, s.webSearch) {
+                            with(density) {
+                                textMeasurer.measure(s.deepThinkingMode, chipTextStyle).size.width.toDp().value to
+                                    textMeasurer.measure(s.webSearch, chipTextStyle).size.width.toDp().value
+                            }
+                        }
+                        val compactActions = maxWidth.value < inputActionsWidthDp(
+                            labelWidths.first, labelWidths.second, forceImageGen && !isCompanion, emojiAvailable)
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             // + 按钮（与简洁样式同款）
@@ -923,6 +991,7 @@ fun ChatInput(
                                 colors = colors,
                                 onLongPress = onLongPressDeepThink,
                                 uncheckedInk = glassText,
+                                compact = compactActions,
                                 enabled = deepThinkEnabled
                             ) { checked ->
                                 Icon(
@@ -941,6 +1010,7 @@ fun ChatInput(
                                 onToggle = onToggleWebSearch,
                                 colors = colors,
                                 onLongPress = onLongPressWebSearch,
+                                compact = compactActions,
                                 uncheckedInk = glassText
                             ) { checked ->
                                 Icon(
@@ -981,7 +1051,7 @@ fun ChatInput(
                                 Spacer(Modifier.width(4.dp))
                                 Box(
                                     modifier = Modifier
-                                        .size(40.dp)
+                                        .size(if (compactActions) 36.dp else 40.dp)
                                         .clip(CircleShape)
                                         .clickable {
                                             if (showEmojiPicker) {
@@ -1001,6 +1071,7 @@ fun ChatInput(
                             Spacer(Modifier.weight(1f))
                             // 语音/发送圆钮的悬浮占位：圆钮叠在卡片右下角（见下面 VoiceSendButton）
                             Spacer(Modifier.width(44.dp))
+                        }
                         }
                     }
                 }
@@ -1067,6 +1138,7 @@ fun ChatInput(
                                 BasicTextField(
                                     value = TextFieldValue(if (expanded) "" else text, textSelection, if (expanded) null else textComposition),
                                     onValueChange = { v ->
+                                        if (v.text != text) draftEditedByUser = true
                                         text = v.text
                                         // 长按之后由「选词」带回来的选区一律不收（见 blockSelection 的说明）：
                                         // 把旧的光标位置原样传回去，选区一直是收拢的，系统选字工具条就没理由出现
@@ -1078,6 +1150,7 @@ fun ChatInput(
                                 cursorBrush = SolidColor(glassCursor),
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .then(draftContentMotion)
                                         .onGloballyPositioned { coords -> mainFieldWidthPx = coords.size.width }
                                         .focusRequester(mainFocusRequester)
                                         .onFocusChanged { focusState ->
@@ -1208,21 +1281,27 @@ fun ChatInput(
                     shadowElevation = 4.dp,
                     tonalElevation = 2.dp
                 ) {
-                    Column(Modifier.padding(horizontal = 6.dp, vertical = 10.dp)) {
-                        EMOJI_LIST.chunked(8).forEach { rowEmojis ->
+                    BoxWithConstraints(Modifier.padding(horizontal = 6.dp, vertical = 10.dp)) {
+                        val columns = (maxWidth / 32.dp).toInt().coerceIn(1, 8)
+                        Column(Modifier.heightIn(max = availableHeight * 0.4f)
+                            .verticalScroll(rememberScrollState())) {
+                        EMOJI_LIST.chunked(columns).forEach { rowEmojis ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceAround
                             ) {
                                 rowEmojis.forEach { em ->
                                     Box(
-                                        modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).clickable { if (emojiAvailable) text += em },
+                                        modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).clickable {
+                                            if (emojiAvailable) { draftEditedByUser = true; text += em }
+                                        },
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(em, fontSize = 22.sp)
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -1254,6 +1333,7 @@ private fun InputStateChip(
     /** 1.0.74 灰色不可用态（模型不支持 / 无对话可写） */
     enabled: Boolean = true,
     uncheckedInk: Color = colors.TextPrimary,
+    compact: Boolean = false,
     icon: @Composable (Boolean) -> Unit
 ) {
     // 选中态过渡动画与全 App 选项表同节奏（1.1.28）；两种边框结构不同保持硬切，底色/字色渐变
@@ -1273,22 +1353,30 @@ private fun InputStateChip(
                 else Modifier.border(1.dp, colors.Divider.copy(alpha = 0.6f), RoundedCornerShape(50))
             )
             .alpha(if (enabled) 1f else 0.38f)
+            .then(if (compact) Modifier.semantics { contentDescription = label } else Modifier)
             .combinedClickable(enabled = enabled, onClick = onToggle, onLongClick = if (enabled) onLongPress else null)
             .padding(horizontal = 8.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         icon(checked)
-        Spacer(Modifier.width(4.dp))
-        Text(
-            label,
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontSize = 12.sp,
-                fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal
-            ),
-            color = chipInk
-        )
+        if (!compact) {
+            Spacer(Modifier.width(4.dp))
+            Text(
+                label,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize = 12.sp,
+                    fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal
+                ),
+                color = chipInk,
+                maxLines = 1
+            )
+        }
     }
 }
+
+/** Fixed controls + chip icons/padding; labels are measured in the current font and display scale. */
+internal fun inputActionsWidthDp(deepLabelDp: Float, searchLabelDp: Float, image: Boolean, emoji: Boolean): Float =
+    166f + deepLabelDp + searchLabelDp + (if (image) 36f else 0f) + (if (emoji) 44f else 0f)
 
 // ──── 图片候选区：悬浮卡片，单行小缩略图（约 7 张一屏，超出右滑），右上角可删除 ────
 @Composable

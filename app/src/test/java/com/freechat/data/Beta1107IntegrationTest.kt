@@ -10,16 +10,18 @@ class Beta1107IntegrationTest {
 
     @Test fun allCustomVoiceModelsAreAvailableAndTheLocalPresetIsObserved() {
         val source = viewModel()
-        assertTrue(source.contains("BuiltInVoiceModel.createAll(BuildConfig.MIMO_TTS_KEY)"))
+        assertTrue(source.contains("BuiltInVoiceModel.createAll()")) // 2026-10-18：Key 收口服务器
         assertTrue(source.contains("settingsRepo.ttsPresetId.collect"))
     }
 
     @Test fun selectedVoiceIsUsedByTheActualChatSpeechPath() {
-        val source = viewModel().substringAfter("fun speakMessage(").substringBefore("private fun currentTtsModel")
+        // 2026-10-19 起音色装配抽成 mimoVoiceConfig（点播/预加载共用）——取景从它开始，钉同一件事
+        val source = viewModel().substringAfter("private suspend fun mimoVoiceConfig(").substringBefore("private fun currentTtsModel")
         assertTrue("The selected local voice must reach synthesis", source.contains("voicePresetRepo.playbackConfig"))
         assertTrue("Stock per-conversation overrides must not use a custom sample", source.contains("BuiltInVoiceModel.STOCK_API_ID"))
         assertTrue(source.contains("TtsController.reportConfigurationError"))
         assertTrue(source.contains("config, _ttsSpeed.value"))
+        assertTrue("点播路径仍在窗内", source.contains("fun speakMessage("))
     }
 
     @Test fun sceneReferencesAreRevalidatedAgainstFreshHistoryImmediatelyBeforeTheRequest() {

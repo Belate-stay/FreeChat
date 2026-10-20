@@ -6,7 +6,6 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.util.Log
-import com.freechat.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,20 +51,22 @@ import java.util.concurrent.TimeUnit
  * - 播放到缓存边界且还没合成好时进入「缓冲态」停住，等新段补上再续，不读满不回跳；
  * - 拖动 seek 只能在灰条（已合成范围）内跳转。
  *
- * 缓存：同一条消息第二次朗读直接读内存缓存秒播，进程被杀自动清空，不落盘。
- * 所有入口方法（speak/stop/pause/resume/seekTo）必须在主线程调用。
+ * 缓存：同一条消息第二次朗读直接读缓存秒播——内存 LRU + 磁盘一份（filesDir/tts_cache，attach 后生效），
+ * 进程被杀/重启不丢，不重复合成、不重复烧额度。AI 语音消息走 [preload] 自动预载。
+ * 所有入口方法（speak/stop/pause/resume/seekTo/preload）必须在主线程调用。
  */
 object TtsController {
     private const val TAG = "FreeChatTTS"
     private const val MIMO_URL = BuiltInVoiceModel.ENDPOINT
-    private val MIMO_KEY = BuildConfig.MIMO_TTS_KEY
+    // 2026-10-18：Key 收口服务器 —— 代理身份头由 BuiltInProxy 拦截器挂，这里不再持 Key
     private const val MAX_SEGMENT = 120   // 普通段最大字数
     private const val FIRST_SEGMENT_MAX = 30  // 首段更短，保证秒读（首段合成越快开播越早）
     private const val SYNTH_CONCURRENCY = 3  // 并行合成并发路数（保守值，避免服务端限流）
-    private const val MAX_CACHE_ENTRIES = 12  // 内存缓存最多保留的消息条数（LRU）
+    private const val MAX_CACHE_ENTRIES = 64  // 内存缓存最多保留的消息条数（LRU；语音消息预加载后要装得下一段对话）
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
     private val client = OkHttpClient.Builder()
+        .addInterceptor(BuiltInProxy.interceptor())
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .build()
@@ -122,6 +123,9 @@ object TtsController {
     // Retained after playback stops so creation screens and chat can explain the failed request.
     private val _lastError = MutableStateFlow<MiMoTtsError?>(null)
     val lastError: StateFlow<MiMoTtsError?> = _lastError.asStateFlow()
+    // 最近一次合成失败的类别（含 silent 预加载路径）——只给重试策略看
+    @Volatile
+    private var lastSynthesizeKind: MiMoTtsErrorKind? = null
 
     fun clearError() { _lastError.value = null }
 
@@ -136,10 +140,58 @@ object TtsController {
         val totalChars: Int
     )
 
-    // LRU 内存缓存（accessOrder=true），进程存活期间有效，杀后台自动释放
+    // LRU 内存缓存（accessOrder=true）；磁盘还有一份（见 readDiskCache/writeDiskCache），重启不失
     private val speechCache = object : LinkedHashMap<String, CachedSpeech>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedSpeech>?): Boolean =
             size > MAX_CACHE_ENTRIES
+    }
+    private val cacheLock = Any()
+    private fun cacheGet(key: String): CachedSpeech? = synchronized(cacheLock) { speechCache[key] }
+    private fun cachePut(key: String, value: CachedSpeech) = synchronized(cacheLock) { speechCache[key] = value }
+
+    // ── 磁盘缓存（2026-10-19 工单「自动下载到本地」）：合成一次永久落盘，
+    // 杀进程/重启后点按依然秒播、不重复烧额度。不挂 context 就退化成纯内存（老行为）。
+    @Volatile
+    private var appContext: android.content.Context? = null
+    private val gson = com.google.gson.Gson()
+
+    /** MainActivity 启动时挂一次 */
+    fun attach(context: android.content.Context) {
+        appContext = context.applicationContext
+    }
+
+    private class DiskSpeech(
+        val audios: List<String> = emptyList(),
+        val durations: List<Long> = emptyList(),
+        val totalChars: Int = 0
+    )
+
+    private fun diskFile(cacheKey: String): java.io.File? = appContext?.let {
+        java.io.File(it.filesDir, "tts_cache").apply { mkdirs() }.let { dir -> java.io.File(dir, "$cacheKey.json") }
+    }
+
+    private fun readDiskCache(cacheKey: String): CachedSpeech? = runCatching {
+        val f = diskFile(cacheKey) ?: return null
+        if (!f.exists()) return null
+        val dto = gson.fromJson(f.readText(), DiskSpeech::class.java) ?: return null
+        if (dto.audios.isEmpty() || dto.audios.size != dto.durations.size) return null
+        CachedSpeech(
+            Array<ByteArray?>(dto.audios.size) { i -> java.util.Base64.getDecoder().decode(dto.audios[i]) },
+            dto.durations.toLongArray(),
+            dto.totalChars
+        )
+    }.getOrNull()
+
+    private fun writeDiskCache(cacheKey: String, cached: CachedSpeech) {
+        runCatching {
+            if (cached.audios.any { it == null }) return
+            val f = diskFile(cacheKey) ?: return
+            f.writeText(gson.toJson(DiskSpeech(
+                audios = cached.audios.map { java.util.Base64.getEncoder().encodeToString(it) },
+                durations = cached.durations.toList(),
+                totalChars = cached.totalChars
+            )))
+        }
     }
 
     /** 开始朗读：切分 → 后台并行合成并缓存 → 边播边合成 */
@@ -179,9 +231,9 @@ object TtsController {
         _bufferFraction.value = 0f
         _isBuffering.value = false
 
-        // 命中缓存 → 直接秒播，不再合成（key 含文本指纹，防同 id 内容变化误命中）
+        // 命中缓存 → 直接秒播，不再合成（key 含文本指纹，防同 id 内容变化误命中）；内存没有再看磁盘
         val cacheKey = MiMoVoiceRequest.cacheIdentity(messageId, text, config)
-        val cached = speechCache[cacheKey]
+        val cached = cacheGet(cacheKey) ?: readDiskCache(cacheKey)?.also { cachePut(cacheKey, it) }
         if (cached != null && cached.totalChars == totalChars) {
             segmentAudios = cached.audios
             segmentDurations = cached.durations
@@ -202,6 +254,79 @@ object TtsController {
         }
 
         launchPlayback(0, 0L)
+    }
+
+    /**
+     * 预加载（2026-10-19 工单）：AI 发语音就自动把音频合成好进内存+磁盘缓存——不播放、不动播放态、错误静默。
+     * 点按即命中缓存秒播，不许点一下等半天。预载**顺序**合成（绝不和点播抢并发、绝不自己触发限流），
+     * 同一条语音防重复入队；不依赖 context（没挂也照常进内存缓存）。
+     */
+    private val preloadInFlight: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
+
+    // ── 预加载队列（2026-10-19 返修「随点随播」）──
+    // 全部预载串成**一条队**：同一时刻只合成一条语音的段，点播进行中队列让路。
+    // 旧版每条消息各起一条流水线——开对话预载 40 条 = 几十路并发直打上游 = 429 风暴，
+    // 连点播都被拖进限流退避里「等好久」。点播永远优先（speakSynthesizing 让路）。
+    private data class PreloadTask(val cacheKey: String, val segs: List<String>, val config: MiMoVoiceConfig)
+
+    private val preloadQueue = kotlinx.coroutines.channels.Channel<PreloadTask>(
+        kotlinx.coroutines.channels.Channel.UNLIMITED
+    )
+
+    @Volatile
+    private var speakSynthesizing = false
+
+    init {
+        scope.launch(Dispatchers.IO) {
+            for (task in preloadQueue) {
+                try {
+                    // 点播优先：正在给用户合成时，预载原地等
+                    while (speakSynthesizing) delay(200)
+                    val existing = cacheGet(task.cacheKey)
+                        ?: readDiskCache(task.cacheKey)?.also { cachePut(task.cacheKey, it) }
+                    if (existing != null && existing.totalChars == task.segs.sumOf { it.length }) continue
+                    val audios = arrayOfNulls<ByteArray>(task.segs.size)
+                    val durations = LongArray(task.segs.size)
+                    var ok = true
+                    for ((i, seg) in task.segs.withIndex()) {
+                        while (speakSynthesizing) delay(200)  // 中途也让路
+                        // 让路期间点播可能已把这条合成完落了缓存——收工，别重复烧额度
+                        if (cacheGet(task.cacheKey) != null) {
+                            ok = false
+                            break
+                        }
+                        val audio = synthesizeWithRetry(seg, task.config, silent = true)
+                        if (audio == null) {
+                            ok = false
+                            break
+                        }
+                        audios[i] = audio
+                        durations[i] = getAudioDuration(audio)
+                    }
+                    if (ok) {
+                        val done = CachedSpeech(audios, durations, task.segs.sumOf { it.length })
+                        cachePut(task.cacheKey, done)
+                        writeDiskCache(task.cacheKey, done)
+                    }
+                } finally {
+                    preloadInFlight.remove(task.cacheKey)
+                }
+            }
+        }
+    }
+
+    fun preload(messageId: String, text: String, config: MiMoVoiceConfig) {
+        try { MiMoVoiceRequest.validate(config) } catch (_: Exception) { return }
+        // 与 speak 完全同构的切段/指纹——点按后必须命中同一份缓存
+        val segs = if (BuiltInVoiceModel.apiModelId(config.modelId) == BuiltInVoiceModel.DESIGN_API_ID) {
+            listOf(cleanForSpeech(text)).filter { it.isNotBlank() }
+        } else splitForSpeech(text)
+        if (segs.isEmpty()) return
+        val cacheKey = MiMoVoiceRequest.cacheIdentity(messageId, text, config)
+        val existing = cacheGet(cacheKey) ?: readDiskCache(cacheKey)?.also { cachePut(cacheKey, it) }
+        if (existing != null && existing.totalChars == segs.sumOf { it.length }) return
+        if (!preloadInFlight.add(cacheKey)) return
+        preloadQueue.trySend(PreloadTask(cacheKey, segs, config))
     }
 
     /** 播放一段已合成的完整音频（自定义 TTS 模型），时间进度 */
@@ -234,11 +359,13 @@ object TtsController {
 
     /** 后台合成：先独占合成首段（最快响应秒播），首段完成后并行合成其余段。segs 为本地快照。 */
     private fun startSynthesis(cacheKey: String, segs: List<String>, config: MiMoVoiceConfig) {
+        // 点播合成优先（2026-10-19 随点随播）：预载队列在这期间让路，绝不跟用户抢带宽/触发限流
+        speakSynthesizing = true
         synthJob = scope.launch(Dispatchers.IO) {
             // 第一步：单独合成首段，独占网络/服务端不被并发挤占，实现秒播
             val first = segs.firstOrNull()
             if (first != null) {
-                val audio = synthesize(first, config)
+                val audio = synthesizeWithRetry(first, config)
                 if (audio != null) {
                     val dur = getAudioDuration(audio)
                     withContext(Dispatchers.Main) {
@@ -261,7 +388,7 @@ object TtsController {
                         async {
                             if (!isActive) return@async
                             val seg = segs[i]
-                            val audio = semaphore.withPermit { synthesize(seg, config) }
+                            val audio = semaphore.withPermit { synthesizeWithRetry(seg, config) }
                             if (audio != null) {
                                 val dur = getAudioDuration(audio)
                                 withContext(Dispatchers.Main) {
@@ -281,12 +408,13 @@ object TtsController {
                 updateBufferFraction()
                 // 全部段合成成功才写入缓存；有失败段则整条不缓存，下次重试
                 if (segmentAudios.all { it != null }) {
-                    speechCache[cacheKey] = CachedSpeech(
-                        segmentAudios, segmentDurations, totalChars
-                    )
+                    val done = CachedSpeech(segmentAudios.copyOf(), segmentDurations.copyOf(), totalChars)
+                    cachePut(cacheKey, done)
+                    writeDiskCache(cacheKey, done)  // 自动下载到本地：重启后点按依然秒播
                 }
             }
         }
+        synthJob?.invokeOnCompletion { speakSynthesizing = false }
     }
 
     /** 暂停（保留进度，可继续） */
@@ -474,19 +602,19 @@ object TtsController {
         return synthesize(text, config, "wav")
     }
 
-    /** MiMo's design and clone endpoints use complete non-stream responses. */
-    private suspend fun synthesize(text: String, config: MiMoVoiceConfig, format: String = "mp3"): ByteArray? =
+    /** MiMo's design and clone endpoints use complete non-stream responses. silent=预加载路径，错误不上报用户 */
+    private suspend fun synthesize(text: String, config: MiMoVoiceConfig, format: String = "mp3", silent: Boolean = false): ByteArray? =
         withContext(Dispatchers.IO) {
+            fun fail(error: MiMoTtsError): ByteArray? {
+                lastSynthesizeKind = error.kind
+                if (!silent) _lastError.value = error
+                return null
+            }
             try {
-                if (MIMO_KEY.isBlank()) {
-                    _lastError.value = MiMoTtsErrorPolicy.httpError(401)
-                    return@withContext null
-                }
                 val body = MiMoVoiceRequest.create(text, config, format).toString().toRequestBody(JSON_MEDIA)
 
                 val request = Request.Builder()
                     .url(MIMO_URL)
-                    .addHeader("Authorization", "Bearer $MIMO_KEY")
                     .addHeader("Content-Type", "application/json")
                     .post(body)
                     .build()
@@ -494,35 +622,48 @@ object TtsController {
                 val response = executeCancellable(request)
                 if (response.status !in 200..299) {
                     Log.w(TAG, "TTS HTTP ${response.status}")
-                    _lastError.value = MiMoTtsErrorPolicy.httpError(response.status,
-                        MiMoVoiceResponse.providerErrorCode(response.body))
-                    return@withContext null
+                    return@withContext fail(MiMoTtsErrorPolicy.httpError(response.status,
+                        MiMoVoiceResponse.providerErrorCode(response.body)))
                 }
                 if (MiMoVoiceResponse.hasProviderError(response.body)) {
-                    _lastError.value = MiMoTtsErrorPolicy.httpError(400,
-                        MiMoVoiceResponse.providerErrorCode(response.body))
-                    return@withContext null
+                    return@withContext fail(MiMoTtsErrorPolicy.httpError(400,
+                        MiMoVoiceResponse.providerErrorCode(response.body)))
                 }
                 try {
                     MiMoVoiceResponse.decode(response.body)
                 } catch (_: VoiceConfigurationException) {
-                    _lastError.value = MiMoTtsError(MiMoTtsErrorKind.INVALID_RESPONSE, "MiMo 没有返回有效音频，请重试或检查模型权限。")
-                    null
+                    fail(MiMoTtsError(MiMoTtsErrorKind.INVALID_RESPONSE, "MiMo 没有返回有效音频，请重试或检查模型权限。"))
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: VoiceConfigurationException) {
-                reportConfigurationError(error.message.orEmpty())
+                lastSynthesizeKind = MiMoTtsErrorKind.INVALID_CONFIGURATION
+                if (!silent) reportConfigurationError(error.message.orEmpty())
                 null
             } catch (_: IOException) {
-                _lastError.value = MiMoTtsError(MiMoTtsErrorKind.NETWORK, "语音请求连接失败，请检查网络后重试。")
-                null
+                fail(MiMoTtsError(MiMoTtsErrorKind.NETWORK, "语音请求连接失败，请检查网络后重试。"))
             } catch (_: Exception) {
                 Log.w(TAG, "TTS 合成失败")
-                _lastError.value = MiMoTtsError(MiMoTtsErrorKind.UNKNOWN, "MiMo 语音创建失败，请稍后重试。")
-                null
+                fail(MiMoTtsError(MiMoTtsErrorKind.UNKNOWN, "MiMo 语音创建失败，请稍后重试。"))
             }
         }
+
+    /**
+     * 段合成带退避重试：429/限流/网络抖动是瞬时的（长语音旧版按句切段一口气打十几个请求就是这里被限流的）。
+     * 鉴权/权限/配置类错误不重试——重试也救不回来，还多烧配额。
+     */
+    private suspend fun synthesizeWithRetry(seg: String, config: MiMoVoiceConfig, attempts: Int = 3, silent: Boolean = false): ByteArray? {
+        for (i in 1..attempts) {
+            val audio = synthesize(seg, config, silent = silent)
+            if (audio != null) return audio
+            when (lastSynthesizeKind) {
+                MiMoTtsErrorKind.QUOTA, MiMoTtsErrorKind.NETWORK, MiMoTtsErrorKind.UNKNOWN -> {}
+                else -> return null
+            }
+            if (i < attempts) delay(1500L * i)
+        }
+        return null
+    }
 
     private data class HttpSpeechReply(val status: Int, val body: String)
 
@@ -606,7 +747,7 @@ object TtsController {
     }
 
     /** 按句切分文本，控制每段长度，保证每段合成快 */
-    private fun splitForSpeech(text: String): List<String> {
+    internal fun splitForSpeech(text: String): List<String> {
         val clean = cleanForSpeech(text)
         if (clean.isBlank()) return emptyList()
 
@@ -616,24 +757,33 @@ object TtsController {
             .map { it.trim() }
             .filter { it.isNotBlank() }
 
+        // 2026-10-19：句子**合并成段**（≤MAX_SEGMENT）。旧版一句一段——一条30s语音（约十句）
+        // 被切成近十个请求，首段播完（约2s）后并行段打出去直接被限流 429，
+        // 用户看到「额度不足或请求过于频繁」= 真凶就在这。合并后30s≈2段、60s≈3段。
         val result = mutableListOf<String>()
-        for (part in rawParts) {
-            if (part.length <= MAX_SEGMENT) {
-                result.add(part)
-            } else {
-                // 超长句按逗号/顿号再切
-                val subParts = part.split(Regex("(?<=[，,、])")).map { it.trim() }.filter { it.isNotBlank() }
-                val buf = StringBuilder()
-                for (s in subParts) {
-                    buf.append(s)
-                    if (buf.length >= MAX_SEGMENT) {
-                        result.add(buf.toString())
-                        buf.clear()
-                    }
-                }
-                if (buf.isNotBlank()) result.add(buf.toString())
+        val buf = StringBuilder()
+        fun flush() {
+            if (buf.isNotBlank()) {
+                result.add(buf.toString())
+                buf.clear()
             }
         }
+        for (part in rawParts) {
+            if (part.length > MAX_SEGMENT) {
+                // 超长句按逗号/顿号再切并入段
+                flush()
+                val subParts = part.split(Regex("(?<=[，,、])")).map { it.trim() }.filter { it.isNotBlank() }
+                for (s in subParts) {
+                    if (buf.isNotEmpty() && buf.length + s.length > MAX_SEGMENT) flush()
+                    buf.append(s)
+                    if (buf.length >= MAX_SEGMENT) flush()
+                }
+            } else {
+                if (buf.isNotEmpty() && buf.length + part.length > MAX_SEGMENT) flush()
+                buf.append(part)
+            }
+        }
+        flush()
 
         // 首段再限短：保证第一段合成快、尽早开播（秒读）
         if (result.isNotEmpty() && result.first().length > FIRST_SEGMENT_MAX) {

@@ -1,5 +1,11 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.FloatingWindowBackButton
+import com.freechat.ui.adaptive.FloatingWindowCloseHandler
+import com.freechat.ui.adaptive.floatingHeaderInset
+
+import com.freechat.ui.adaptive.pageActionWidth
+
 import com.freechat.ui.components.HeaderIconButton
 
 import androidx.activity.compose.BackHandler
@@ -44,6 +50,7 @@ import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.selectedFill
 import com.freechat.ui.theme.frostedCard
+import com.freechat.ui.theme.floatingSurface
 import com.freechat.viewmodel.ChatViewModel
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
@@ -127,6 +134,7 @@ fun ModelEditorScreen(
         nativeSearch != (editing?.supportsNativeSearch ?: false)
 
     var showUnsaved by remember { mutableStateOf(false) }
+    var pendingWindowClose by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showDelete by remember { mutableStateOf(false) }
 
     // ===== 1.1.26.5 「导入已有多模态模型」：跨五个模型池快取信息免重输（B 提示框先弹） =====
@@ -142,7 +150,13 @@ fun ModelEditorScreen(
     fun tryBack() {
         if (hasChanges) showUnsaved = true else onBack()
     }
-    BackHandler(enabled = true) { tryBack() }
+    BackHandler(enabled = com.freechat.ui.animation.LocalPageActive.current) { tryBack() }
+    FloatingWindowCloseHandler { dismiss ->
+        if (hasChanges) {
+            pendingWindowClose = dismiss
+            showUnsaved = true
+        } else dismiss()
+    }
 
     fun save() {
         val m = ModelInfo(
@@ -204,24 +218,28 @@ fun ModelEditorScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp))
-                .padding(horizontal = 20.dp)
+                .padding(horizontal = 20.dp + com.freechat.ui.adaptive.tabletReadingGutter())
         ) {
             // 1.1.26.5：添加页顶部「导入已有多模态模型」——先弹模态适配提醒，再从五个模型池选模型快填。
             // 1.1.29.3 ①：改**悬浮置顶**——画在模糊带之上、覆盖滚动表单（同模型池页「添加模型」），
             // 分页线撤掉；表单自己滚、头部留出卡片占位。
-            if (isAdd) {
-                Spacer(Modifier.height(60.dp))
-            }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .jellyOverscroll()
                     .verticalScroll(com.freechat.ui.animation.rememberTopOnEntryScrollState())
-                    .padding(bottom = 40.dp),
+                    // 2026-10-19 返修三进（图4→图5）：顶留白必须挪进滚动内容（关于页 A 同款病根）——
+                    // 挂外层=滚动视口缩在标题栏下，上滑内容被视口顶缘硬裁、进不了模糊带（顶部糊不出残影）。
+                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp), bottom = 40.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+            // 2026-10-19 返修二进：头部占位必须在**滚动区内部**——挂在滚动区外时，表单被压到
+            // 模糊带下缘就被视口硬裁（「API Key」齐腰切断的真凶），内容钻不进高斯渐变、糊不了。
+            // 占位进滚动内容后，行上滑一路钻进带子里被高斯模糊盖住（模型池页同款结构）。
+            if (isAdd) {
+                Spacer(Modifier.height(60.dp))
+            }
             run {
                 // 1.0.71 顺序调整（用户点名）：名称 → URL地址 → API Key → 模型 ID → 获取模型列表 → 备注 → 上下文长度
                 // 1.1.29 工单⑤：必填项标签后缀红星，输入框内不再写「（必填）/（选填）」
@@ -236,7 +254,7 @@ fun ModelEditorScreen(
                 // ===== 获取模型列表（cc-switch 式；取不到照样手填） =====
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .pageActionWidth()
                         .height(48.dp)
                         .editorSurface(colors, RoundedCornerShape(14.dp))
                         .clickable { fetchCatalog() },
@@ -317,7 +335,7 @@ fun ModelEditorScreen(
 
             Spacer(Modifier.height(8.dp))
 
-            if (advancedMaterial) Box(Modifier.fillMaxWidth().height(52.dp)
+            if (advancedMaterial) Box(Modifier.pageActionWidth().height(52.dp)
                 .editorSurface(colors, RoundedCornerShape(16.dp), selected = requiredFilled,
                     fallback = if (requiredFilled) colors.Primary else colors.SurfaceVariant)
                 .clickable(enabled = requiredFilled, role = androidx.compose.ui.semantics.Role.Button) { save() },
@@ -326,7 +344,7 @@ fun ModelEditorScreen(
                     color = if (requiredFilled) colors.OnPrimary else colors.TextTertiary)
             } else {
                 Button(onClick = { save() }, enabled = requiredFilled,
-                    modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.pageActionWidth().height(52.dp), shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.Primary,
                         contentColor = colors.OnPrimary, disabledContainerColor = colors.SurfaceVariant,
                         disabledContentColor = colors.TextTertiary)) {
@@ -337,9 +355,13 @@ fun ModelEditorScreen(
         }
 
         // 1.1.29.3 ①：添加页模糊带下延到「导入已有多模态模型」卡片下方（内容上滑钻进高斯渐变被覆盖）
+        // 2026-10-19 返修：solidHeight 默认值 = 带高-渐隐区，带子下延时**实心底板跟着长高**，
+        // 卡片整区被实色板盖死（前两项滑到顶部被实色挡完、API Key 那行滑上来才见模糊）——
+        // 底板钉回标题栏（同侧滑页「搜索/新对话后方也模糊」的写法），卡片区只剩高斯渐变。
         TopBarBackdrop(hazeState, colors.Background,
             if (isAdd) HazeSpec.drawerTopBandHeightDp(statusBarHeightDp, ImportHeaderBandDp)
-            else HazeSpec.topBandHeightDp(statusBarHeightDp))
+            else HazeSpec.topBandHeightDp(statusBarHeightDp),
+            solidHeight = HazeSpec.titleBarHeightDp(statusBarHeightDp))
 
         // 1.1.29.3 ①：「导入已有多模态模型」悬浮置顶——画在模糊带之上、覆盖滚动表单（分页线已撤）
         if (isAdd) {
@@ -349,8 +371,15 @@ fun ModelEditorScreen(
                     .fillMaxWidth()
                     .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp))
                     .padding(horizontal = 20.dp)
+                    .pageActionWidth()
                     .height(48.dp)
-                    .editorSurface(colors, RoundedCornerShape(14.dp))
+                    // 2026-10-19 返修：悬浮卡是「正文上方的操作区」，高级材质走 floatingSurface
+                    // 透光不透物磨砂玻璃（旧 editorSurface 实色卡面把滑到其下的表单项整块挡死）；
+                    // 非高级材质保持原实色卡零变化。
+                    .then(
+                        if (advancedMaterial) Modifier.floatingSurface(hazeState, isDark, RoundedCornerShape(14.dp))
+                        else Modifier.editorSurface(colors, RoundedCornerShape(14.dp))
+                    )
                     .clickable { showImportHint = true },
                 contentAlignment = Alignment.Center
             ) {
@@ -376,10 +405,10 @@ fun ModelEditorScreen(
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            HeaderIconButton(onClick = { tryBack() }) {
+            FloatingWindowBackButton(onClick = { tryBack() }) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
@@ -394,6 +423,7 @@ fun ModelEditorScreen(
                     Icon(Icons.Filled.DeleteOutline, s.deleteModel, tint = colors.ErrorRed, modifier = Modifier.size(22.dp))
                 }
             }
+            com.freechat.ui.adaptive.PaneExpandButton()
         }
 
         // 获取成功 → 模型选择弹层：点选即填
@@ -442,16 +472,26 @@ fun ModelEditorScreen(
         // 点外面 / 返回键 = 原来的 onDismissRequest（留在本页继续编辑）
         SheetPanel(
             visible = showUnsaved,
-            onDismiss = { showUnsaved = false },
+            onDismiss = { showUnsaved = false; pendingWindowClose = null },
             title = s.unsavedTitle,
             colors = colors,
             isDark = isDark,
             advancedMaterial = advancedMaterial,
             hazeState = hazeState,
-            confirmLabel = s.delete,
+            confirmLabel = s.discardChanges,
+            cancelLabel = when (s.localeCode) {
+                "zh-CN" -> "继续编辑"
+                "zh-TW" -> "繼續編輯"
+                else -> "Continue editing"
+            },
             // 危险操作：确认键红底，别让它长得跟普通「确定」一样
             confirmDanger = true,
-            onConfirm = { showUnsaved = false; onBack() }
+            onConfirm = {
+                showUnsaved = false
+                val close = pendingWindowClose
+                pendingWindowClose = null
+                if (close != null) close() else onBack()
+            }
         ) {
             Text(s.unsavedMessage, color = colors.TextSecondary)
         }

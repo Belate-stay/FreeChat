@@ -1,5 +1,13 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.FloatingWindowBackButton
+import com.freechat.ui.adaptive.FloatingWindowCloseHandler
+import com.freechat.ui.adaptive.floatingHeaderInset
+
+import com.freechat.ui.adaptive.pageActionWidth
+
+import com.freechat.ui.adaptive.paneImePadding
+
 import com.freechat.ui.components.HeaderIconButton
 
 import androidx.activity.compose.BackHandler
@@ -16,8 +24,16 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import com.freechat.data.CharacterPresentationPolicy
+import com.freechat.data.CharacterSavePolicy
+import com.freechat.ui.adaptive.LocalPaneSize
+import com.freechat.ui.adaptive.LocalPaneControls
+import com.freechat.ui.adaptive.LocalTabletUi
+import com.freechat.ui.adaptive.PaneExpandButton
+import com.freechat.ui.adaptive.paneInteraction
+import com.freechat.ui.adaptive.tabletText
 import com.freechat.ui.animation.MotionPolicy
 import com.freechat.ui.animation.LocalMotionEnabled
+import com.freechat.ui.animation.LocalPageActive
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -26,7 +42,7 @@ import com.freechat.ui.animation.FreeChatAnimation
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.window.Dialog
+import com.freechat.ui.theme.AppDialog as Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -37,6 +53,7 @@ import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -44,7 +61,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import com.freechat.ui.animation.jellyOverscroll
-import com.freechat.ui.animation.rememberTopOnEntryScrollState
+import com.freechat.ui.adaptive.rememberPaneScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -64,6 +81,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -89,8 +107,8 @@ import com.freechat.i18n.AppStrings
 import com.freechat.i18n.LocalStrings
 import com.freechat.model.*
 import kotlinx.coroutines.launch
-import com.freechat.proactive.ProactiveScheduler
 import com.freechat.ui.components.SheetActionRow
+import com.freechat.ui.components.WechatBindDialog
 import com.freechat.ui.components.SheetOption
 import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.theme.FreeChatColors
@@ -116,6 +134,18 @@ import com.freechat.ui.theme.hazeBackground
 import com.freechat.ui.components.TopBarBackdrop
 import com.freechat.ui.components.TopBarBackdropSource
 
+private enum class CharacterCreationCategory(val icon: ImageVector) {
+    MODE(Icons.Filled.AutoStories),
+    PERSONA(Icons.Filled.Person),
+    SIMULATION(Icons.Filled.Tune);
+
+    fun title(s: AppStrings): String = when (this) {
+        MODE -> s.dialogueMode
+        PERSONA -> s.tabletText("角色人设", "角色人設", "Character persona")
+        SIMULATION -> s.characterSetup
+    }
+}
+
 /**
  * 人物设定页：拟人陪伴角色的创建与配置（也用于再次编辑已有角色）。
  * 角色名必填；性别/年龄/MBTI（类型+四维滑块联动）/性格/记忆感知共同塑造人物。
@@ -128,7 +158,11 @@ fun CharacterSetupScreen(
     onBack: () -> Unit,
     onCreate: (CharacterProfile) -> Unit,
     onSaveSimulation: (CharacterProfile) -> Unit = {},
-    initial: CharacterProfile? = null
+    initial: CharacterProfile? = null,
+    conversationId: String? = null,
+    conversationHasMessages: Boolean? = null,
+    isSavingBlocked: Boolean = false,
+    canSubmit: () -> Boolean = { true }
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
@@ -137,9 +171,15 @@ fun CharacterSetupScreen(
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val motionEnabled = LocalMotionEnabled.current
+    val pageActive = LocalPageActive.current
+    val paneSize = LocalPaneSize.current
+    val wideForm = LocalTabletUi.current && paneSize.width >= 840.dp
     val settingsScope = rememberCoroutineScope()
-    val settingsScrollState = rememberTopOnEntryScrollState()
+    val settingsScrollState = rememberPaneScrollState()
+    val personaScrollState = rememberPaneScrollState()
+    val functionalScrollState = rememberPaneScrollState()
     var functionalSettingsTop by remember { mutableIntStateOf(0) }
+    var functionalRevealTick by remember { mutableIntStateOf(0) }
     val normInitial = initial?.normalized()
     val langModels by viewModel.languageModels.collectAsState()
     val visionModels by viewModel.visionModels.collectAsState()
@@ -173,6 +213,30 @@ fun CharacterSetupScreen(
     var visionModelId by remember { mutableStateOf(initial?.visionModelId ?: "") }
     var visualModelId by remember { mutableStateOf(initial?.visualModelId ?: "") }
     var enhancedSceneContinuity by remember { mutableStateOf(normInitial?.enhancedSceneContinuity ?: false) }
+    // 允许语音回复（2026-10-19）：模型自决用不用；连接微信时置灰不可开（不支持）
+    var allowVoiceReply by remember { mutableStateOf(normInitial?.allowVoiceReply ?: false) }
+    // 子设置（1.2.0.9 二稿·只选音色）：音色池=跟随全局/自建音色/预设音色——模型不再让用户选，
+    // 引擎是音色的实现细节（自建走复刻回放、预设名走 MiMo-V2.5-TTS），解析见 ChatViewModel
+    var voiceTimbre by remember { mutableStateOf(normInitial?.voiceTimbre ?: "") }
+    var showVoiceTimbreSheet by remember { mutableStateOf(false) }
+    // 连接微信（2026-10-20 工单）：模拟设置页主项；「主动智能」是它的子项（连接开启后才显示）。
+    // 换绑确认=微信只能连一个对话。
+    var wechatBindTick by remember { mutableStateOf(0) }
+    var showWechatBind by remember { mutableStateOf(false) }
+    var showWechatRebindConfirm by remember { mutableStateOf(false) }
+    // 连接态进页即查真值（2026-10-20 病根：缓存 30s 过期/没查过时 null 被 == true 判成「未连接」——
+    // 显示假阴、主动智能子项跟着藏）。查询失败保留上次显示；tick（绑定/解绑）触发重查。
+    var wechatBoundHere by remember(conversationId) { mutableStateOf(false) }
+    LaunchedEffect(conversationId, wechatBindTick) {
+        if (conversationId == null) return@LaunchedEffect
+        val auth = com.freechat.sync.Session.loadAuth() ?: return@LaunchedEffect
+        runCatching {
+            val o = com.freechat.sync.ApiClient.wechatStatus(auth.token)
+            val boundTo = if (o.get("bound")?.asBoolean == true) o.get("conv_id")?.asString else null
+            wechatBoundHere = boundTo == conversationId
+        }
+    }
+    val wechatConnected = wechatBoundHere
     // 图片预设（1.1.26.6）：画幅/主体两组选项，仅作提示词随场景图请求送出
     var imagePresetAspect by remember { mutableStateOf(normInitial?.imagePresetAspect ?: 0) }
     var imagePresetSubject by remember { mutableStateOf(normInitial?.imagePresetSubject ?: 0) }
@@ -208,20 +272,8 @@ fun CharacterSetupScreen(
     var supportingCast by remember { mutableStateOf(initial?.supportingCast ?: "") }
     var worldRules by remember { mutableStateOf(initial?.worldRules ?: "") }
     var userPersona by remember { mutableStateOf(initial?.userPersona ?: "") }
-    // 精准到点依赖系统的「闹钟和提醒」权限。没授权也能用，只是到点会有几分钟浮动，
-    // 所以这里只是提示、不阻断。用户从系统设置页返回时要重新读一次（否则点了授权回来还显示未授权）
+    // 2026-10-20：主动智能云端化——闹钟权限/本地排程提示整块退役（云端定时，不需要本机闹钟）
     val setupContext = LocalContext.current
-    var exactAlarmOk by remember { mutableStateOf(ProactiveScheduler.canScheduleExact(setupContext)) }
-    val setupLifecycle = LocalLifecycleOwner.current
-    DisposableEffect(setupLifecycle) {
-        val obs = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                exactAlarmOk = ProactiveScheduler.canScheduleExact(setupContext)
-            }
-        }
-        setupLifecycle.lifecycle.addObserver(obs)
-        onDispose { setupLifecycle.lifecycle.removeObserver(obs) }
-    }
     // 导入角色时带回的 AI 人设提示词（personaPrompt），创建时原样使用、不重新生成
     var importedPersonaPrompt by remember { mutableStateOf<String?>(null) }
 
@@ -234,6 +286,7 @@ fun CharacterSetupScreen(
     var lastHeavy by remember { mutableStateOf(HeavyToggle.RETRIEVAL) }
     SideEffect { pendingHeavy?.let { lastHeavy = it } }
     var showDiscardDialog by remember { mutableStateOf(false) }
+    var pendingWindowClose by remember { mutableStateOf<(() -> Unit)?>(null) }
     // 编辑模式状态（仅编辑已有角色时用）：预览态=人物设定项只读灰色，编辑态=可改
     var isEditMode by remember { mutableStateOf(false) }
     var showAvatarMenu by remember { mutableStateOf(false) }
@@ -277,6 +330,9 @@ fun CharacterSetupScreen(
     }
 
     val isEditing = initial != null
+    val tabletCreation = LocalTabletUi.current && !isEditing
+    var selectedCreationCategory by remember { mutableStateOf(CharacterCreationCategory.MODE) }
+    var creationRevealTick by remember { mutableIntStateOf(0) }
     // 1.0.93 流程重构：创建先选对话模式（阶段一）再进设定（阶段二）；编辑直接进阶段二
     var modeChosen by remember { mutableStateOf(isEditing) }
     // 人物设定项是否可编辑：创建时或编辑态下可编辑；编辑已有角色的预览态只读
@@ -305,8 +361,27 @@ fun CharacterSetupScreen(
         openingLines = normInitial?.openingLines?.ifEmpty { listOf("") } ?: listOf("")
         relationshipPreset = normInitial?.relationshipPreset ?: ""
         relationshipText = normInitial?.relationshipText ?: ""
-        // 模拟设置字段**不在此处回滚**（1.0.99.4b）：功能设置与人设解耦（1.0.97），
-        // 返回即自动保存 —— 跟着人设的「放弃更改」一起回滚是两份 diff 的老坑
+        langModelId = initial?.languageModelId ?: ""
+        deepThinkingMode = normInitial?.deepThinkingMode ?: true
+        webSearch = initial?.enableWebSearch
+        visionModelId = initial?.visionModelId ?: ""
+        visualModelId = initial?.visualModelId ?: ""
+        dialogueMode = normInitial?.dialogueMode
+        plotLength = normInitial?.plotLength ?: 1
+        replyBufferSeconds = initial?.replyBufferSeconds ?: 3
+        replyBufferEnabled = initial?.replyBufferEnabled ?: true
+        sleepSimulation = normInitial?.sleepSimulation ?: false
+        timePerception = normInitial?.timePerception ?: false
+        highQualityMemory = normInitial?.highQualityMemory ?: false
+        deepThinking = normInitial?.deepThinking ?: false
+        aiCreativity = normInitial?.aiCreativity ?: CharacterProfile.DEFAULT_AI_CREATIVITY
+        proactiveEnabled = normInitial?.proactiveEnabled ?: false
+        enhancedSceneContinuity = normInitial?.enhancedSceneContinuity ?: false
+        allowVoiceReply = normInitial?.allowVoiceReply ?: false
+        voiceTimbre = normInitial?.voiceTimbre ?: ""
+        imagePresetAspect = normInitial?.imagePresetAspect ?: 0
+        imagePresetSubject = normInitial?.imagePresetSubject ?: 0
+        importedPersonaPrompt = null
         supportingCast = initial?.supportingCast ?: ""
         worldRules = initial?.worldRules ?: ""
         userPersona = initial?.userPersona ?: ""
@@ -332,6 +407,8 @@ fun CharacterSetupScreen(
         visionModelId = visionModelId,
         visualModelId = visualModelId,
         enhancedSceneContinuity = enhancedSceneContinuity,
+        allowVoiceReply = allowVoiceReply,
+        voiceTimbre = voiceTimbre,
         imagePresetAspect = imagePresetAspect,
         imagePresetSubject = imagePresetSubject,
         enableWebSearch = webSearch,
@@ -366,65 +443,33 @@ fun CharacterSetupScreen(
     fun buildSimulationProfile() = initial?.let {
         CharacterPresentationPolicy.withSimulationSettings(it, buildProfile())
     } ?: buildProfile()
-    val hasChanges = initial == null || buildProfile() != initial
-    // 人设字段的未保存改动：模拟设置不算（它们返回即自动保存，与人设解耦——
-    // hasChanges 的 diff 里混着 8 个模拟字段，直接拿来弹「放弃更改」会问一个不存在的问题）
-    val personaChanged = initial?.let { base ->
-        buildProfile().copy(
-            replyBufferSeconds = base.replyBufferSeconds,
-            replyBufferEnabled = base.replyBufferEnabled,
-            dialogueMode = base.dialogueMode,
-            plotLength = base.plotLength,
-            sleepSimulation = base.sleepSimulation,
-            timePerception = base.timePerception,
-            highQualityMemory = base.highQualityMemory,
-            deepThinking = base.deepThinking,
-            aiCreativity = base.aiCreativity,
-            proactiveEnabled = base.proactiveEnabled,
-            enhancedSceneContinuity = base.enhancedSceneContinuity,
-            imagePresetAspect = base.imagePresetAspect,
-            imagePresetSubject = base.imagePresetSubject
-        ) != base
-    } ?: false
-    // 功能设置独立于角色提示词：预览态可修改，保存/返回不会重新学习角色。
-    val simulationChanged = initial != null && (
-        replyBufferSeconds != initial.replyBufferSeconds ||
-        replyBufferEnabled != initial.replyBufferEnabled ||
-        dialogueMode != normInitial?.dialogueMode ||
-        plotLength != initial.plotLength ||
-        sleepSimulation != initial.sleepSimulation ||
-        timePerception != initial.timePerception ||
-        highQualityMemory != initial.highQualityMemory ||
-        (deepThinking && highQualityMemory) != initial.deepThinking ||
-        aiCreativity != initial.aiCreativity ||
-        proactiveEnabled != initial.proactiveEnabled ||
-        langModelId != initial.languageModelId ||
-        deepThinkingMode != initial.deepThinkingMode ||
-        visionModelId != initial.visionModelId ||
-        visualModelId != initial.visualModelId ||
-        enhancedSceneContinuity != initial.enhancedSceneContinuity ||
-        imagePresetAspect != initial.imagePresetAspect ||
-        imagePresetSubject != initial.imagePresetSubject ||
-        webSearch != initial.enableWebSearch
-    )
+    // Compare the editable representation to itself, so legacy normalization is not a user edit.
+    val initialDraft = remember { buildProfile() }
+    val draft = buildProfile()
+    val personaChanged = isEditing && CharacterSavePolicy.hasPersonaChanges(initialDraft, draft)
+    val simulationChanged = isEditing && CharacterSavePolicy.hasSimulationChanges(initialDraft, draft)
+    val hasChanges = draft != initialDraft || (!isEditing && dialogueMode != null)
 
     fun requestBack() {
+        if (!pageActive) return
         when {
+            hasChanges && isEditing -> showUnsavedChanges = true
+            hasChanges -> showDiscardDialog = true
+            isEditMode -> isEditMode = false
             !isEditing && modeChosen -> modeChosen = false
-            !isEditing -> onBack()
-            isEditMode -> {
-                // 模拟设置返回即自动保存，不跟人设的「放弃更改」陪葬（1.0.99.4b）
-                if (simulationChanged) onSaveSimulation(buildSimulationProfile())
-                if (personaChanged) showUnsavedChanges = true else { isEditMode = false; resetToInitial() }
-            }
-            simulationChanged -> onSaveSimulation(buildSimulationProfile())
-            else -> onBack()  // 编辑模式预览态无改动：直接返回
+            else -> onBack()
         }
     }
 
-    BackHandler { requestBack() }
+    BackHandler(enabled = pageActive) { requestBack() }
+    FloatingWindowCloseHandler { dismiss ->
+        if (hasChanges) {
+            pendingWindowClose = dismiss
+            if (isEditing) showUnsavedChanges = true else showDiscardDialog = true
+        } else dismiss()
+    }
 
-        val canStart = name.isNotBlank()
+    val canStart = name.isNotBlank()
     val mbtiIncomplete = mbtiSelectedCount() in 1..3
     // 对话模式（1.0.53）：
     //  · modeMissing —— 创建时还没选档位（不选不给建，点了「创建角色」会拦一道提示）；
@@ -433,9 +478,29 @@ fun CharacterSetupScreen(
     //    这正是用户报的「切换了却不变」的根因 —— 与其让用户改了却没效果，不如明说不能改。
     val modeMissing = !isEditing && dialogueMode == null
     val convMessages by viewModel.messages.collectAsState()
-    val modeLocked = isEditing && convMessages.isNotEmpty()
+    val modeLocked = isEditing && (conversationHasMessages ?: convMessages.isNotEmpty())
     var showModeMissing by remember { mutableStateOf(false) }
     var showModeLocked by remember { mutableStateOf(false) }
+
+    fun savingAllowed(): Boolean {
+        if (!isSavingBlocked && canSubmit()) return true
+        android.widget.Toast.makeText(context, characterSaveBlockedMessage(s.localeCode), android.widget.Toast.LENGTH_SHORT).show()
+        return false
+    }
+
+    fun submitDraft() {
+        if (!savingAllowed()) return
+        showSaveConfirm = false
+        if (isEditing && !personaChanged) {
+            onSaveSimulation(buildSimulationProfile())
+            return
+        }
+        if (!canStart) return
+        if (mbtiIncomplete) { showMbtiIncomplete = true; return }
+        if (modeMissing) { showModeMissing = true; return }
+        onCreate(buildProfile())
+    }
+
     var avatarCropSource by remember { mutableStateOf<Uri?>(null) }
     val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) avatarCropSource = uri
@@ -482,7 +547,31 @@ fun CharacterSetupScreen(
             appearanceImageDescs = profile.appearanceImageDescs
         }
         importedPersonaPrompt = profile.personaPrompt.ifBlank { null }
+        langModelId = profile.languageModelId
+        visionModelId = profile.visionModelId
+        visualModelId = profile.visualModelId
+        deepThinkingMode = profile.deepThinkingMode
+        webSearch = profile.enableWebSearch
+        plotLength = profile.plotLength
+        replyBufferSeconds = profile.replyBufferSeconds
+        replyBufferEnabled = profile.replyBufferEnabled
+        sleepSimulation = profile.sleepSimulation
+        timePerception = profile.timePerception
+        highQualityMemory = profile.highQualityMemory
+        deepThinking = profile.deepThinking
+        aiCreativity = profile.aiCreativity
+        proactiveEnabled = profile.proactiveEnabled
+        enhancedSceneContinuity = profile.enhancedSceneContinuity
+        allowVoiceReply = profile.allowVoiceReply
+        voiceTimbre = profile.voiceTimbre
+        imagePresetAspect = profile.imagePresetAspect
+        imagePresetSubject = profile.imagePresetSubject
         if (adoptMode) dialogueMode = profile.dialogueMode
+        if (tabletCreation) {
+            modeChosen = true
+            selectedCreationCategory = CharacterCreationCategory.PERSONA
+            creationRevealTick++
+        }
     }
 
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -639,33 +728,9 @@ fun CharacterSetupScreen(
         )
     }
 
-    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
-        com.freechat.ui.animation.PageMotion(targetState = modeChosen, modifier = Modifier.fillMaxSize(),
-            distancePx = pageTravel.toFloat(), forward = { _, target -> target },
-            label = "character_creation_page") { settingsPage ->
-        if (!settingsPage) {
-            DialogueModeScreen(dialogueMode, plotLength, { dialogueMode = it }, { plotLength = it },
-                onNext = { if (dialogueMode != null) modeChosen = true },
-                onBack = { requestBack() }, onImport = { importPicker.launch("*/*") }, hazeState = hazeState)
-        } else {
-        Box(Modifier.fillMaxSize()) {
-        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                // 键盘让位（1.0.50）：App 是 adjustNothing + edge-to-edge，系统不会顶窗口，
-                // 得自己把视口按键盘高度缩回来。**必须放在 verticalScroll 之前** ——
-                // 放后面就成了「滚动内容里的一段留白」，视口还是被键盘盖着的那一整屏，
-                // 光标该被挡住还是被挡住。放前面 = 可视区真的变矮，内容才有地方滚上来。
-                .imePadding()
-                // 果冻边界冗余（1.1.26.6）：顶/底继续拖跟手位移带阻尼，松手回弹
-                .jellyOverscroll()
-                .verticalScroll(settingsScrollState)
-                .padding(top = settingsTopPadding, bottom = 40.dp)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+    Box(Modifier.fillMaxSize().then(if (!tabletCreation) Modifier.pageBackground(colors.Background) else Modifier)) {
+        val personaSection: @Composable ColumnScope.() -> Unit = {
+            if (!tabletCreation) {
             SectionLabel(Icons.Filled.AutoStories, s.dialogueMode)
             GlassCard(hazeState, advancedMaterial, colors) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -690,6 +755,10 @@ fun CharacterSetupScreen(
                 enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
                 PlotLengthCard(plotLength, { plotLength = it }, hazeState, advancedMaterial, colors)
             }
+            if (isSavingBlocked) {
+                Text(characterSaveBlockedMessage(s.localeCode), color = colors.TextSecondary,
+                    style = MaterialTheme.typography.bodySmall)
+            }
 
             // The mode/length controls belong to simulation settings, not the persona form.
             // One shared boundary for creation, editable profiles and read-only previews.
@@ -697,6 +766,7 @@ fun CharacterSetupScreen(
                 modifier = Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 32.dp),
                 color = colors.Divider,
             )
+            }
 
             // ──── 头像（预览态只读；点击弹查看/编辑/更换三选项） ────
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -1226,6 +1296,8 @@ fun CharacterSetupScreen(
                 }
             }
 
+        }
+        val functionalDivider: @Composable ColumnScope.() -> Unit = {
             // 人物设定 / 模拟设置 之间用分页线分隔，保留空间区分
             Spacer(Modifier.height(12.dp))
             HorizontalDivider(color = colors.Divider.copy(alpha = 0.5f),
@@ -1233,7 +1305,9 @@ fun CharacterSetupScreen(
                     functionalSettingsTop = coordinates.positionInRoot().y.roundToInt() + settingsScrollState.value
                 })
             Spacer(Modifier.height(16.dp))
+        }
 
+        val functionalSection: @Composable ColumnScope.() -> Unit = {
             // ──── 增强检索（原「高质量检索回复」；创建/编辑都可随时切换）────
             // 1.0.71：1M 声明/锁定档随上下文二值化移除 —— 这个开关就是唯一真源：
             // 开 = 增强检索 + 1M 上下文预算，关 = 普通检索 + 256K。
@@ -1344,60 +1418,6 @@ fun CharacterSetupScreen(
                     }
                 }
             }
-
-            // ──── 主动智能（创建和编辑都可改） ────
-            //
-            // ★ 只在「微信聊天」档出现。主动智能是「角色过一会儿自己发消息找你」，
-            // 这只有在微信式的一来一回里才成立 —— 小说/动作演绎是用户在推进剧情，
-            // 角色跳出来主动说话只会打断节奏，所以另外两档直接不给这个开关、运行时也不排闹钟。
-            if (dialogueMode == DialogueMode.WECHAT) {
-                SectionLabel(Icons.Filled.NotificationsActive, s.proactive)
-                GlassCard(hazeState, advancedMaterial, colors) {
-                    Column {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(s.proactive, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                    BetaTag(s.betaTag, colors)
-                                }
-                                Text(s.proactiveDesc, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                            Switch(
-                                enabled = true,
-                                checked = proactiveEnabled,
-                                onCheckedChange = { proactiveEnabled = it },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = colors.OnPrimary,
-                                    checkedTrackColor = colors.Primary,
-                                    uncheckedThumbColor = colors.TextTertiary,
-                                    uncheckedTrackColor = colors.SurfaceVariant
-                                )
-                            )
-                        }
-                        // 没拿到「闹钟和提醒」权限也能用，只是到点会有几分钟浮动 —— 提示而非阻断
-                        AnimatedVisibility(proactiveEnabled && !exactAlarmOk,
-                            enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
-                            Text(
-                                s.proactiveExactHint,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 10.dp)
-                                    .clickable {
-                                        ProactiveScheduler.exactAlarmSettingsIntent(setupContext)?.let { intent ->
-                                            runCatching { setupContext.startActivity(intent) }
-                                        }
-                                    },
-                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
-                                color = colors.Primary
-                            )
-                        }
-                    }
-                }
-            }
             // 回复缓冲 / 作息模拟 / 主动智能 都只属于「微信聊天」档；
             // 切到动作演绎/剧情补足后既不在 UI 出现，运行时也会跳过。
             if (dialogueMode == DialogueMode.WECHAT) {
@@ -1451,6 +1471,72 @@ fun CharacterSetupScreen(
                     }
                 }
 
+
+            // ──── 连接微信（创建和编辑都可改；「主动智能」是它的子项） ────
+            //
+            // ★ 只在「微信聊天」档出现。连接微信依赖云端内置 API 与微信推送通道；
+            // 「主动智能」（云端按上下文/人设/关系主动发消息）依赖同一套通道——包含关系，
+            // 连接开启后才显示子项（2026-10-20 工单：同时满足）。小说/动作演绎两档不给这项。
+                SectionLabel(Icons.Filled.Chat, s.wechatLinkTitle)
+                GlassCard(hazeState, advancedMaterial, colors) {
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                when {
+                                    conversationId == null ->
+                                        android.widget.Toast.makeText(setupContext, s.wechatCreateFirst, android.widget.Toast.LENGTH_SHORT).show()
+                                    !com.freechat.sync.Session.isLoggedIn() ->
+                                        android.widget.Toast.makeText(setupContext, s.wechatLoginRequired, android.widget.Toast.LENGTH_SHORT).show()
+                                    else -> settingsScope.launch {
+                                        // 微信只能连一个对话：绑在别的角色上→先确认换绑（断旧连新），否则直接弹二维码
+                                        val boundTo = viewModel.wechatBoundConvId()
+                                        if (boundTo != null && boundTo != conversationId) showWechatRebindConfirm = true
+                                        else showWechatBind = true
+                                    }
+                                }
+                            },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(s.wechatLinkTitle, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                                Text(
+                                    if (wechatConnected) s.wechatLinkedState else s.wechatUnlinkedState,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
+                                    color = if (wechatConnected) colors.Primary else colors.TextSecondary
+                                )
+                            }
+                            Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                        }
+                        // 子项：连接微信开启之后才显示（包含关系同时满足）
+                        AnimatedVisibility(wechatConnected,
+                            enter = FreeChatAnimation.expandEnter(), exit = FreeChatAnimation.expandExit()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 12.dp, start = 20.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(s.proactive, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                                        BetaTag(s.betaTag, colors)
+                                    }
+                                    Text(s.proactiveDesc, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
+                                }
+                                Switch(
+                                    enabled = true,
+                                    checked = proactiveEnabled,
+                                    onCheckedChange = { proactiveEnabled = it },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = colors.OnPrimary,
+                                        checkedTrackColor = colors.Primary,
+                                        uncheckedThumbColor = colors.TextTertiary,
+                                        uncheckedTrackColor = colors.SurfaceVariant
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
                 // ──── 时间感知（1.0.73，创建和编辑都可改）：作息模拟的全面重做，开启后含作息 ────
                 SectionLabel(Icons.Filled.AccessTime, s.timePerception)
                 GlassCard(hazeState, advancedMaterial, colors) {
@@ -1631,28 +1717,166 @@ fun CharacterSetupScreen(
                             )
                         )
                     }
+                    // 允许语音回复（2026-10-19）：开启后 AI **可能会**（非必须）用语音回复，模型自决；
+                    // 连接微信后不可用（置灰 + 说明），连接成功时自动关闭
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(s.allowVoiceReply, style = MaterialTheme.typography.bodyLarge,
+                                    color = if (wechatConnected) colors.TextTertiary else colors.TextPrimary)
+                                BetaTag(s.betaTag, colors)
+                            }
+                            Text(if (wechatConnected) s.allowVoiceReplyWechatGate else s.allowVoiceReplyDesc,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
+                                color = colors.TextSecondary)
+                        }
+                        Switch(
+                            enabled = !wechatConnected,
+                            checked = allowVoiceReply && !wechatConnected,
+                            onCheckedChange = { allowVoiceReply = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = colors.OnPrimary,
+                                checkedTrackColor = colors.Primary,
+                                uncheckedThumbColor = colors.TextTertiary,
+                                uncheckedTrackColor = colors.SurfaceVariant
+                            )
+                        )
+                    }
+                    // 子设置（1.2.0.9 二稿·只选音色）：音色池=跟随全局/自建音色/预设音色——
+                    // 只在开启「允许语音回复」后展开（动画与既有子项一致）
+                    AnimatedVisibility(visible = allowVoiceReply && !wechatConnected) {
+                        Column {
+                            HorizontalDivider(color = colors.Divider.copy(alpha = 0.4f), modifier = Modifier.padding(horizontal = 14.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { showVoiceTimbreSheet = true }
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(s.voiceTimbreLabel, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                                    Text(
+                                        run {
+                                            val presets by viewModel.voicePresets.collectAsState()
+                                            when {
+                                                voiceTimbre.isBlank() -> s.followGlobal
+                                                else -> presets.find { it.id == voiceTimbre }?.name
+                                                    ?: viewModel.ttsVoices.find { it == voiceTimbre }
+                                                    ?: s.followGlobal
+                                            }
+                                        },
+                                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp),
+                                        color = colors.TextSecondary
+                                    )
+                                }
+                                Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
                 }
             }
 
+        }
+        val saveSection: @Composable ColumnScope.() -> Unit = {
             Spacer(Modifier.height(12.dp))
 
             if (!isEditing) {
-                Button(onClick = {
-                    if (!canStart) return@Button
-                    if (mbtiIncomplete) { showMbtiIncomplete = true; return@Button }
-                    onCreate(buildProfile())
-                }, enabled = canStart, modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                Button(onClick = { submitDraft() },
+                    enabled = canStart && !isSavingBlocked, modifier = Modifier.pageActionWidth().heightIn(min = 50.dp),
                     shape = RoundedCornerShape(25.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.Primary, contentColor = colors.OnPrimary)) {
                     Text(s.startChat, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
             } else if (previewOnly && simulationChanged) {
-                Button(onClick = { onSaveSimulation(buildSimulationProfile()) },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                Button(onClick = { submitDraft() }, enabled = !isSavingBlocked,
+                    modifier = Modifier.pageActionWidth().heightIn(min = 50.dp),
                     shape = RoundedCornerShape(25.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.Primary, contentColor = colors.OnPrimary)) {
                     Text(s.saveSettings, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
+            }
+            if (isSavingBlocked) {
+                Text(characterSaveBlockedMessage(s.localeCode), color = colors.TextSecondary,
+                    style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
+        val formPage: @Composable (CharacterCreationCategory?) -> Unit = { creationCategory ->
+        val formActive = LocalPageActive.current
+        BackHandler(enabled = tabletCreation && formActive) { requestBack() }
+        Box(Modifier.fillMaxSize().then(if (tabletCreation) Modifier.paneInteraction(formActive) else Modifier)) {
+        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
+        val formModifier = Modifier.fillMaxSize()
+            .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
+        if (tabletCreation) {
+            val scrollState = if (creationCategory == CharacterCreationCategory.PERSONA) personaScrollState else functionalScrollState
+            Column(formModifier.paneImePadding().jellyOverscroll().verticalScroll(scrollState)
+                .padding(top = settingsTopPadding, bottom = 40.dp)
+                .padding(horizontal = 24.dp + com.freechat.ui.adaptive.tabletReadingGutter()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (creationCategory == CharacterCreationCategory.PERSONA) {
+                    personaSection()
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = {
+                        focusManager.clearFocus()
+                        selectedCreationCategory = CharacterCreationCategory.SIMULATION
+                        creationRevealTick++
+                    }, modifier = Modifier.pageActionWidth().heightIn(min = 50.dp),
+                        shape = RoundedCornerShape(25.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.Primary, contentColor = colors.OnPrimary)) {
+                        Text(s.modeNext, style = MaterialTheme.typography.titleMedium)
+                    }
+                } else if (creationCategory == CharacterCreationCategory.SIMULATION) {
+                    functionalSection()
+                    saveSection()
+                }
+            }
+        } else if (wideForm) {
+            Box(formModifier.padding(top = settingsTopPadding)) {
+            com.freechat.ui.adaptive.TabletWorkspace(workspaceKey = "character_parts", balanced = true,
+                revealDetailKey = functionalRevealTick,
+                listPane = {
+                Column(Modifier.fillMaxSize().paneImePadding()) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(when (s.localeCode) { "en" -> "Character"; "zh-TW" -> "角色設定"; else -> "角色设定" },
+                            Modifier.weight(1f), color = colors.TextSecondary, style = MaterialTheme.typography.titleMedium)
+                        PaneExpandButton()
+                    }
+                    Column(Modifier.weight(1f).jellyOverscroll().verticalScroll(personaScrollState)
+                        .padding(bottom = 40.dp, top = 8.dp)
+                        .padding(horizontal = 24.dp + com.freechat.ui.adaptive.tabletReadingGutter()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    personaSection()
+                    }
+                }
+                }, detailPane = {
+                Column(Modifier.fillMaxSize().paneImePadding()) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(when (s.localeCode) { "en" -> "Simulation"; "zh-TW" -> "功能設定"; else -> "功能设置" },
+                            Modifier.weight(1f), color = colors.TextSecondary, style = MaterialTheme.typography.titleMedium)
+                        PaneExpandButton()
+                    }
+                    Column(Modifier.weight(1f).jellyOverscroll().verticalScroll(functionalScrollState)
+                        .padding(bottom = 40.dp, top = 8.dp)
+                        .padding(horizontal = 24.dp + com.freechat.ui.adaptive.tabletReadingGutter()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    functionalSection()
+                    saveSection()
+                    }
+                }
+                })
+            }
+        } else {
+            Column(formModifier.paneImePadding().jellyOverscroll().verticalScroll(settingsScrollState)
+                .padding(top = settingsTopPadding, bottom = 40.dp).padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                personaSection()
+                functionalDivider()
+                functionalSection()
+                saveSection()
             }
         }
 
@@ -1664,14 +1888,14 @@ fun CharacterSetupScreen(
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            HeaderIconButton(onClick = { requestBack() }) {
+            FloatingWindowBackButton(onClick = { requestBack() }) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
-                s.characterSetup,
+                creationCategory?.title(s) ?: s.characterSetup,
                 modifier = Modifier.weight(1f),
                 color = colors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
@@ -1679,16 +1903,25 @@ fun CharacterSetupScreen(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (!tabletCreation) {
             HeaderIconButton(onClick = {
                 focusManager.clearFocus()
                 settingsScope.launch {
-                    val target = (functionalSettingsTop - settingsTopPaddingPx).coerceAtLeast(0)
-                    if (motionEnabled) settingsScrollState.animateScrollTo(target, FreeChatAnimation.materialTween)
-                    else settingsScrollState.scrollTo(target)
+                    if (wideForm) {
+                        functionalRevealTick++
+                        if (motionEnabled) functionalScrollState.animateScrollTo(0, FreeChatAnimation.materialTween)
+                        else functionalScrollState.scrollTo(0)
+                    } else {
+                        val target = (functionalSettingsTop - settingsTopPaddingPx).coerceAtLeast(0)
+                        if (motionEnabled) settingsScrollState.animateScrollTo(target, FreeChatAnimation.materialTween)
+                        else settingsScrollState.scrollTo(target)
+                    }
                 }
-            }, enabled = functionalSettingsTop > 0) {
+            }, enabled = wideForm || functionalSettingsTop > 0) {
                 Icon(Icons.Filled.Tune, s.jumpToFunctionalSettings, tint = colors.TextSecondary)
             }
+            }
+            PaneExpandButton()
             if (isEditing) {
                 HeaderIconButton(onClick = { showShareSheet = true }) {
                     Icon(Icons.Filled.Share, s.exportCharacter, tint = colors.TextSecondary, modifier = Modifier.size(22.dp))
@@ -1700,12 +1933,14 @@ fun CharacterSetupScreen(
             }
             if (isEditing) {
                 HeaderIconButton(onClick = {
-                    if (isEditMode) showSaveConfirm = true else showEditConfirm = true
-                }) {
+                    if (isEditMode) {
+                        if (savingAllowed()) showSaveConfirm = true
+                    } else showEditConfirm = true
+                }, enabled = !isEditMode || !isSavingBlocked) {
                     Icon(
                         if (isEditMode) Icons.Filled.Check else Icons.Filled.Edit,
                         contentDescription = if (isEditMode) s.save else s.edit,
-                        tint = colors.Primary
+                        tint = if (isEditMode && isSavingBlocked) colors.TextTertiary else colors.Primary
                     )
                 }
             }
@@ -1713,7 +1948,83 @@ fun CharacterSetupScreen(
 
         }
         }
+        val modePage: @Composable () -> Unit = {
+            DialogueModeScreen(dialogueMode, plotLength, {
+                dialogueMode = it
+                if (tabletCreation) modeChosen = true
+            }, { plotLength = it },
+                onNext = {
+                    if (dialogueMode != null) {
+                        modeChosen = true
+                        if (tabletCreation) {
+                            focusManager.clearFocus()
+                            selectedCreationCategory = CharacterCreationCategory.PERSONA
+                            creationRevealTick++
+                        }
+                    }
+                },
+                onBack = { requestBack() }, onImport = { importPicker.launch("*/*") }, hazeState = hazeState)
         }
+        if (tabletCreation) {
+            com.freechat.ui.adaptive.TabletWorkspace(
+                workspaceKey = "character_creation",
+                revealDetailKey = creationRevealTick,
+                listPane = {
+                    val paneControls = LocalPaneControls.current
+                    CharacterCreationCategoryPane(selectedCreationCategory, dialogueMode,
+                        onBack = { requestBack() }) { category ->
+                        focusManager.clearFocus()
+                        selectedCreationCategory = category
+                        paneControls?.showDetail?.invoke()
+                    }
+                },
+                detailPane = {
+                    com.freechat.ui.animation.PageMotion(
+                        targetState = selectedCreationCategory,
+                        distancePx = pageTravel.toFloat(),
+                        forward = { from, to -> to.ordinal >= from.ordinal },
+                        label = "character_creation_category",
+                    ) { category ->
+                        if (category == CharacterCreationCategory.MODE) modePage() else formPage(category)
+                    }
+                },
+            )
+        } else {
+            com.freechat.ui.animation.PageMotion(targetState = modeChosen, modifier = Modifier.fillMaxSize(),
+                distancePx = pageTravel.toFloat(), forward = { _, target -> target },
+                label = "character_creation_page") { settingsPage ->
+                if (!settingsPage) modePage() else formPage(null)
+            }
+        }
+        // ===== 连接微信（2026-10-20）：换绑确认 → 二维码+须知 =====
+        // 微信只能连一个对话：绑在别的角色上先确认（再连断旧），确认后走同一条绑定流程
+        SheetPanel(showWechatRebindConfirm,
+            { showWechatRebindConfirm = false }, s.wechatLinkTitle,
+            colors, isDark, advancedMaterial, hazeState,
+            confirmLabel = s.confirm, onConfirm = {
+                showWechatRebindConfirm = false
+                showWechatBind = true
+            }) {
+            Text(s.wechatOneOnlyBody, color = colors.TextSecondary, style = MaterialTheme.typography.bodyMedium)
+        }
+        WechatBindDialog(
+            visible = showWechatBind && conversationId != null,
+            convId = conversationId ?: "",
+            colors = colors,
+            onDismiss = { showWechatBind = false },
+            onBoundChanged = { bound ->
+                viewModel.invalidateWeChatAttachment()
+                wechatBindTick++
+                // 连接微信成功 → 自动关闭「允许语音回复」（该功能不支持连接微信后使用，ChatScreen 同款）
+                if (bound) {
+                    viewModel.disableVoiceReplyForWechat(conversationId ?: "")
+                    allowVoiceReply = false
+                }
+            },
+            onLogin = { showWechatBind = false },
+            voiceReplyActive = allowVoiceReply
+        )
+
         SheetPanel(showImportMismatch && pendingImport != null,
             { showImportMismatch = false; pendingImport = null }, s.importModeMismatchTitle,
             colors, isDark, advancedMaterial, hazeState, confirmLabel = s.cancel,
@@ -1743,15 +2054,21 @@ fun CharacterSetupScreen(
         // 放弃修改确认（创建模式返回时）。放弃是**不可逆**的，主按钮保持红色
         SheetPanel(
             visible = showDiscardDialog,
-            onDismiss = { showDiscardDialog = false },
+            onDismiss = { showDiscardDialog = false; pendingWindowClose = null },
             title = s.unsavedBackTitle,
             colors = colors,
             isDark = isDark,
             advancedMaterial = advancedMaterial,
             hazeState = hazeState,
             confirmLabel = s.discard,
+            cancelLabel = characterContinueEditingMessage(s.localeCode),
             confirmDanger = true,
-            onConfirm = { showDiscardDialog = false; onBack() }
+            onConfirm = {
+                showDiscardDialog = false
+                val close = pendingWindowClose
+                pendingWindowClose = null
+                if (close != null) close() else onBack()
+            }
         ) {
             Text(s.unsavedBackMessage, color = colors.TextSecondary)
         }
@@ -1781,31 +2098,31 @@ fun CharacterSetupScreen(
             advancedMaterial = advancedMaterial,
             hazeState = hazeState,
             confirmLabel = s.confirm,
-            onConfirm = {
-                showSaveConfirm = false
-                if (canStart && !mbtiIncomplete && !modeMissing) onCreate(buildProfile())
-                else if (mbtiIncomplete) showMbtiIncomplete = true
-                else if (modeMissing) showModeMissing = true
-            }
+            confirmEnabled = !isSavingBlocked,
+            onConfirm = { submitDraft() }
         ) {
             Text(s.saveConfirmMessage, color = colors.TextSecondary)
+            if (isSavingBlocked) Text(characterSaveBlockedMessage(s.localeCode), color = colors.TextSecondary)
         }
 
         // 更改未保存。放弃更改同样不可逆，主按钮保持红色
         SheetPanel(
             visible = showUnsavedChanges,
-            onDismiss = { showUnsavedChanges = false },
+            onDismiss = { showUnsavedChanges = false; pendingWindowClose = null },
             title = s.unsavedChangesTitle,
             colors = colors,
             isDark = isDark,
             advancedMaterial = advancedMaterial,
             hazeState = hazeState,
             confirmLabel = s.discardChanges,
+            cancelLabel = characterContinueEditingMessage(s.localeCode),
             confirmDanger = true,
             onConfirm = {
                 showUnsavedChanges = false
                 resetToInitial()
-                if (isEditMode) isEditMode = false else onBack()
+                val close = pendingWindowClose
+                pendingWindowClose = null
+                if (close != null) close() else if (isEditMode) isEditMode = false else onBack()
             }
         ) {
             Text(s.unsavedChangesMessage, color = colors.TextSecondary)
@@ -1936,6 +2253,36 @@ fun CharacterSetupScreen(
             }
         }
 
+        // 音色子设置（1.2.0.9 二稿·只选音色）：跟随全局 / 自建音色（设计/复刻产物）/ MiMo 预设音色——
+        // 池子一视同仁全列出，用户挑的就是「哪个声音」，引擎（设计/复刻/普通 TTS）由音色自己带
+        SheetPanel(
+            visible = showVoiceTimbreSheet,
+            onDismiss = { showVoiceTimbreSheet = false },
+            title = s.voiceTimbreLabel,
+            colors = colors,
+            isDark = isDark,
+            advancedMaterial = advancedMaterial,
+            hazeState = hazeState
+        ) {
+            val presets by viewModel.voicePresets.collectAsState()
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState())
+            ) {
+                SheetOption(selected = voiceTimbre == "", title = s.followGlobal, colors = colors,
+                    onClick = { voiceTimbre = ""; showVoiceTimbreSheet = false })
+                // 自建音色（音色设计/复刻创建的自定义音色）
+                presets.forEach { p ->
+                    SheetOption(selected = voiceTimbre == p.id, title = p.name, colors = colors,
+                        onClick = { voiceTimbre = p.id; showVoiceTimbreSheet = false })
+                }
+                // MiMo 预设音色
+                viewModel.ttsVoices.forEach { v ->
+                    SheetOption(selected = voiceTimbre == v, title = v, colors = colors,
+                        onClick = { voiceTimbre = v; showVoiceTimbreSheet = false })
+                }
+            }
+        }
+
         // 头像三选项（查看 / 编辑 / 更换；查看与编辑只在已有头像时可点）
         SheetPanel(
             visible = showAvatarMenu,
@@ -2059,6 +2406,82 @@ fun CharacterSetupScreen(
             }
         }
     }
+}
+
+@Composable
+private fun CharacterCreationCategoryPane(
+    selectedCategory: CharacterCreationCategory,
+    dialogueMode: Int?,
+    onBack: () -> Unit,
+    onSelectCategory: (CharacterCreationCategory) -> Unit,
+) {
+    val colors = LocalFreeChatColors.current
+    val s = LocalStrings.current
+    val advancedMaterial = LocalAdvancedMaterial.current
+    val hazeState = rememberHazeState()
+    val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    BackHandler(enabled = LocalPageActive.current, onBack = onBack)
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
+        Column(
+            Modifier.fillMaxSize()
+                .then(if (advancedMaterial) Modifier.hazeSource(hazeState).hazeBackground(colors.Background) else Modifier)
+                .jellyOverscroll().verticalScroll(rememberPaneScrollState())
+                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            CharacterCreationCategory.entries.forEach { category ->
+                val selected = category == selectedCategory
+                val enabled = category == CharacterCreationCategory.MODE || dialogueMode != null
+                val textColor by animateColorAsState(
+                    when {
+                        !enabled -> colors.TextTertiary
+                        selected -> colors.selectedText
+                        else -> colors.TextPrimary
+                    },
+                    FreeChatAnimation.colorTween, label = "characterCategoryText",
+                )
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .frostedCard(hazeState, colors, advancedMaterial, RoundedCornerShape(14.dp), selected = selected)
+                        .selectable(selected, enabled = enabled, role = androidx.compose.ui.semantics.Role.Tab,
+                            onClick = { onSelectCategory(category) })
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(category.icon, null, tint = textColor, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(category.title(s), style = MaterialTheme.typography.bodyLarge,
+                        color = textColor, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                }
+            }
+        }
+        TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
+        Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(top = 8.8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            HeaderIconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
+            }
+            Text(s.tabletText("角色设定", "角色設定", "Character setup"),
+                style = MaterialTheme.typography.titleLarge, color = colors.TextPrimary,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+            PaneExpandButton()
+        }
+    }
+}
+
+private fun characterSaveBlockedMessage(localeCode: String): String = when (localeCode) {
+    "zh-TW" -> "請等待角色思考/回覆完畢後儲存變更"
+    "en" -> "Wait until the character finishes thinking or replying before saving changes."
+    else -> "请等待角色思考/回复完毕后保存更改"
+}
+
+private fun characterContinueEditingMessage(localeCode: String): String = when (localeCode) {
+    "zh-TW" -> "繼續編輯"
+    "en" -> "Continue editing"
+    else -> "继续编辑"
 }
 
 /**

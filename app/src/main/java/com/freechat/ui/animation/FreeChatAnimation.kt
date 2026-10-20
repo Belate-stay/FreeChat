@@ -81,6 +81,11 @@ object FreeChatAnimation {
     // 1.1.26.4：阻尼 0.58→0.85——松手回位几乎不过冲（过冲会「往上冲过头」，读作方向反了），
     // 但阻尼 <1 保留一点点果冻落定感
     val jellyReturn = spring<Float>(dampingRatio = 0.85f, stiffness = 220f)
+    val tabletEaseOut = CubicBezierEasing(.22f, 1f, .36f, 1f)
+    val tabletLayer = tween<Float>(DURATION_SLOW, easing = tabletEaseOut)
+    val tabletLayerOut = tween<Float>(DURATION_PAGE, easing = tabletEaseOut)
+    val tabletPane = tween<Dp>(DURATION_SLOW, easing = tabletEaseOut)
+    val tabletFloatingEnter = tween<Float>(DURATION_SLOW, easing = tabletEaseOut)
     val imageGradientCycle = tween<Float>(7_200, easing = LinearEasing)
     val imageCompletion = tween<Float>(1_100, easing = iosEaseInOut)
     fun <T> controlSpec(): TweenSpec<T> = tween(DURATION_FAST, easing = iosEaseOut)

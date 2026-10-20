@@ -31,11 +31,13 @@ import com.freechat.model.ColorTheme
 import com.freechat.model.CharacterProfile
 import com.freechat.model.DialogueMode
 import com.freechat.model.InputStyle
+import com.freechat.model.FontSize
 import com.freechat.model.ThemeMode
 import com.freechat.ui.animation.LocalMotionEnabled
 import com.freechat.ui.components.ChatInput
 import com.freechat.ui.components.ImageGenerationPlaceholder
 import com.freechat.ui.components.FullScreenImagePreview
+import com.freechat.ui.components.AvatarCropDialog
 import com.freechat.ui.components.PreviewImage
 import com.freechat.ui.components.VoiceSpectrumBars
 import com.freechat.ui.components.voiceDroplet
@@ -79,20 +81,27 @@ class RenderQaActivity : ComponentActivity() {
         val imageOnly = intent.getBooleanExtra("imageOnly", false)
         val probe = intent.getBooleanExtra("probe", false)
         val gallery = intent.getBooleanExtra("gallery", false)
+        val crop = intent.getBooleanExtra("crop", false)
         val settingsMode = intent.getStringExtra("settingsMode")
         val settingsViewModel = if (settingsMode != null) ViewModelProvider(this,
             ViewModelProvider.AndroidViewModelFactory.getInstance(application))[ChatViewModel::class.java] else null
         val profile = if (settingsMode == "preview") CharacterProfile(name = "离线检查角色",
             dialogueMode = DialogueMode.ACTION, personalityText = "安静、自然、温和", age = "20") else null
-        val galleryImages = if (gallery) prepareGalleryImages() else emptyList()
+        val galleryImages = if (gallery || crop) prepareGalleryImages() else emptyList()
         val imagePhase = runCatching { com.freechat.data.GenerationPhase.valueOf(intent.getStringExtra("phase") ?: "IDLE") }
             .getOrDefault(com.freechat.data.GenerationPhase.IDLE)
         val theme = runCatching { ColorTheme.valueOf(intent.getStringExtra("theme") ?: "BLUE") }.getOrDefault(ColorTheme.BLUE)
         setContent {
-            FreeChatTheme(themeMode = if (dark) ThemeMode.DARK else ThemeMode.LIGHT, colorTheme = theme) {
+            FreeChatTheme(themeMode = if (dark) ThemeMode.DARK else ThemeMode.LIGHT, colorTheme = theme,
+                fontSize = FontSize.entries[intent.getIntExtra("font", FontSize.MEDIUM.ordinal)
+                    .coerceIn(0, FontSize.entries.lastIndex)]) {
                 CompositionLocalProvider(LocalAdvancedMaterial provides true, LocalMotionEnabled provides !reduced) {
                     if (settingsViewModel != null) {
                         CharacterSetupScreen(settingsViewModel, dark, onBack = { finish() }, onCreate = {}, initial = profile)
+                    } else if (crop) {
+                        AvatarCropDialog(android.net.Uri.fromFile(File(galleryImages.first().source)),
+                            onDone = { path, _ -> Log.i("RenderQA", "avatarCrop saved=$path"); finish() },
+                            onDismiss = { finish() })
                     } else if (gallery) {
                         GalleryQaScene(galleryImages) { image ->
                             Log.i("RenderQA", "galleryDownload message=${image.messageId} source=${image.source}")
@@ -148,7 +157,7 @@ class RenderQaActivity : ComponentActivity() {
                         ChatInput(
                             onSend = { Log.i("RenderQA", "typedSend") }, onStop = {}, isLoading = false, isDark = dark,
                             onRecognizeVoice = { Log.i("RenderQA", "recognizeVoice"); delay(120); "本地测试语音" },
-                            onVoiceInput = { Log.i("RenderQA", "sendVoice"); gestureStatus = it },
+                            onVoiceInput = { text, _ -> Log.i("RenderQA", "sendVoice"); gestureStatus = text },
                             onRecordingChanged = { Log.i("RenderQA", "recording=$it") },
                             voiceSessionKey = "offline-qa",
                             keyboardHeightDp = keyboardHeight,

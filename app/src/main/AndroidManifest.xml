@@ -155,24 +155,8 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- 主动智能：闹钟到点后在这里完成「要不要开口」的判断与生成 -->
-        <service
-            android:name=".proactive.ProactiveService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
 
-        <receiver
-            android:name=".proactive.ProactiveReceiver"
-            android:exported="false" />
 
-        <receiver
-            android:name=".proactive.ProactiveBootReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

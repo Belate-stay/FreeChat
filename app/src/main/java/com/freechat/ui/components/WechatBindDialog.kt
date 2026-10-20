@@ -41,7 +41,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
+import com.freechat.ui.theme.AppDialog as Dialog
 import com.freechat.i18n.LocalStrings
 import com.freechat.sync.ApiClient
 import com.freechat.sync.Session
@@ -72,9 +72,11 @@ internal fun WechatBindDialog(
     convId: String,
     colors: FreeChatColors,
     onDismiss: () -> Unit,
-    onBoundChanged: () -> Unit,
+    onBoundChanged: (bound: Boolean) -> Unit,
     onLogin: () -> Unit = {},
-    resolveConvTitle: (String) -> String = { it }
+    resolveConvTitle: (String) -> String = { it },
+    /** 2026-10-19 工单：当前对话开着「允许语音回复」时，须知里多一条语音不支持的告知 */
+    voiceReplyActive: Boolean = false
 ) {
     if (!visible) return
     val s = LocalStrings.current
@@ -101,7 +103,7 @@ internal fun WechatBindDialog(
                 if (st == "confirmed") {
                     phase = "connected"
                     connectedTo = ""
-                    onBoundChanged()
+                    onBoundChanged(true)
                     break
                 }
                 if (st == "expired" || st == "verify_code_blocked" || st == "failed" || st == "need_verifycode") break
@@ -141,7 +143,7 @@ internal fun WechatBindDialog(
                 "confirmed" -> {
                     phase = "connected"
                     connectedTo = ""
-                    onBoundChanged()
+                    onBoundChanged(true)
                 }
                 "wait", "scaned" -> pollLoop(auth.token)   // 验证通过、等最终确认
                 else -> Unit                                 // 仍要验证码/失败：留在原地再试
@@ -211,7 +213,7 @@ internal fun WechatBindDialog(
                                 val auth = Session.loadAuth()
                                 scope.launch(Dispatchers.IO) {
                                     runCatching { auth?.let { ApiClient.wechatUnbind(it.token) } }
-                                    onBoundChanged()
+                                    onBoundChanged(false)
                                 }
                                 onDismiss()
                             }.padding(vertical = 10.dp),
@@ -301,10 +303,13 @@ internal fun WechatBindDialog(
             }
 
             // 功能使用须知（1.0.94）：五条常驻——云同步/内置模型/头像备注/微信仅 Bridge/延迟与稳定性
+            // 2026-10-19：当前对话开着「允许语音回复」时追加第六条（连接后自动关闭）
             HorizontalDivider(color = colors.Divider.copy(alpha = 0.4f))
             Text(s.wechatNoticeTitle, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold), color = colors.TextPrimary)
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf(s.wechatNotice1, s.wechatNotice2, s.wechatNotice3, s.wechatNotice4, s.wechatNotice5)
+                val noticeLines = listOf(s.wechatNotice1, s.wechatNotice2, s.wechatNotice3, s.wechatNotice4, s.wechatNotice5) +
+                    (if (voiceReplyActive) listOf(s.wechatNoticeVoice) else emptyList())
+                noticeLines
                     .forEachIndexed { i, line ->
                         Text(
                             "${i + 1}. $line",

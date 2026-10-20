@@ -28,4 +28,24 @@ class PersonaTemperatureTest {
         assertTrue("反讨好保留但温度中性", s.contains("坚持自己是底线"))
         assertFalse("剧情档「写多了就是廉价」压制已删", s.contains("写多了就是廉价"))
     }
+
+    @Test fun calmRationalIsNotAloofAndWarmthFollowsPersona() {
+        // 2026-10-19 用户点名「高冷病」：冷静理智≠高冷疏离；独立≠冷淡；空人设不许默认往高冷塑造
+        val s = source()
+        assertTrue("冷静理智解绑冷处理", s.contains("不是高冷疏离"))
+        assertTrue("独立性铁律明写不等于高冷疏离", s.contains("独立有主见 ≠ 高冷疏离"))
+        assertTrue("依恋表达不被独立铁律压死", s.contains("不是说不许表达依恋"))
+        assertTrue("空人设默认温度：不许默认高冷", s.contains("不要默认往高冷、疏离、话少的方向塑造"))
+    }
+
+    @Test fun emotionFluctuatesLikeARealPerson() {
+        // 2026-10-20 用户插单：不要 AI 式「情绪稳定」——按设定与关系（尤其亲密）有常人的情绪起伏，
+        // 跟着上下文剧情给真人的反馈
+        val s = source()
+        assertTrue("情绪要有起伏（正面条款）", s.contains("情绪要有**起伏**"))
+        assertTrue("亲密关系的情绪表现（吃醋/闹脾气/口是心非/冷战）",
+            s.contains("会吃醋、会闹小脾气、会生闷气、会口是心非、会冷战也会破功"))
+        assertTrue("永远温和得体才是最假", s.contains("永远温和得体、毫无波动才是最假的"))
+        assertTrue("按人设演情绪、跟剧情给真人反馈", s.contains("按你的人设把这份情绪演出来"))
+    }
 }

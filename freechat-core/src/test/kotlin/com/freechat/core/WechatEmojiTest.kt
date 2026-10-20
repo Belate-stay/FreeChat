@@ -20,14 +20,13 @@ class WechatEmojiTest {
     }
 
     @Test
-    fun narrativeReplyRemovesWechatTokensWithoutChangingParagraphsOrProactiveSignal() {
+    fun narrativeReplyRemovesWechatTokensWithoutChangingParagraphs() {
         val parsed = CompanionReplyParser.parse(
-            "她说：“收到[微笑]。”\n\n她收起手机[抠鼻]。\n[主动智能] 取消 | 已经见面",
+            "她说：“收到[微笑]。”\n\n她收起手机[抠鼻]。",
             narrativeMode = true
         )
         assertEquals("", parsed.emotion)
         assertEquals(listOf("她说：“收到。”\n\n她收起手机。"), parsed.bodyLines)
-        assertTrue(parsed.proactive!!.cancel)
     }
 
     @Test
@@ -59,14 +58,13 @@ class WechatEmojiTest {
     }
 
     @Test
-    fun emojiDoesNotChangeExplicitEmotionOrProactiveDirectiveSemantics() {
+    fun emojiDoesNotChangeExplicitEmotionSemantics() {
         val parsed = CompanionReplyParser.parse(
-            "[情绪:委屈]\n[微笑] [主动智能] 取消 | 已经回来",
+            "[情绪:委屈]\n[微笑]",
             narrativeMode = false, allowWechatEmoji = true
         )
         assertEquals("委屈", parsed.emotion)
         assertEquals(listOf("[微笑]"), parsed.bodyLines)
-        assertTrue(parsed.proactive!!.cancel)
         val legacy = CompanionReplyParser.parse("[开心]\n嗯[微笑]", false, true)
         assertEquals("开心", legacy.emotion)
         assertEquals(listOf("嗯[微笑]"), legacy.bodyLines)

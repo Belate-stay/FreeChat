@@ -65,6 +65,6 @@ class Beta11298Test {
         assertTrue("⑤playExitThen 调用只剩用户删除一处（重生成/重回复走粒子粉碎）", exits == 1)
         assertTrue("⑤粉碎仍由 VM 侧 shatterThenDelete 承担",
             source("viewmodel/ChatViewModel.kt").contains("shatterThenDelete(convId, plan.removedReplies"))
-        // ⑦信标收集契约属非公开代码，钉在 test/dev/DevSourceContractsTest（不随 push 上 GitHub）
+        // ⑦内部契约钉在 test/dev/DevSourceContractsTest
     }
 }

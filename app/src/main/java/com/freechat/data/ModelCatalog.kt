@@ -55,19 +55,8 @@ object ModelCatalog {
         val supportsNativeSearch: Boolean = false
     )
 
-    /** 与 ChatViewModel.customEndpoint 同一套端点解析规则 */
-    fun resolveUrl(baseUrl: String, path: String): String {
-        val base = baseUrl.trim().trimEnd('/')
-        val endpoint = path.trim('/').substringAfter('/')
-        return when {
-            base.endsWith("/$endpoint") -> base
-            hasApiVersionSegment(base) -> "$base/$endpoint"
-            else -> base + path
-        }
-    }
-
-    private fun hasApiVersionSegment(base: String): Boolean =
-        Regex("""/(?:v[0-9]+|api/v[0-9]+)$""", RegexOption.IGNORE_CASE).containsMatchIn(base)
+    /** 与 ChatViewModel.customEndpoint 同一套端点解析规则（2026-10-20 起统一走 ApiUrls） */
+    fun resolveUrl(baseUrl: String, path: String): String = ApiUrls.endpoint(baseUrl, path)
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)

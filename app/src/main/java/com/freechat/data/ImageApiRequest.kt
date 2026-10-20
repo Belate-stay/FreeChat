@@ -15,10 +15,9 @@ object ImageApiRequest {
             apiBaseUrl.toHttpUrlOrNull()?.host?.let { it.startsWith("ark.") && it.endsWith(".volces.com") } == true
 
     fun endpoint(base: String, edit: Boolean): String {
-        val root = base.trim().trimEnd('/').replace(Regex("/(?:images/(?:generations|edits)|chat/completions)$"), "")
-        val suffix = if (edit) "images/edits" else "images/generations"
-        return if (Regex("/(?:v[0-9]+|api/v[0-9]+)$", RegexOption.IGNORE_CASE).containsMatchIn(root)) "$root/$suffix"
-            else "$root/v1/$suffix"
+        // 2026-10-20 用户拍板翻案（覆盖 10-18「绝不自动加」）：URL 规整统一走 ApiUrls——
+        // 用户加不加 /v1、/api、端点后缀都能用，根路径填对即可
+        return ApiUrls.endpoint(base, if (edit) "images/edits" else "images/generations")
     }
 
     /** Seedream takes data URLs in JSON; OpenAI-compatible image edits take multipart image[]. */

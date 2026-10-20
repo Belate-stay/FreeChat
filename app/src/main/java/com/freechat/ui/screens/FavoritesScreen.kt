@@ -1,5 +1,8 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.FloatingWindowBackButton
+import com.freechat.ui.adaptive.floatingHeaderInset
+
 import com.freechat.ui.components.HeaderIconButton
 import com.freechat.ui.components.HeaderTextButton
 
@@ -117,7 +120,7 @@ fun FavoritesScreen(
         selectedKeys = emptySet()
     }
     // 多选态下返回键先退出多选，而不是直接离开收藏夹
-    BackHandler(enabled = selectMode) { exitSelect() }
+    BackHandler(enabled = selectMode && com.freechat.ui.animation.LocalPageActive.current) { exitSelect() }
 
     // 有收藏的对话（去重，供筛选下拉）
     val convWithFavs = remember(favorites) { favorites.map { it.conversation }.distinctBy { it.id } }
@@ -223,7 +226,7 @@ fun FavoritesScreen(
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 多选换头走 contentReplacement（1.1.26 动画补缺），不再整组闪换。
@@ -259,7 +262,7 @@ fun FavoritesScreen(
                 }
             } else {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                HeaderIconButton(onClick = onBack) {
+                FloatingWindowBackButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
                 }
                 Text(
@@ -276,6 +279,7 @@ fun FavoritesScreen(
                 }) {
                     Icon(Icons.Filled.Tune, s.newRules, tint = colors.TextPrimary)
                 }
+                com.freechat.ui.adaptive.PaneExpandButton()
                 }
             }
             }

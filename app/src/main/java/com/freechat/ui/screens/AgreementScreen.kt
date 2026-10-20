@@ -1,5 +1,7 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.floatingHeaderInset
+
 import com.freechat.ui.components.HeaderIconButton
 
 import android.content.Intent
@@ -33,7 +35,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
+import com.freechat.ui.theme.AppDialog as Dialog
 import com.freechat.i18n.LocalStrings
 import com.freechat.ui.theme.FreeChatColors
 import com.freechat.ui.theme.HazeSpec
@@ -45,6 +47,7 @@ import com.freechat.ui.theme.pageBackground
 import com.freechat.ui.theme.hazeBackground
 import com.freechat.ui.components.TopBarBackdrop
 import com.freechat.ui.components.TopBarBackdropSource
+import com.freechat.ui.adaptive.LocalTabletDevice
 
 /** 用户协议与免责声明页 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -103,7 +106,7 @@ fun AgreementScreen(onBack: () -> Unit) {
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             HeaderIconButton(onClick = onBack) {
@@ -160,6 +163,7 @@ private fun AgreementBullet(text: String, colors: FreeChatColors) {
  * 才算进入软件；查看《用户协议与使用条款》不算进入——返回后仍在本页，启动提醒一律押后到
  * 真正进入之后。正文就是产品须知六条（语言包 agreementGateItems），序号悬挂缩进排版。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AgreementGatePage(
     onAgree: () -> Unit,
@@ -167,13 +171,17 @@ fun AgreementGatePage(
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
+    val tablet = LocalTabletDevice.current
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     var agreed by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
         Column(
             modifier = Modifier
+                .align(Alignment.TopCenter)
+                .then(if (tablet) Modifier.widthIn(max = 720.dp) else Modifier)
                 .fillMaxSize()
+                .then(if (tablet) Modifier.navigationBarsPadding() else Modifier)
                 .verticalScroll(rememberScrollState())
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 36.dp), bottom = 32.dp)
                 .padding(horizontal = 22.dp)
@@ -181,7 +189,7 @@ fun AgreementGatePage(
             Spacer(Modifier.height(28.dp))
             Text(
                 s.agreementGateHead,
-                style = MaterialTheme.typography.titleLarge,
+                style = if (tablet) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 color = colors.TextPrimary
             )
@@ -194,7 +202,8 @@ fun AgreementGatePage(
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = colors.Primary,
-                        modifier = Modifier.width(22.dp)
+                        modifier = if (tablet) Modifier.widthIn(min = 22.dp).padding(end = 8.dp)
+                            else Modifier.width(22.dp)
                     )
                     Text(
                         item,
@@ -212,25 +221,51 @@ fun AgreementGatePage(
                     onCheckedChange = { agreed = it },
                     colors = CheckboxDefaults.colors(checkedColor = colors.Primary)
                 )
-                Text(
-                    s.agreementAgreePrefix,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.TextPrimary,
-                    modifier = Modifier.clickable { agreed = !agreed }
-                )
-                Text(
-                    s.agreementDocName,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.Primary,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.clickable { onOpenAgreement() }
-                )
+                if (tablet) {
+                    FlowRow(
+                        modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            s.agreementAgreePrefix,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.TextPrimary,
+                            modifier = Modifier.clickable { agreed = !agreed }
+                                .heightIn(min = 48.dp).wrapContentHeight(Alignment.CenterVertically)
+                        )
+                        Text(
+                            s.agreementDocName,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.Primary,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { onOpenAgreement() }
+                                .heightIn(min = 48.dp).wrapContentHeight(Alignment.CenterVertically)
+                        )
+                    }
+                } else {
+                    Text(
+                        s.agreementAgreePrefix,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.TextPrimary,
+                        modifier = Modifier.clickable { agreed = !agreed }
+                    )
+                    Text(
+                        s.agreementDocName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.Primary,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable { onOpenAgreement() }
+                    )
+                }
             }
             Spacer(Modifier.height(16.dp))
             Button(
                 onClick = onAgree,
                 enabled = agreed,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
+                modifier = Modifier
+                    .then(if (tablet) Modifier.widthIn(max = 320.dp).align(Alignment.CenterHorizontally) else Modifier)
+                    .fillMaxWidth()
+                    .then(if (tablet) Modifier.heightIn(min = 48.dp) else Modifier.height(48.dp)),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = colors.Primary,

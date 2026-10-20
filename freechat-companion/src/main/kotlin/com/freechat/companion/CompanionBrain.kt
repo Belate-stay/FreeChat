@@ -300,7 +300,7 @@ class CompanionBrain(
         )
         val systemPrompt = CompanionPrompts.buildCompanionSystemPrompt(
             character = character, messages = working,
-            convRules = objs.conv.rules.orEmpty(), pendingReminder = null, timeState = timeState,
+            convRules = objs.conv.rules.orEmpty(), timeState = timeState,
             allowWechatEmoji = allowWechatEmoji
         )
         val memoryContext = if (autoMem) MemoryLogic.buildMemoryContext(objs.memories, turnText, hq, assoc) else ""
@@ -530,6 +530,20 @@ class CompanionBrain(
      * （fresh 优先：App 刚做的删除/修改绝不被旧快照回滚），rev 对上为止。
      * 大脑对 msgs 箱只增不改，追加式合并不会复活删除、不会盖掉并发写。
      */
+    /**
+     * 主动智能台词落库（2026-10-20 硬-2）：action=message 的台词与 /companion/reply 同语义「先落库后发送」——
+     * msgs 箱唯一写入方是大脑，管道只发微信不写箱（外部 putObject 会与 rev 打架）。
+     * 发送失败不补发不重放：下轮 decide 的近况里看得见自己刚落的这条，自然不会重复。
+     */
+    suspend fun persistProactiveMessages(convId: String, contents: List<String>): List<String> {
+        val msgs = contents.mapIndexed { i, text ->
+            Message(role = com.freechat.model.Role.ASSISTANT, content = text,
+                timestamp = System.currentTimeMillis() + i)
+        }
+        persistMessages(convId, msgs)
+        return msgs.map { it.id }
+    }
+
     private suspend fun persistMessages(convId: String, additions: List<Message>, wechatBinding: WechatBinding? = null) {
         repeat(5) { attempt ->
             val fresh = store.load(convId) ?: return

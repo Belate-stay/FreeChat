@@ -15,7 +15,9 @@ class Beta1131Test {
     @Test fun featureRecDemoUsesRealComponentsAndLockedPlayback() {
         val rec = source("ui/components/FeatureRecPage.kt")
         assertTrue("思考球/生成槽都是真组件", rec.contains("SiriOrb(") && rec.contains("GeneratedImage("))
-        assertTrue("播放期锁定交互（不可点改）", rec.contains("awaitPointerEvent("))
+        assertTrue("播放期锁定点按，结束后释放遮挡以便滚动阅读",
+            Regex("if \\(stage < 8\\) Box").findAll(rec).count() == 2 &&
+                rec.contains("detectTapGestures(onTap = {}, onLongPress = {})"))
         assertTrue("结束后才亮行动按钮", rec.contains("enabled = stage >= 8"))
         assertTrue("成图是打包资源，不现场调 AI", rec.contains("R.drawable.feature_rec_scene"))
         assertTrue("演示节奏（用户消息后立刻出球+思考 3.6s+长顿）", rec.contains("intArrayOf(400, 250, 3600"))

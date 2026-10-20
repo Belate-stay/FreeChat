@@ -1,5 +1,8 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.theme.AppAlertDialog as AlertDialog
+import com.freechat.ui.adaptive.floatingHeaderInset
+
 import com.freechat.ui.components.HeaderIconButton
 import com.freechat.ui.components.TopBarBackdrop
 import com.freechat.ui.components.TopBarBackdropSource
@@ -300,7 +303,7 @@ fun VoiceDebugScreen(
         }
 
     TopBarBackdrop(hazeState, colors.Background, topBandHeight)
-    Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(top = 8.8.dp),
+    Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(top = 8.8.dp).floatingHeaderInset(),
         verticalAlignment = Alignment.CenterVertically) {
         HeaderIconButton(onClick = onBack) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)

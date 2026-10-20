@@ -28,7 +28,6 @@ object CompanionRequestBuilder {
         imageContext: String = "",
         forceReply: Boolean = false,
         lengthHint: String? = null,
-        proactivePrompt: String? = null,
         batchSize: Int = 1,
         serpBlock: String = "",
         searchGuidance: String = "",
@@ -72,9 +71,6 @@ object CompanionRequestBuilder {
             messages.add(mapOf("role" to "system", "content" to lengthHint))
         }
         // 主动智能：这次是「到点唤醒」，告诉模型它自己定的时间到了、要它现在决定开不开口
-        if (proactivePrompt != null) {
-            messages.add(mapOf("role" to "system", "content" to proactivePrompt))
-        }
         // 多条合一：用户刚才连发多条消息，把这一串当作一个整体场景理解，别逐条机械对应。
         if (batchSize > 1) {
             messages.add(mapOf("role" to "system", "content" to "用户刚才一口气发了 $batchSize 条消息（见上面的连续消息）。你要把它们当作一个整体场景来理解，而不是逐条机械地各回一句。怎么回由你决定：话痨、兴奋时可以自然回好几条；寡言、敷衍时可以只回一条，甚至觉得没必要回就不回。像真人一样自然。"))

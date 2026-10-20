@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.res.ResourcesCompat
 import com.freechat.ui.animation.PageMotion
+import com.freechat.ui.adaptive.*
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
@@ -51,6 +52,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -71,6 +73,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
@@ -81,11 +84,15 @@ import com.freechat.i18n.LocalStrings
 import com.freechat.i18n.LocaleManager
 import com.freechat.i18n.buildStrings
 import com.freechat.model.ThemeMode
+import com.freechat.model.TabletDisplayMode
+import com.freechat.model.TabletFloatingSide
 import com.freechat.model.HeaderBarStyle
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.components.DrawerContent
 import kotlin.math.roundToInt
 import com.freechat.ui.components.NoticeDialog
+import com.freechat.ui.components.RemoteAlertDialog
+import com.freechat.ui.components.RemoteFullscreenNotice
 import com.freechat.ui.components.SheetPanel
 import com.freechat.model.ColorTheme
 import com.freechat.ui.screens.ChangelogScreen
@@ -109,6 +116,8 @@ import com.freechat.ui.screens.AccountScreen
 import com.freechat.ui.screens.AgreementScreen
 import com.freechat.ui.screens.AgreementGatePage
 import com.freechat.ui.theme.FreeChatTheme
+import com.freechat.ui.theme.appDisplayDensity
+import com.freechat.ui.theme.appDisplayDp
 import com.freechat.ui.theme.Aurora
 import com.freechat.ui.theme.LiquidBackdrop
 import com.freechat.ui.theme.LocalAdvancedMaterial
@@ -138,6 +147,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 private enum class Screen(val motionDepth: Int) {
     CHAT(0), SETTINGS(1), VOICE_DEBUG(2), CHANGELOG(2), NEW_RULES(1), NEW_CHAT_MODE(1),
@@ -145,10 +155,14 @@ private enum class Screen(val motionDepth: Int) {
     AUTHOR_WORDS(2)
 }
 
+private enum class TabletDestination { SETTINGS, FAVORITES, ACCOUNT, RULES, CHARACTER, CREATION, CHAT_MODEL }
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // 语音磁盘缓存（2026-10-19）：合成过的语音落盘复用，点按秒播、不重复烧额度
+        com.freechat.data.TtsController.attach(applicationContext)
 
         // 冷启动后首次渲染中文时，大体积字体（NotoSansCJK 10.7MB）的 glyph 首次 rasterize 会阻塞主线程
         // 产生 150-350ms 长帧（侧滑/问候语动画恰在此刻触发，显得掉帧）。后台预热字体文件加载，
@@ -160,8 +174,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // App 启动信标（1.1.21.4）：进软件就报一次到（登录与否都报，未注册也是人头）。
-        // 后台跑、失败静默——统计不能打扰使用。收集实现收在非开源包（1.1.30 红线加固）。
+        // App 启动上报（1.1.21.4）：进软件就报一次到（登录与否都报）。
+        // 后台跑、失败静默——统计不能打扰使用。实现见 DevHooks。
         lifecycleScope.launch {
             com.freechat.dev.DevHooks.onAppLaunch(applicationContext)
         }
@@ -212,6 +226,9 @@ class MainActivity : ComponentActivity() {
             val useSystemFont by chatViewModel.useSystemFont.collectAsState()
             val systemDarkTheme by chatViewModel.systemDarkTheme.collectAsState()
             val advancedMaterialEnabled by chatViewModel.advancedMaterial.collectAsState()
+            val tabletDisplayMode by chatViewModel.tabletDisplayMode.collectAsState()
+            val tabletFloatingSide by chatViewModel.tabletFloatingSide.collectAsState()
+            val tabletUnderlyingTouch by chatViewModel.tabletUnderlyingTouch.collectAsState()
             val headerBarStyle by chatViewModel.headerBarStyle.collectAsState()
             val headerCardProgress = animateFloatAsState(
                 if (headerBarStyle == HeaderBarStyle.CARD) 1f else 0f,
@@ -301,6 +318,22 @@ class MainActivity : ComponentActivity() {
             val liquidFrame = remember { androidx.compose.runtime.mutableStateOf(Rect.Zero) }
 
             var currentScreen by remember { mutableStateOf(Screen.CHAT) }
+            var tabletNavigationBack by remember { mutableStateOf(false) }
+            var tabletWorkspaceArrival by remember { mutableIntStateOf(0) }
+            fun navigateTo(screen: Screen) {
+                if (screen == Screen.CHAT && currentScreen in setOf(Screen.SETTINGS, Screen.VOICE_DEBUG,
+                        Screen.CHANGELOG, Screen.AGREEMENT, Screen.AUTHOR_WORDS, Screen.FAVORITES, Screen.FAVORITE_DETAIL)) {
+                    tabletWorkspaceArrival++
+                }
+                tabletNavigationBack = false
+                currentScreen = screen
+            }
+            fun navigateBack(screen: Screen) {
+                tabletNavigationBack = true
+                currentScreen = screen
+            }
+            var tabletNavigationOrigin by remember { mutableStateOf(TabletPane.LIST) }
+            var tabletChatArrival by remember { mutableIntStateOf(0) }
             var drawerOpen by remember { mutableStateOf(false) }
             // 1.1.20：更新提醒「去更新」的深链闩 —— 进设置页直达「关于FreeChat」
             var settingsOpenAbout by remember { mutableStateOf(false) }
@@ -320,11 +353,11 @@ class MainActivity : ComponentActivity() {
             // 从哪级点进来的回哪级，不再跳过聚合页直回设置（2026-10-11 用户点名「不能跳页」）。
             // 系统返回键与页头箭头共用这两个动作，两条路永远同归。
             val backToAboutPage = {
-                currentScreen = Screen.SETTINGS
+                navigateBack(Screen.SETTINGS)
                 settingsOpenAbout = true
             }
             val backToAuthorPage = {
-                currentScreen = Screen.SETTINGS
+                navigateBack(Screen.SETTINGS)
                 settingsOpenAuthor = true
             }
             var isDragging by remember { mutableStateOf(false) }
@@ -337,9 +370,10 @@ class MainActivity : ComponentActivity() {
             // ===== 页面切换动画状态 =====
             var pendingRevealScreen by remember { mutableStateOf<Screen?>(null) }
 
-            val density = LocalDensity.current
+            val density = appDisplayDensity(LocalDensity.current, fontSize)
             val config = LocalConfiguration.current
-            val drawerWidthDp = config.screenWidthDp.dp * 0.9f
+            val isTablet = rememberTabletDevice(this@MainActivity)
+            val drawerWidthDp = appDisplayDp(config.screenWidthDp, fontSize).dp * 0.9f
             val drawerWidthPx = with(density) { drawerWidthDp.toPx() }
             val overlapPx = with(density) { 12.dp.toPx() }
             // 防缝护栏：Chat 层左边缘恒比抽屉层右边缘再退 1dp，任意进度下两页都是「重叠」而非「裂缝」
@@ -381,9 +415,23 @@ class MainActivity : ComponentActivity() {
             // （抽屉动画 drawerOffset 不在此列 —— lambda 是**调用时**才读它的）
             val liquidChatShift = remember(overlapPx, seamGuardPx) { LiquidPageShift(chatShift) }
             val liquidDrawerShift = remember(drawerWidthPx, overlapPx) { LiquidPageShift(drawerShift) }
+            val tabletLiquidShift = remember { LiquidPageShift { 0f } }
 
             // ──── 键盘自动收起：侧滑打开抽屉时 ────
             val keyboardController = LocalSoftwareKeyboardController.current
+            val learningFocusManager = LocalFocusManager.current
+            LaunchedEffect(currentScreen == Screen.LEARNING) {
+                if (currentScreen == Screen.LEARNING) {
+                    learningFocusManager.clearFocus(force = true)
+                    keyboardController?.hide()
+                }
+            }
+            LaunchedEffect(currentScreen) {
+                if (isTablet && currentScreen != Screen.CHAT) {
+                    learningFocusManager.clearFocus(force = true)
+                    keyboardController?.hide()
+                }
+            }
             LaunchedEffect(drawerOpen) {
                 if (drawerOpen) {
                     keyboardController?.hide()
@@ -406,7 +454,7 @@ class MainActivity : ComponentActivity() {
                 chatViewModel.shareImportNav.collect { id ->
                     if (id != null) {
                         chatViewModel.consumeShareImportNav()
-                        currentScreen = Screen.CHAT
+                        navigateTo(Screen.CHAT)
                     }
                 }
             }
@@ -414,6 +462,9 @@ class MainActivity : ComponentActivity() {
             // ──── 新对话过渡动画 ────
             var newChatRevealTrigger by remember { mutableIntStateOf(0) }
             var characterSetupInitial by remember { mutableStateOf<CharacterProfile?>(null) }
+            var characterSetupConversationId by remember { mutableStateOf<String?>(null) }
+            var rulesConversationId by remember { mutableStateOf<String?>(null) }
+            val busyConversationIds by chatViewModel.busyConversationIds.collectAsState()
             var learningUpdating by remember { mutableStateOf(false) }
             var modelEditorType by remember { mutableStateOf<ModelType?>(null) }
             var modelEditorEditing by remember { mutableStateOf<ModelInfo?>(null) }
@@ -421,6 +472,15 @@ class MainActivity : ComponentActivity() {
             // 账号页从哪进（1.0.94）：侧滑进→返回带开侧滑；「连接微信」登录引导进→返回直接回聊天
             var accountFromChat by remember { mutableStateOf(false) }
             var favoriteDetailItem by remember { mutableStateOf<FavoriteItem?>(null) }
+            val floatingWindow = remember { FloatingWindowState() }
+            fun floatingBaseTouchable() = isTablet && tabletUnderlyingTouch &&
+                tabletDisplayMode == TabletDisplayMode.FLOATING &&
+                currentScreen !in setOf(Screen.CHAT, Screen.NEW_CHAT_MODE, Screen.LEARNING) &&
+                (currentScreen != Screen.CHARACTER_SETUP || characterSetupInitial != null)
+            fun requestBaseNavigation(action: () -> Unit) {
+                val guardedAction = { if (chatViewModel.editingPromptId.value == null) action() }
+                if (floatingBaseTouchable()) floatingWindow.requestNavigation(guardedAction) else guardedAction()
+            }
 
             // ──── 侧滑页那三个对话弹层（重命名 / 删除 / 批量删除）────
             // 状态放在**这一层**而不是 DrawerContent 里：弹层要铺满整屏，只能挂在下面根 Box 的
@@ -456,6 +516,11 @@ class MainActivity : ComponentActivity() {
             // 它和弹层共用 overlayHazeState；副本提醒优先弹，更新提醒排它后面，一次一张
             val copyNoticeCount by chatViewModel.conflictCopyNotice.collectAsState()
             val updateNotice by chatViewModel.updateNotice.collectAsState()
+            // 内置弹窗云控（2026-10-19）：显示效果与原版**完全一致**（同 NoticeDialog 外壳/动画/
+            // 勾选项、同 FeatureRecPage 导览）——云控只替换文字与按钮文案、控制启停与触发版本；
+            // 云端没配/拉不到就用本地原文（一字不差）。
+            val reserved by chatViewModel.reservedNotices.collectAsState()
+            val remoteConfigLoaded by chatViewModel.remoteConfigLoaded.collectAsState()
             // 1.1.26.4：进入软件后**一次最多弹一个**——两个都中时轮流来（上次弹过的让位，
             // 另一个下次启动再弹），这次弹过就到此为止，绝不点完这个又弹那个（去更新/去清理
             // 是两个不同页面，连环弹只会让人不知道该干嘛）。
@@ -466,12 +531,16 @@ class MainActivity : ComponentActivity() {
             var featureRecVisible by remember { mutableStateOf(false) }
             LaunchedEffect(appEntered) {
                 if (!appEntered) return@LaunchedEffect
-                val prefs = getSharedPreferences("feature_rec", android.content.Context.MODE_PRIVATE)
-                if (com.freechat.dev.DevMode.testFeatureRec(this@MainActivity) ||
-                    prefs.getInt("last_shown", 0) < com.freechat.BuildConfig.VERSION_CODE
-                ) {
-                    kotlinx.coroutines.delay(700)
-                    featureRecVisible = true
+                // 先等云配一轮（拉失败也会上来=空图，届时按本地默认），防云里停用了还先弹
+                if (!remoteConfigLoaded) withTimeoutOrNull(3000) { chatViewModel.remoteConfigLoaded.first { it } }
+                if (reserved["builtin-feature"]?.enabled != false) {
+                    val prefs = getSharedPreferences("feature_rec", android.content.Context.MODE_PRIVATE)
+                    if (com.freechat.dev.DevMode.testFeatureRec(this@MainActivity) ||
+                        prefs.getInt("last_shown", 0) < com.freechat.BuildConfig.VERSION_CODE
+                    ) {
+                        kotlinx.coroutines.delay(700)
+                        featureRecVisible = true
+                    }
                 }
             }
             val noticeCandidate = if (!appEntered || noticePicked != null || featureRecVisible) null
@@ -489,11 +558,69 @@ class MainActivity : ComponentActivity() {
             }
             val copyNoticeVisible = noticePick == "copy" && copyNoticeCount > 0
             val updateNoticeVisible = noticePick == "update" && updateNotice != null
+            // 内置弹窗留痕（2026-10-19 补）：弹出记 impression、按钮记 choice（与排队弹窗同一本账）
+            LaunchedEffect(copyNoticeVisible) {
+                if (copyNoticeVisible) chatViewModel.onRemoteNoticeShown("builtin-copy")
+            }
+            LaunchedEffect(updateNoticeVisible) {
+                if (updateNoticeVisible) chatViewModel.onRemoteNoticeShown("builtin-update")
+            }
+            LaunchedEffect(featureRecVisible) {
+                if (featureRecVisible) chatViewModel.onRemoteNoticeShown("builtin-feature")
+            }
+            // 云端弹窗（2026-10-18）：本地启动弹窗/导览全让位后才轮到；一次一个按 priority 顺序走。
+            // alert=非强制可拒绝（NoticeDialog 同款）；fullscreen=强制全屏看完必选（导览同款）。
+            val remoteNotices by chatViewModel.remoteNotices.collectAsState()
+            var remoteShownIndex by remember { mutableStateOf(0) }
+            val remoteCurrent = if (appEntered && !featureRecVisible && noticePick == null &&
+                remoteShownIndex < remoteNotices.size
+            ) remoteNotices[remoteShownIndex] else null
+            LaunchedEffect(remoteCurrent?.id) {
+                remoteCurrent?.let { chatViewModel.onRemoteNoticeShown(it.id) }
+            }
+            // 弹窗按钮动作执行器（2026-10-19）：关闭/打开链接/跳转页面（设置、模型选择、关于、
+            // 更新日志、侧滑页等）。内置弹窗与自定义弹窗共用同一套动作语义。
+            val runNoticeAction: (com.freechat.data.RemoteNotices.Button) -> Unit = { btn ->
+                when (btn.action) {
+                    "openUrl" -> if (btn.url.isNotBlank()) runCatching {
+                        startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(btn.url)))
+                    }
+                    "navigate" -> when (btn.page) {
+                        "settings" -> navigateTo(Screen.SETTINGS)
+                        "modelPool" -> {
+                            navigateTo(Screen.SETTINGS)
+                            settingsOpenModelList = com.freechat.model.ModelType.LANGUAGE
+                        }
+                        "about" -> {
+                            navigateTo(Screen.SETTINGS)
+                            settingsOpenAbout = true
+                        }
+                        "changelog" -> navigateTo(Screen.CHANGELOG)
+                        "drawer" -> drawerOpen = true
+                        "account" -> navigateTo(Screen.ACCOUNT)
+                        "favorites" -> navigateTo(Screen.FAVORITES)
+                        "agreement" -> navigateTo(Screen.AGREEMENT)
+                        "newRules" -> navigateTo(Screen.NEW_RULES)
+                        "featureRec" -> featureRecVisible = true
+                        else -> navigateTo(Screen.SETTINGS)
+                    }
+                    else -> {}
+                }
+            }
+            val remoteAdvance: (com.freechat.data.RemoteNotices.Button) -> Unit = { btn ->
+                remoteCurrent?.let { chatViewModel.onRemoteNoticeChoice(it.id, btn.id) }
+                runNoticeAction(btn)
+                remoteShownIndex += 1
+            }
             val drawerSheetOpen = drawerRenameTarget != null || drawerDeleteTarget != null ||
-                drawerBatchDeleteTargets != null || copyNoticeVisible || updateNoticeVisible
+                drawerBatchDeleteTargets != null || copyNoticeVisible || updateNoticeVisible || remoteCurrent != null
 
             // 驱动动画 — 打开用 Spring，关闭用快速 Tween 消除后摇
-            androidx.compose.runtime.LaunchedEffect(drawerOpen, isDragging) {
+            androidx.compose.runtime.LaunchedEffect(drawerOpen, isDragging, isTablet, drawerWidthPx) {
+                if (isTablet) {
+                    drawerOffset.snapTo(0f)
+                    return@LaunchedEffect
+                }
                 if (!isDragging) {
                     if (drawerOpen) {
                         drawerOffset.animateTo(drawerWidthPx, FreeChatAnimation.drawerOpenSpring)
@@ -507,29 +634,29 @@ class MainActivity : ComponentActivity() {
             BackHandler(enabled = currentScreen == Screen.SETTINGS || currentScreen == Screen.VOICE_DEBUG || currentScreen == Screen.CHANGELOG || currentScreen == Screen.NEW_RULES || currentScreen == Screen.NEW_CHAT_MODE || currentScreen == Screen.CHARACTER_SETUP || currentScreen == Screen.MODEL_EDITOR || currentScreen == Screen.AGREEMENT || currentScreen == Screen.AUTHOR_WORDS || currentScreen == Screen.FAVORITES || currentScreen == Screen.FAVORITE_DETAIL || currentScreen == Screen.ACCOUNT || drawerOpen || (currentScreen == Screen.CHAT && multiSelect.active)) {
                 when {
                     currentScreen == Screen.VOICE_DEBUG -> {
-                        currentScreen = Screen.SETTINGS
+                        navigateBack(Screen.SETTINGS)
                     }
                     currentScreen == Screen.CHANGELOG -> {
                         backToAboutPage()
                     }
                     currentScreen == Screen.SETTINGS -> {
-                        currentScreen = Screen.CHAT; drawerOpen = true
+                        navigateBack(Screen.CHAT); drawerOpen = !isTablet
                     }
                     currentScreen == Screen.NEW_RULES -> {
-                        currentScreen = Screen.CHAT
+                        navigateBack(Screen.CHAT)
                     }
                     currentScreen == Screen.CHARACTER_SETUP -> {
                         chatViewModel.clearShareDraft() // 放弃创建：暂存的分享包内容不留到下个角色
-                        currentScreen = Screen.NEW_CHAT_MODE
+                        navigateBack(if (characterSetupInitial != null) Screen.CHAT else Screen.NEW_CHAT_MODE)
                     }
                     currentScreen == Screen.NEW_CHAT_MODE -> {
-                        currentScreen = Screen.CHAT
+                        navigateBack(Screen.CHAT)
                     }
                     currentScreen == Screen.MODEL_EDITOR -> {
-                        currentScreen = if (modelEditorFromChat) Screen.CHAT else {
+                        navigateBack(if (modelEditorFromChat) Screen.CHAT else {
                             settingsOpenModelList = modelEditorType
                             Screen.SETTINGS
-                        }
+                        })
                     }
                     currentScreen == Screen.AGREEMENT -> {
                         backToAboutPage()
@@ -538,21 +665,23 @@ class MainActivity : ComponentActivity() {
                         backToAuthorPage()
                     }
                     currentScreen == Screen.ACCOUNT -> {
-                        currentScreen = Screen.CHAT
-                        drawerOpen = !accountFromChat
+                        navigateBack(Screen.CHAT)
+                        drawerOpen = !isTablet && !accountFromChat
                     }
                     currentScreen == Screen.FAVORITE_DETAIL -> {
-                        currentScreen = Screen.FAVORITES
+                        navigateBack(Screen.FAVORITES)
                     }
                     currentScreen == Screen.FAVORITES -> {
-                        currentScreen = Screen.CHAT
-                        drawerOpen = true
+                        navigateBack(Screen.CHAT)
+                        drawerOpen = !isTablet
                     }
                     drawerOpen -> { drawerOpen = false }
                     // 多选退出放最后 = 优先级最低：抽屉开着时返回键先关抽屉（看得见什么就关什么）
                     currentScreen == Screen.CHAT && multiSelect.active -> chatViewModel.exitMultiSelect()
                 }
             }
+            // Learning is an exclusive task, on phones and tablets. No Back-to-chat escape.
+            BackHandler(enabled = currentScreen == Screen.LEARNING) { }
 
             // 观察语言设置变化
             val appLanguage by chatViewModel.appLanguage.collectAsState()
@@ -573,7 +702,131 @@ class MainActivity : ComponentActivity() {
                 if (com.freechat.dev.DevMode.testCopy(this@MainActivity)) chatViewModel.forceCopyNotice()
             }
 
-            androidx.compose.runtime.CompositionLocalProvider(LocalStrings provides currentStrings, LocalAdvancedMaterial provides advancedMaterial, LocalMaterialProgress provides materialProgress, LocalHeaderCardProgress provides headerCardProgress, LocalLiquidMode provides liquidActive, LocalLiquidProgress provides liquidProgress, LocalLiquidPalette provides liquidColors, LocalLiquidClock provides liquidClock, LocalLiquidFrame provides liquidFrame) {
+            @Composable
+            fun ConversationList() {
+                val paneControls = LocalPaneControls.current
+                val chatCover = LocalTabletChatCover.current
+                fun openConversation(conv: Conversation, targetMessage: String? = null) {
+                    val action = {
+                        if (chatViewModel.editingPromptId.value != null) false else {
+                            val keepWindow = floatingBaseTouchable()
+                            chatViewModel.switchToConversation(conv)
+                            targetMessage?.let { chatViewModel.requestScrollToMessage(it) }
+                            if (isTablet) {
+                                paneControls?.showDetail?.invoke()
+                                if (!keepWindow && currentScreen != Screen.CHAT) tabletChatArrival++
+                                if (!keepWindow) navigateTo(Screen.CHAT)
+                            } else if (targetMessage != null) {
+                                navigateTo(Screen.CHAT); drawerOpen = false
+                            } else {
+                                pendingDrawerClose?.cancel()
+                                pendingDrawerClose = coroutineScope.launch {
+                                    delay(FreeChatAnimation.INDICATOR_DRAWER_DELAY_MS.toLong())
+                                    drawerOpen = false
+                                    pendingDrawerClose = null
+                                }
+                            }
+                            true
+                        }
+                    }
+                    if (isTablet && chatCover != null && (currentScreen == Screen.CHAT || floatingBaseTouchable()))
+                        chatCover.switchTo(conv.id) { action() }
+                    else action()
+                }
+                Box(Modifier.fillMaxSize()) {
+                DrawerContent(
+                    conversations = conversations, currentId = currentConvId, isDark = isDark,
+                    drawerHazeState = drawerHazeState,
+                    searchQuery = searchQuery, searchResults = searchResults,
+                    favoriteConvIds = favoriteConvIds,
+                    onSearchQueryChange = { chatViewModel.updateSearchQuery(it) },
+                    onNewChat = newChat@{
+                        if (chatViewModel.editingPromptId.value != null) return@newChat
+                        requestBaseNavigation {
+                        tabletNavigationOrigin = TabletPane.LIST
+                        paneControls?.showDetail?.invoke()
+                        drawerOpen = false; navigateTo(Screen.NEW_CHAT_MODE)
+                        }
+                    },
+                    onSelectConversation = selectConversation@{ conv ->
+                        if (chatViewModel.editingPromptId.value != null) return@selectConversation
+                        openConversation(conv)
+                    },
+                    onSelectSearchResult = selectSearch@{ conv, msgId ->
+                        if (chatViewModel.editingPromptId.value != null) return@selectSearch
+                        openConversation(conv, msgId)
+                    },
+                    onPinConversation = { chatViewModel.togglePinConversation(it) },
+                    onBatchPinConversations = { ids, pinned -> chatViewModel.setPinnedConversations(ids, pinned) },
+                    onAskRenameConversation = { drawerRenameTarget = it; drawerRenameText = it.title },
+                    onAskDeleteConversation = { drawerDeleteTarget = it },
+                    onAskBatchDelete = { drawerBatchDeleteTargets = it },
+                    drawerVisible = isTablet || drawerOpen,
+                    exitSelectKey = drawerExitSelectKey,
+                    onOpenSettings = {
+                        requestBaseNavigation {
+                        tabletNavigationBack = false
+                        tabletNavigationOrigin = TabletPane.LIST
+                        drawerOpen = false
+                        settingsScrolls.clear()
+                        pendingRevealScreen = Screen.SETTINGS
+                        }
+                    },
+                    onOpenFavorites = {
+                        requestBaseNavigation {
+                        tabletNavigationBack = false
+                        tabletNavigationOrigin = TabletPane.LIST
+                        drawerOpen = false
+                        favoritesListState = androidx.compose.foundation.lazy.LazyListState(0, 0)
+                        pendingRevealScreen = Screen.FAVORITES
+                        }
+                    },
+                    onOpenAccount = {
+                        requestBaseNavigation {
+                        tabletNavigationBack = false
+                        tabletNavigationOrigin = TabletPane.LIST
+                        drawerOpen = false
+                        accountFromChat = false
+                        pendingRevealScreen = Screen.ACCOUNT
+                        }
+                    },
+                    onSettingsRowPositioned = { settingsRowBounds = it },
+                    onFavoritesRowPositioned = { favoritesRowBounds = it },
+                    onNewChatRect = { drawerNewChatRect = it },
+                )
+                if (isTablet) androidx.compose.foundation.layout.Row(
+                    Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding()
+                        .padding(start = 18.dp, top = 8.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("FreeChat", Modifier.weight(1f), color = colors.TextPrimary,
+                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    PaneExpandButton()
+                }
+                }
+            }
+
+            @Composable
+            fun FavoriteDetail(detailItem: FavoriteItem) {
+                FavoritesDetailScreen(
+                    viewModel = chatViewModel,
+                    item = detailItem,
+                    isDark = isDark,
+                    onBack = { navigateBack(Screen.FAVORITES) },
+                    onUnfavorite = {
+                        chatViewModel.unfavoriteItems(listOf(detailItem))
+                        navigateBack(Screen.FAVORITES)
+                    },
+                    onOpenOriginal = {
+                        chatViewModel.switchToConversation(detailItem.conversation)
+                        chatViewModel.requestScrollToMessage(detailItem.message.id)
+                        navigateTo(Screen.CHAT)
+                        drawerOpen = false
+                    },
+                )
+            }
+
+            androidx.compose.runtime.CompositionLocalProvider(LocalStrings provides currentStrings, LocalAdvancedMaterial provides advancedMaterial, LocalMaterialProgress provides materialProgress, LocalHeaderCardProgress provides headerCardProgress, LocalLiquidMode provides liquidActive, LocalLiquidProgress provides liquidProgress, LocalLiquidPalette provides liquidColors, LocalLiquidClock provides liquidClock, LocalLiquidFrame provides liquidFrame, LocalTabletUi provides isTablet, LocalTabletDevice provides isTablet) {
             FreeChatTheme(themeMode = themeMode, colorTheme = colorTheme, fontSize = fontSize, useSystemFont = useSystemFont, systemDarkTheme = systemDarkTheme, customColorArgb = customColorArgb) {
                 Box(
                     modifier = Modifier
@@ -614,7 +867,7 @@ class MainActivity : ComponentActivity() {
                     // Chat 层右移多少，层内的背景副本就反向挪回多少（见 LiquidPageShift）。
                     // 不补偿的话副本跟着层一起被搬走，接缝两侧露的是同一幅渐变的不同两段，
                     // 看着就是两块颜色不同的板子拼在一起、交界处一道裂痕。
-                    CompositionLocalProvider(LocalLiquidPageShift provides liquidChatShift) {
+                    CompositionLocalProvider(LocalLiquidPageShift provides if (isTablet) tabletLiquidShift else liquidChatShift) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -625,9 +878,9 @@ class MainActivity : ComponentActivity() {
                                     //（原式 (W-O)*p 在 p<1 时恒小于 R，会张开 O(1-p) 宽的实体裂缝，缝里露出根 Box 的纯背景）
                                     // coerceAtLeast(0f)：抽屉尚未滑出屏幕时不让 Chat 被左移，否则屏幕右缘会露 1dp 根背景
                                     // 层内副本用的是**同一个** chatShift（就是上面那个 lambda），不另算
-                                    translationX = chatShift()
+                                    translationX = if (isTablet) 0f else chatShift()
                                     // 高级材质：抽屉滑入时对 Chat 页内容做高斯模糊虚化，随侧滑动画逐渐加重（替代暗色遮罩）
-                                    if (advancedMaterial) {
+                                    if (advancedMaterial && !isTablet) {
                                         // 量化到 33 档再取缓存实例（见上面 blurEffectCache 的说明）：
                                         // 半径不变时拿到的是**同一个** BlurEffect，图层不必重建。
                                         val blurProgress = (drawerOffset.value / drawerWidthPx).coerceIn(0f, 1f) * materialProgress.value
@@ -636,7 +889,7 @@ class MainActivity : ComponentActivity() {
                                 }
                                 // key 带上改写态（1.1.26.9）：进入/退出改写时手势重装，锁住横拖拽出侧滑页
                                 .pointerInput(currentScreen, editingPromptId) {
-                                    if (currentScreen == Screen.CHAT && editingPromptId == null) {
+                                    if (!isTablet && currentScreen == Screen.CHAT && editingPromptId == null) {
                                         detectHorizontalDragGestures(
                                             onDragStart = { isDragging = true; coroutineScope.launch { drawerOffset.snapTo(drawerOffset.value) } },
                                             onDragEnd = {
@@ -664,63 +917,119 @@ class MainActivity : ComponentActivity() {
                             // 当 pendingRevealScreen != null 时，先播圆形展开动画，再真正切换 screen
                             val effectiveScreen = pendingRevealScreen ?: currentScreen
     
-    PageMotion(
-        targetState = effectiveScreen,
-        distancePx = with(density) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.toPx() },
-        forward = { initial, target -> target.motionDepth >= initial.motionDepth },
-        label = "screen_reveal"
-    ) { screen ->
+    lateinit var screenContent: @Composable (Screen) -> Unit
+    screenContent = { screen ->
+        val paneControls = LocalPaneControls.current
+        fun canNavigateFromChat() = currentScreen == Screen.CHAT || floatingBaseTouchable()
         when (screen) {
             Screen.CHAT -> ChatScreen(
                 viewModel = chatViewModel, isDark = isDark,
                 onOpenDrawer = { drawerOpen = true },
-                onOpenNewRules = { currentScreen = Screen.NEW_RULES },
+                onOpenNewRules = {
+                    if (canNavigateFromChat()) {
+                        val requestedConversationId = currentConvId
+                        requestBaseNavigation {
+                        if (requestedConversationId != null && chatViewModel.conversations.value.none {
+                            it.id == requestedConversationId
+                        }) return@requestBaseNavigation
+                        tabletNavigationOrigin = TabletPane.DETAIL
+                        rulesConversationId = requestedConversationId
+                        paneControls?.showDetail?.invoke()
+                        navigateTo(Screen.NEW_RULES)
+                        }
+                    }
+                },
                 onOpenModelEditor = { type, editing ->
-                    if (com.freechat.data.ModelAccessPolicy.canEdit(editing) ||
-                        com.freechat.dev.DevMode.canEditBuiltIn(this@MainActivity)
+                    if (canNavigateFromChat() && (com.freechat.data.ModelAccessPolicy.canEdit(editing) ||
+                        com.freechat.dev.DevMode.canEditBuiltIn(this@MainActivity))
                     ) {
+                        requestBaseNavigation {
                         // Custom model shortcut returns to chat; built-ins have no editor route.
                         modelEditorType = type
                         modelEditorEditing = editing
                         modelEditorFromChat = true
-                        currentScreen = Screen.MODEL_EDITOR
+                        tabletNavigationOrigin = TabletPane.DETAIL
+                        navigateTo(Screen.MODEL_EDITOR)
+                        }
                     }
                 },
                 revealTrigger = newChatRevealTrigger,
                 onRevealComplete = { newChatRevealTrigger = 0 },
                 onNewChatReveal = { _ ->
-                    newChatRevealTrigger++
+                    if (canNavigateFromChat()) newChatRevealTrigger++
                 },
-                onNewChat = { newChatRevealTrigger = 0; currentScreen = Screen.NEW_CHAT_MODE },
+                onNewChat = {
+                    if (canNavigateFromChat()) {
+                        requestBaseNavigation {
+                        tabletNavigationOrigin = TabletPane.DETAIL
+                        paneControls?.showDetail?.invoke()
+                        newChatRevealTrigger = 0; navigateTo(Screen.NEW_CHAT_MODE)
+                        }
+                    }
+                },
                 onOpenCharacterSetup = {
-                    characterSetupInitial = chatViewModel.currentCharacter.value
-                    currentScreen = Screen.CHARACTER_SETUP
+                    if (canNavigateFromChat()) {
+                        val requestedConversationId = currentConvId
+                        val requestedProfile = chatViewModel.currentCharacter.value
+                        requestBaseNavigation {
+                        if (requestedConversationId != null && chatViewModel.conversations.value.none {
+                            it.id == requestedConversationId
+                        }) return@requestBaseNavigation
+                        tabletNavigationOrigin = TabletPane.DETAIL
+                        characterSetupInitial = requestedProfile
+                        characterSetupConversationId = requestedConversationId
+                        paneControls?.showDetail?.invoke()
+                        navigateTo(Screen.CHARACTER_SETUP)
+                        }
+                    }
                 },
                 hazeState = chatHazeState,
-                isDrawerOpen = drawerOpen,
+                isDrawerOpen = !isTablet && drawerOpen,
+                navigationEnabled = canNavigateFromChat(),
+                canInteract = {
+                    currentScreen != Screen.LEARNING && (currentScreen == Screen.CHAT || floatingBaseTouchable() ||
+                        (isTablet && tabletDisplayMode == TabletDisplayMode.EMBEDDED &&
+                            (currentScreen == Screen.NEW_RULES ||
+                                (currentScreen == Screen.CHARACTER_SETUP && characterSetupInitial != null))))
+                },
                 onOpenAsrEditor = {
+                    if (canNavigateFromChat()) {
+                    requestBaseNavigation {
                     modelEditorType = ModelType.ASR
                     modelEditorEditing = null
                     modelEditorFromChat = true
-                    currentScreen = Screen.MODEL_EDITOR
+                    tabletNavigationOrigin = TabletPane.DETAIL
+                    navigateTo(Screen.MODEL_EDITOR)
+                    }
+                    }
                 },
                 onOpenAccount = {
+                    if (canNavigateFromChat()) {
+                    requestBaseNavigation {
                     accountFromChat = true
-                    currentScreen = Screen.ACCOUNT
+                    tabletNavigationOrigin = TabletPane.DETAIL
+                    navigateTo(Screen.ACCOUNT)
+                    }
+                    }
                 }
             )
-            Screen.SETTINGS -> SettingsScreen(
+            Screen.SETTINGS -> {
+            val tabletDetail = if (LocalTabletUi.current) currentScreen.takeIf {
+                it in setOf(Screen.VOICE_DEBUG, Screen.CHANGELOG, Screen.AGREEMENT, Screen.AUTHOR_WORDS) ||
+                    (it == Screen.MODEL_EDITOR && !modelEditorFromChat)
+            } else null
+            SettingsScreen(
                 viewModel = chatViewModel, isDark = isDark,
                 onBack = {
-                    currentScreen = Screen.CHAT
-                    drawerOpen = true
+                    navigateBack(Screen.CHAT)
+                    drawerOpen = !isTablet
                     pendingRevealScreen = null
                 },
                 onOpenVoiceDebug = {
-                    currentScreen = Screen.VOICE_DEBUG
+                    navigateTo(Screen.VOICE_DEBUG)
                 },
                 onOpenChangelog = {
-                    currentScreen = Screen.CHANGELOG
+                    navigateTo(Screen.CHANGELOG)
                 },
                 onOpenModelEditor = { type, editing ->
                     if (com.freechat.data.ModelAccessPolicy.canEdit(editing) ||
@@ -729,14 +1038,14 @@ class MainActivity : ComponentActivity() {
                         modelEditorType = type
                         modelEditorEditing = editing
                         modelEditorFromChat = false
-                        currentScreen = Screen.MODEL_EDITOR
+                        navigateTo(Screen.MODEL_EDITOR)
                     }
                 },
                 onOpenAgreement = {
-                    currentScreen = Screen.AGREEMENT
+                    navigateTo(Screen.AGREEMENT)
                 },
                 onOpenAuthorWords = {
-                    currentScreen = Screen.AUTHOR_WORDS
+                    navigateTo(Screen.AUTHOR_WORDS)
                 },
                 openAboutOnLaunch = settingsOpenAbout,
                 openAuthorOnLaunch = settingsOpenAuthor,
@@ -746,37 +1055,42 @@ class MainActivity : ComponentActivity() {
                     settingsOpenAbout = false
                     settingsOpenAuthor = false
                     settingsOpenModelList = null
-                }
+                },
+                tabletDetailKey = tabletDetail?.name,
+                tabletDetailBack = tabletNavigationBack,
+                tabletDetailContent = tabletDetail?.let { detail -> { screenContent(detail) } },
+                onTabletCategorySelected = { navigateTo(Screen.SETTINGS) },
             )
+            }
             // 返回回侧栏（跟收藏一致）—— 账号入口在抽屉里，不在了设置页；
             // 「连接微信」登录引导进来的返回直接回聊天（accountFromChat，1.0.94）
             Screen.ACCOUNT -> AccountScreen(
                 onBack = {
-                    currentScreen = Screen.CHAT
-                    drawerOpen = !accountFromChat
+                    navigateBack(Screen.CHAT)
+                    drawerOpen = !isTablet && !accountFromChat
                 }
             )
             Screen.VOICE_DEBUG -> VoiceDebugScreen(
                 viewModel = chatViewModel, isDark = isDark,
                 onBack = {
-                    currentScreen = Screen.SETTINGS
+                    navigateBack(Screen.SETTINGS)
                 }
             )
             Screen.CHANGELOG -> ChangelogScreen(
                 onBack = backToAboutPage
             )
-            Screen.MODEL_EDITOR -> ModelEditorScreen(
+            Screen.MODEL_EDITOR -> key(modelEditorType, modelEditorEditing?.id) { ModelEditorScreen(
                 viewModel = chatViewModel,
                 modelType = modelEditorType ?: ModelType.LANGUAGE,
                 editing = modelEditorEditing,
                 isDark = isDark,
                 onBack = {
-                    currentScreen = if (modelEditorFromChat) Screen.CHAT else {
+                    navigateBack(if (modelEditorFromChat) Screen.CHAT else {
                         settingsOpenModelList = modelEditorType
                         Screen.SETTINGS
-                    }
+                    })
                 }
-            )
+            ) }
             Screen.AGREEMENT -> AgreementScreen(
                 onBack = backToAboutPage
             )
@@ -788,70 +1102,56 @@ class MainActivity : ComponentActivity() {
                 isDark = isDark,
                 listState = favoritesListState,
                 onBack = {
-                    currentScreen = Screen.CHAT
-                    drawerOpen = true
+                    navigateBack(Screen.CHAT)
+                    drawerOpen = !isTablet
                     pendingRevealScreen = null
                 },
                 onOpenDetail = { item ->
                     favoriteDetailItem = item
-                    currentScreen = Screen.FAVORITE_DETAIL
+                    paneControls?.showDetail?.invoke()
+                    navigateTo(Screen.FAVORITE_DETAIL)
                 }
             )
             Screen.FAVORITE_DETAIL -> {
                 val detailItem = favoriteDetailItem
-                if (detailItem != null) {
-                    FavoritesDetailScreen(
-                        viewModel = chatViewModel,
-                        item = detailItem,
-                        isDark = isDark,
-                        onBack = { currentScreen = Screen.FAVORITES },
-                        onUnfavorite = {
-                            // 详情页展示的是「一整段连续收藏」，取消收藏也应该整段清掉，
-                            // 只翻段首那一条的话回到列表页那一行不会消失、只是原地换成下一条
-                            chatViewModel.unfavoriteItems(listOf(detailItem))
-                            currentScreen = Screen.FAVORITES
-                        },
-                        onOpenOriginal = {
-                            chatViewModel.switchToConversation(detailItem.conversation)
-                            chatViewModel.requestScrollToMessage(detailItem.message.id)
-                            currentScreen = Screen.CHAT
-                            drawerOpen = false
-                        }
-                    )
-                }
+                if (detailItem != null) FavoriteDetail(detailItem)
             }
-            Screen.NEW_RULES -> NewRulesScreen(
+            Screen.NEW_RULES -> key(rulesConversationId) { NewRulesScreen(
                 viewModel = chatViewModel,
-                convId = currentConvId ?: "",
+                convId = rulesConversationId ?: currentConvId ?: "",
                 isDark = isDark,
-                onBack = { currentScreen = Screen.CHAT }
-            )
+                onBack = { navigateBack(Screen.CHAT) }
+            ) }
             Screen.NEW_CHAT_MODE -> NewChatModeScreen(
                 isDark = isDark,
-                onBack = { currentScreen = Screen.CHAT },
+                onBack = { navigateBack(Screen.CHAT) },
                 onSelectStandard = {
                     chatViewModel.newConversation(ChatMode.STANDARD, null)
-                    currentScreen = Screen.CHAT
+                    if (isTablet) tabletChatArrival++
+                    navigateTo(Screen.CHAT)
                 },
                 onSelectCompanion = {
                     characterSetupInitial = null
-                    currentScreen = Screen.CHARACTER_SETUP
+                    characterSetupConversationId = null
+                    navigateTo(Screen.CHARACTER_SETUP)
                 }
             )
-            Screen.CHARACTER_SETUP -> CharacterSetupScreen(
+            Screen.CHARACTER_SETUP -> key(characterSetupConversationId) { CharacterSetupScreen(
                 viewModel = chatViewModel,
                 isDark = isDark,
+                conversationId = characterSetupConversationId,
                 onBack = {
                     chatViewModel.clearShareDraft() // 放弃创建：暂存的分享包内容不留到下个角色
-                    currentScreen = if (characterSetupInitial != null) Screen.CHAT else Screen.NEW_CHAT_MODE
+                    navigateBack(if (characterSetupInitial != null) Screen.CHAT else Screen.NEW_CHAT_MODE)
                 },
                 onCreate = { profile ->
                     if (characterSetupInitial != null) {
+                        val targetId = characterSetupConversationId
+                        if (targetId == null || chatViewModel.isConversationBusy(targetId)) return@CharacterSetupScreen
                         val oldProfile = characterSetupInitial!!
-                        chatViewModel.updateCurrentCharacter(profile)
                         // 进学习页：AI 根据修改点重新理解角色（不静默，给可见反馈）
                         learningUpdating = true
-                        currentScreen = Screen.LEARNING
+                        navigateTo(Screen.LEARNING)
                         coroutineScope.launch {
                             val start = System.currentTimeMillis()
                             val enriched = chatViewModel.regeneratePersona(oldProfile, profile)
@@ -861,8 +1161,12 @@ class MainActivity : ComponentActivity() {
                             if (enriched.personaPrompt.isBlank()) {
                                 android.widget.Toast.makeText(this@MainActivity, currentStrings.roleLearningRejected, android.widget.Toast.LENGTH_LONG).show()
                             }
-                            chatViewModel.updateCurrentCharacter(enriched)
-                            currentScreen = Screen.CHAT
+                            if (enriched.personaPrompt.isNotBlank()) {
+                                navigateBack(if (chatViewModel.updateCharacter(targetId, enriched))
+                                    Screen.CHAT else Screen.CHARACTER_SETUP)
+                            } else {
+                                navigateBack(Screen.CHARACTER_SETUP)
+                            }
                         }
                     } else if (chatViewModel.hasShareDraft()) {
                         // 分享包导入后的「创建角色」（1.1.26.3）：消息/记忆已暂存，直接成建不走
@@ -871,7 +1175,7 @@ class MainActivity : ComponentActivity() {
                     } else {
                         // 首次创建：进加载页，AI 深度学习人设再开始聊天
                         learningUpdating = false
-                        currentScreen = Screen.LEARNING
+                        navigateTo(Screen.LEARNING)
                         coroutineScope.launch {
                             val start = System.currentTimeMillis()
                             val enriched = if (profile.personaPrompt.isNotBlank()) {
@@ -889,20 +1193,167 @@ class MainActivity : ComponentActivity() {
                             val remain = minLearnMs - (System.currentTimeMillis() - start)
                             if (remain > 0) kotlinx.coroutines.delay(remain)
                             // 角色立即建好并落侧滑栏，直接进聊天页
-                            chatViewModel.startCompanionConversation(enriched)
-                            currentScreen = Screen.CHAT
+                            if (enriched.personaPrompt.isNotBlank()) {
+                                chatViewModel.startCompanionConversation(enriched)
+                                navigateBack(Screen.CHAT)
+                            } else {
+                                navigateBack(Screen.CHARACTER_SETUP)
+                            }
                         }
                     }
                 },
                 onSaveSimulation = { profile ->
                     // 预览态只改了模拟设置：直接更新角色并返回，不触发学习页
-                    chatViewModel.updateCurrentCharacter(profile)
-                    currentScreen = Screen.CHAT
+                    val targetId = characterSetupConversationId
+                    if (targetId != null && !chatViewModel.isConversationBusy(targetId) &&
+                        chatViewModel.updateCharacter(targetId, profile)) navigateBack(Screen.CHAT)
                 },
-                initial = characterSetupInitial
-            )
+                initial = characterSetupInitial,
+                conversationHasMessages = conversations.any {
+                    it.id == characterSetupConversationId && it.messageCount > 0
+                },
+                isSavingBlocked = characterSetupConversationId in busyConversationIds,
+                canSubmit = { !chatViewModel.isConversationBusy(characterSetupConversationId) },
+            ) }
             Screen.LEARNING -> PersonaLearningScreen(updating = learningUpdating)
         }
+    }
+
+    val latestScreenContent = rememberUpdatedState(screenContent)
+    val persistentChat = remember { movableContentOf { latestScreenContent.value(Screen.CHAT) } }
+    val persistentSettings = remember { movableContentOf { latestScreenContent.value(Screen.SETTINGS) } }
+    // Retain the form under the exclusive learning overlay, including its unsaved draft on failure.
+    val presentedScreen = if (effectiveScreen == Screen.LEARNING) Screen.CHARACTER_SETUP else effectiveScreen
+    CompositionLocalProvider(com.freechat.ui.animation.LocalPageActive provides (currentScreen != Screen.LEARNING)) {
+    Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (currentScreen == Screen.LEARNING) 0f else 1f }
+        .paneInteraction(currentScreen != Screen.LEARNING)) {
+    if (isTablet) {
+        val supporting = presentedScreen == Screen.NEW_RULES ||
+            (presentedScreen == Screen.CHARACTER_SETUP && characterSetupInitial != null)
+        val creating = presentedScreen == Screen.CHARACTER_SETUP && characterSetupInitial == null
+        // New conversations always use the embedded workflow, regardless of overlay preference.
+        val floating = tabletDisplayMode == TabletDisplayMode.FLOATING && !creating &&
+            presentedScreen != Screen.NEW_CHAT_MODE
+        val embeddedSupport = supporting && !floating
+        val embeddedAccount = presentedScreen == Screen.ACCOUNT && !floating
+        val embeddedChatModel = presentedScreen == Screen.MODEL_EDITOR && modelEditorFromChat && !floating
+        var lastAuxiliary by remember { mutableStateOf(Screen.NEW_RULES) }
+        val auxiliaryScreen = if (supporting) presentedScreen else lastAuxiliary
+        SideEffect { if (supporting) lastAuxiliary = presentedScreen }
+        val destination = when {
+            presentedScreen == Screen.CHAT || presentedScreen == Screen.NEW_CHAT_MODE || embeddedSupport ||
+                embeddedAccount || embeddedChatModel -> null
+            creating -> TabletDestination.CREATION
+            presentedScreen == Screen.NEW_RULES -> TabletDestination.RULES
+            presentedScreen == Screen.CHARACTER_SETUP -> TabletDestination.CHARACTER
+            presentedScreen == Screen.FAVORITES || presentedScreen == Screen.FAVORITE_DETAIL -> TabletDestination.FAVORITES
+            presentedScreen == Screen.ACCOUNT -> TabletDestination.ACCOUNT
+            presentedScreen == Screen.MODEL_EDITOR && modelEditorFromChat -> TabletDestination.CHAT_MODEL
+            else -> TabletDestination.SETTINGS
+        }
+        val lastDestinations = remember { mutableStateMapOf<TabletDestination, Screen>() }
+        SideEffect { if (destination != null) lastDestinations[destination] = presentedScreen }
+        val requestedHomeDetail = when {
+            presentedScreen == Screen.NEW_CHAT_MODE -> Screen.NEW_CHAT_MODE.name
+            embeddedAccount || embeddedChatModel -> presentedScreen.name
+            else -> null
+        }
+        var retainedHomeDetail by remember { mutableStateOf<String?>(null) }
+        val homeDetail = if (floating && destination != null) null
+            else if (destination == null) requestedHomeDetail else retainedHomeDetail
+        SideEffect { if (destination == null) retainedHomeDetail = requestedHomeDetail }
+        val tabletMotion = com.freechat.ui.animation.LocalMotionEnabled.current
+        val homeArrival = remember(tabletWorkspaceArrival) {
+            Animatable(if (tabletWorkspaceArrival > 0 && tabletMotion) 1f else 0f)
+        }
+        LaunchedEffect(homeArrival, tabletMotion) {
+            if (tabletMotion) homeArrival.animateTo(0f, FreeChatAnimation.tabletLayer) else homeArrival.snapTo(0f)
+        }
+        val homeSceneMotion = remember(homeArrival) {
+            TabletSceneMotion(derivedStateOf { -homeArrival.value }, derivedStateOf { homeArrival.value })
+        }
+        val floatingSide = when (tabletFloatingSide) {
+            TabletFloatingSide.LEFT -> TabletPane.LIST
+            TabletFloatingSide.RIGHT -> TabletPane.DETAIL
+            TabletFloatingSide.BOTH -> tabletNavigationOrigin
+        }
+        Box(Modifier.fillMaxSize().zIndex(if (destination == null && !tabletNavigationBack) 1f else 0f)) {
+        CompositionLocalProvider(LocalTabletSceneMotion provides homeSceneMotion) {
+        TabletChatCanvas(
+            supporting = embeddedSupport,
+            active = destination == null || (floating && tabletUnderlyingTouch),
+            listEnabled = editingPromptId == null,
+            modeSelection = homeDetail == Screen.NEW_CHAT_MODE.name,
+            arrivalKey = tabletChatArrival,
+            detailPage = homeDetail?.takeUnless { it == Screen.NEW_CHAT_MODE.name },
+            detailBack = tabletNavigationBack,
+            listPane = { ConversationList() },
+            chatPane = { persistentChat() },
+            auxiliaryPane = { screenContent(auxiliaryScreen) },
+            modePane = { screenContent(Screen.NEW_CHAT_MODE) },
+            detailPane = { page -> screenContent(Screen.valueOf(page)) },
+        )
+        }
+        }
+        TabletDestinationLayer(destination, floating, floatingSide, back = tabletNavigationBack,
+            allowBaseTouch = tabletUnderlyingTouch,
+            windowState = floatingWindow,
+            onClose = { navigateBack(Screen.CHAT) }) { group ->
+        val page = if (group == destination) presentedScreen else lastDestinations[group] ?: presentedScreen
+        val destinationContent: @Composable (Screen) -> Unit = { shown ->
+        CompositionLocalProvider(LocalFloatingWindowRoot provides (shown in setOf(Screen.SETTINGS,
+            Screen.FAVORITES, Screen.ACCOUNT, Screen.NEW_RULES, Screen.CHARACTER_SETUP) ||
+            group == TabletDestination.CHAT_MODEL)) {
+        if (group == TabletDestination.SETTINGS && (LocalTabletUi.current || shown == Screen.SETTINGS)) {
+            persistentSettings()
+        } else if (group == TabletDestination.CREATION) {
+            screenContent(shown)
+        } else if (!LocalTabletUi.current) {
+            screenContent(shown)
+        } else when {
+            group == TabletDestination.FAVORITES -> TabletWorkspace(
+                workspaceKey = "favorites",
+                focused = if (page == Screen.FAVORITE_DETAIL) TabletPane.DETAIL else TabletPane.LIST,
+                listPane = { screenContent(Screen.FAVORITES) },
+                detailPane = {
+                    TabletPageMotion(
+                        targetState = if (page == Screen.FAVORITE_DETAIL) favoriteDetailItem else null,
+                        back = tabletNavigationBack,
+                        label = "tablet_favorite_detail",
+                    ) { item ->
+                    if (item != null) FavoriteDetail(item)
+                    else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(currentStrings.selectFavorite, color = colors.TextTertiary)
+                        Box(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 8.dp)) { PaneExpandButton() }
+                    }
+                    }
+                },
+            )
+            else -> TabletMovingPane(TabletPane.DETAIL) {
+                Box(Modifier.fillMaxSize().background(colors.Background)) {
+                TabletPage(maxContentWidth = if (shown in setOf(Screen.ACCOUNT, Screen.VOICE_DEBUG,
+                Screen.CHANGELOG, Screen.AGREEMENT, Screen.AUTHOR_WORDS)) 840.dp else null) {
+                    screenContent(shown)
+            }
+            }
+            }
+        }
+        }
+        }
+        // The transition owner survives settings → model/about/voice detours in either presentation.
+        if (LocalTabletUi.current && group in setOf(TabletDestination.FAVORITES, TabletDestination.SETTINGS)) destinationContent(page)
+        else PageMotion(page,
+            with(density) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.toPx() },
+            forward = { initial, target -> target.motionDepth >= initial.motionDepth },
+            label = "tablet_destination_route") { destinationContent(it) }
+        }
+    } else PageMotion(
+        targetState = presentedScreen,
+        distancePx = with(density) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.toPx() },
+        forward = { initial, target -> target.motionDepth >= initial.motionDepth },
+        label = "screen_reveal",
+    ) { screenContent(it) }
+    }
     }
     
     // 圆形展开动画完成回调
@@ -910,7 +1361,7 @@ class MainActivity : ComponentActivity() {
         if (pendingRevealScreen != null) {
             // 等待动画帧
             kotlinx.coroutines.delay(60)
-            currentScreen = pendingRevealScreen!!
+            navigateTo(pendingRevealScreen!!)
             pendingRevealScreen = null
         }
     }
@@ -941,7 +1392,7 @@ class MainActivity : ComponentActivity() {
                     //    而 drawerOpen 是**离散量**（一次手势最多翻转两次），读它进组合几乎不要钱 ——
                     //    真正每帧都在变的 drawerOffset 依旧只在上面那个绘制块里读。
                     // =============================================
-                    run {
+                    if (!isTablet && currentScreen != Screen.LEARNING) run {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -998,7 +1449,7 @@ class MainActivity : ComponentActivity() {
                     // 上下两条模糊带（背景本来就是透明的）直接消失。改成布局期 offset 后节点真实躺在
                     // 它显示的位置上，滑动时位置回调照常触发、采样几何全程有效。
                     // 代价：滑动期间每帧重新摆位一次（只摆位不重新测量），静止时零开销。
-                    CompositionLocalProvider(LocalLiquidPageShift provides liquidDrawerShift) {
+                    if (!isTablet && currentScreen != Screen.LEARNING) CompositionLocalProvider(LocalLiquidPageShift provides liquidDrawerShift) {
                         Box(
                             modifier = Modifier
                                 .fillMaxHeight()
@@ -1044,63 +1495,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                         ) {
-    DrawerContent(
-        conversations = conversations, currentId = currentConvId, isDark = isDark,
-        drawerHazeState = drawerHazeState,
-        searchQuery = searchQuery, searchResults = searchResults,
-        favoriteConvIds = favoriteConvIds,
-        onSearchQueryChange = { chatViewModel.updateSearchQuery(it) },
-        onNewChat = {
-            drawerOpen = false
-            currentScreen = Screen.NEW_CHAT_MODE
-        },
-        onSelectConversation = { conv ->
-            // 对话立刻切（后台已经切好了），抽屉**只等一下下**再关：
-            // 立刻关的话竖条跟着整块侧滑页滑出屏幕左缘，A→B 那根竖条的滑行就白做了；
-            // 等它滑完再关又成了肉眼可见的卡顿（用户要「点了就进 Chat 页」）。
-            // 所以只等 INDICATOR_DRAWER_DELAY_MS —— 那时竖条已走完约九成，
-            // 剩下的零头和面板一起滑出屏幕，看着是交接。时序推导见那个常量的说明。
-            chatViewModel.switchToConversation(conv)
-            pendingDrawerClose?.cancel()
-            pendingDrawerClose = coroutineScope.launch {
-                delay(FreeChatAnimation.INDICATOR_DRAWER_DELAY_MS.toLong())
-                drawerOpen = false
-                pendingDrawerClose = null
-            }
-        },
-        onSelectSearchResult = { conv, msgId ->
-            chatViewModel.switchToConversation(conv)
-            chatViewModel.requestScrollToMessage(msgId)
-            drawerOpen = false
-        },
-        onPinConversation = { conv -> chatViewModel.togglePinConversation(conv) },
-        // 侧滑页多选：批量置顶 / 批量删除（各自只落盘一次）
-        onBatchPinConversations = { ids, pinned -> chatViewModel.setPinnedConversations(ids, pinned) },
-        // 三个弹层只在这里"举手"，弹层本体画在根 Box 末尾（原因见上面那几个 drawerXxx 状态）
-        onAskRenameConversation = { conv -> drawerRenameTarget = conv; drawerRenameText = conv.title },
-        onAskDeleteConversation = { conv -> drawerDeleteTarget = conv },
-        onAskBatchDelete = { convs -> drawerBatchDeleteTargets = convs },
-        drawerVisible = drawerOpen,
-        exitSelectKey = drawerExitSelectKey,
-        onOpenSettings = {
-            drawerOpen = false
-            settingsScrolls.clear() // 侧滑进设置统一回顶部（用户拍板口径）
-            pendingRevealScreen = Screen.SETTINGS
-        },
-        onOpenFavorites = {
-            drawerOpen = false
-            favoritesListState = androidx.compose.foundation.lazy.LazyListState(0, 0) // 侧滑进收藏统一回顶部
-            pendingRevealScreen = Screen.FAVORITES
-        },
-        onOpenAccount = {
-            drawerOpen = false
-            accountFromChat = false
-            pendingRevealScreen = Screen.ACCOUNT
-        },
-        onSettingsRowPositioned = { rect -> settingsRowBounds = rect },
-        onFavoritesRowPositioned = { rect -> favoritesRowBounds = rect },
-        onNewChatRect = { rect -> drawerNewChatRect = rect }
-    )
+                            ConversationList()
                         }
                     }
                     }  // ← 「弹层模糊源」整块结束（背景 / Chat 层 / 遮罩 / 侧滑层）
@@ -1111,7 +1506,7 @@ class MainActivity : ComponentActivity() {
                     //    Drawer: 棕字 24sp，滑入抽屉顶部
                     //    letterSpacing 固定不变，避免过渡中文本宽度变化导致闪跳
                     // =============================================
-                    if (currentScreen == Screen.CHAT) {
+                    if (!isTablet && currentScreen == Screen.CHAT) {
                         // 标题**必须**单独拆成一个 composable：它每帧都要读 drawerOffset
                         // （手指拖侧滑时每帧都变）。写在根 Box 这一层读，一帧重组的
                         // 就是根 Box 的整段内容 —— 拖拉时掉帧有一份是它贡献的。
@@ -1189,6 +1584,7 @@ class MainActivity : ComponentActivity() {
                         exit = FreeChatAnimation.dialogExit()
                     ) {
                         com.freechat.ui.components.FeatureRecPage(onDone = {
+                            chatViewModel.onRemoteNoticeChoice("builtin-feature", "done")
                             getSharedPreferences("feature_rec", android.content.Context.MODE_PRIVATE)
                                 .edit().putInt("last_shown", com.freechat.BuildConfig.VERSION_CODE).apply()
                             featureRecVisible = false
@@ -1303,41 +1699,89 @@ class MainActivity : ComponentActivity() {
                     //    「去清理」= 开侧滑页就结束 —— 删不删、删哪些全由用户自己定；
                     //    「去更新」= 进设置-关于FreeChat，下载安装走那页已有的「检查更新」按钮。
                     // =============================================
-                    NoticeDialog(
-                        visible = copyNoticeVisible,
-                        title = currentStrings.copyNoticeTitle,
-                        body = currentStrings.copyNoticeBody,
-                        confirmLabel = currentStrings.copyNoticeConfirm,
-                        dismissLabel = currentStrings.cancel,
-                        checkboxLabel = currentStrings.copyNoticeNever,
+                    // 云控文案（builtin-copy）：外壳/动画/勾选项与原版完全一致，只换文字与按钮
+                    run {
+                        val cloud = reserved["builtin-copy"]
+                        val primary = cloud?.buttons?.firstOrNull { it.action != "dismiss" }
+                        NoticeDialog(
+                            visible = copyNoticeVisible,
+                            title = cloud?.title ?: currentStrings.copyNoticeTitle,
+                            body = cloud?.body ?: currentStrings.copyNoticeBody,
+                            confirmLabel = primary?.label ?: currentStrings.copyNoticeConfirm,
+                            dismissLabel = cloud?.buttons?.firstOrNull { it.action == "dismiss" }?.label ?: currentStrings.cancel,
+                            checkboxLabel = currentStrings.copyNoticeNever,
+                            colors = colors,
+                            isDark = isDark,
+                            advancedMaterial = advancedMaterial,
+                            hazeState = overlayHazeState,
+                            onConfirm = { never ->
+                                chatViewModel.onRemoteNoticeChoice("builtin-copy", primary?.id ?: "confirm")
+                                chatViewModel.dismissCopyNotice(never)
+                                if (primary != null) runNoticeAction(primary) else drawerOpen = true
+                            },
+                            onDismiss = { never ->
+                                chatViewModel.onRemoteNoticeChoice("builtin-copy", cloud?.buttons?.firstOrNull { it.action == "dismiss" }?.id ?: "dismiss")
+                                chatViewModel.dismissCopyNotice(never)
+                            }
+                        )
+                    }
+                    // 云控文案（builtin-update）：{version} 占位新版号；其余同上
+                    run {
+                        val cloud = reserved["builtin-update"]
+                        val primary = cloud?.buttons?.firstOrNull { it.action != "dismiss" }
+                        NoticeDialog(
+                            visible = updateNoticeVisible,
+                            title = cloud?.title?.replace("{version}", updateNotice?.versionName ?: "")
+                                ?: currentStrings.updateNoticeTitle(updateNotice?.versionName ?: ""),
+                            body = cloud?.body ?: currentStrings.updateNoticeBody,
+                            confirmLabel = primary?.label ?: currentStrings.updateNoticeConfirm,
+                            dismissLabel = cloud?.buttons?.firstOrNull { it.action == "dismiss" }?.label ?: currentStrings.cancel,
+                            checkboxLabel = currentStrings.updateNoticeSnooze,
+                            colors = colors,
+                            isDark = isDark,
+                            advancedMaterial = advancedMaterial,
+                            hazeState = overlayHazeState,
+                            onConfirm = { snooze ->
+                                chatViewModel.onRemoteNoticeChoice("builtin-update", primary?.id ?: "confirm")
+                                chatViewModel.dismissUpdateNotice(snooze)
+                                if (primary != null) runNoticeAction(primary) else {
+                                    navigateTo(Screen.SETTINGS)
+                                    settingsOpenAbout = true
+                                }
+                            },
+                            onDismiss = { snooze ->
+                                chatViewModel.onRemoteNoticeChoice("builtin-update", cloud?.buttons?.firstOrNull { it.action == "dismiss" }?.id ?: "dismiss")
+                                chatViewModel.dismissUpdateNotice(snooze)
+                            }
+                        )
+                    }
+                    // 云端弹窗（2026-10-18）：两种外壳按 style 分流，弹出/选择都留痕回服务器
+                    RemoteAlertDialog(
+                        visible = remoteCurrent != null && remoteCurrent.style == "alert",
+                        notice = remoteCurrent,
                         colors = colors,
                         isDark = isDark,
                         advancedMaterial = advancedMaterial,
                         hazeState = overlayHazeState,
-                        onConfirm = { never ->
-                            chatViewModel.dismissCopyNotice(never)
-                            drawerOpen = true
-                        },
-                        onDismiss = { never -> chatViewModel.dismissCopyNotice(never) }
+                        onButton = remoteAdvance
                     )
-                    NoticeDialog(
-                        visible = updateNoticeVisible,
-                        title = currentStrings.updateNoticeTitle(updateNotice?.versionName ?: ""),
-                        body = currentStrings.updateNoticeBody,
-                        confirmLabel = currentStrings.updateNoticeConfirm,
-                        dismissLabel = currentStrings.cancel,
-                        checkboxLabel = currentStrings.updateNoticeSnooze,
-                        colors = colors,
-                        isDark = isDark,
-                        advancedMaterial = advancedMaterial,
-                        hazeState = overlayHazeState,
-                        onConfirm = { snooze ->
-                            chatViewModel.dismissUpdateNotice(snooze)
-                            currentScreen = Screen.SETTINGS
-                            settingsOpenAbout = true
-                        },
-                        onDismiss = { snooze -> chatViewModel.dismissUpdateNotice(snooze) }
-                    )
+                    if (remoteCurrent != null && remoteCurrent.style == "fullscreen") {
+                        RemoteFullscreenNotice(
+                            notice = remoteCurrent,
+                            colors = colors,
+                            onButton = remoteAdvance
+                        )
+                    }
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = currentScreen == Screen.LEARNING,
+                        enter = fadeIn(FreeChatAnimation.overlayFadeIn),
+                        exit = fadeOut(FreeChatAnimation.overlayFadeOut),
+                    ) {
+                        Box(Modifier.fillMaxSize().pageBackground(colors.Background)
+                            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }) {
+                            PersonaLearningScreen(updating = learningUpdating)
+                        }
+                    }
                 }
             }
             } // CompositionLocalProvider

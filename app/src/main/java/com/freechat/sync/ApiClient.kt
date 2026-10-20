@@ -54,10 +54,13 @@ object ApiClient {
         method: String,
         path: String,
         token: String? = null,
-        body: Any? = null
+        body: Any? = null,
+        clientId: String? = null
     ): JsonObject = withContext(Dispatchers.IO) {
         val builder = Request.Builder().url(BASE + path)
         if (token != null) builder.header("Authorization", "Bearer $token")
+        // 2026-10-15 合规：clientId 走 X-Client-Id 头（查询串会进 nginx 日志）；老服务端也认这个头
+        if (clientId != null) builder.header("X-Client-Id", clientId)
         when (method) {
             "GET" -> builder.get()
             "POST" -> builder.post(bodyOf(body) ?: "{}".toRequestBody(JSON))
@@ -106,24 +109,10 @@ object ApiClient {
     /**
      * 设备名 —— 进账号页那个「登录中的设备」列表。
      *
-     * 安卓这边能报的是**认证型号**（`Build.MODEL`，比如小米的 `2201122C`），比浏览器 UA 精确得多，
-     * 所以自报优先；服务端只在客户端没报时才按 User-Agent 猜（见 server 的 `deviceLabel`）。
-     *
-     * 品牌名首字母大写是刻意的：`MANUFACTURER` 是 `Xiaomi`，而用户列表里两种写法混着看很别扭。
-     * 全小写的 `Build.DEVICE`（代号，如 `zeus`）**不报** —— 它是给内核用的代号，
-     * 用户对着它认不出自己的手机，报上去只会让列表更难读。
+     * 2026-10-15 合规：不再拼品牌/硬件型号（MANUFACTURER+MODEL），只报平台级标签。
      */
     private val deviceName: String by lazy {
-        val brand = android.os.Build.MANUFACTURER.orEmpty().trim().replaceFirstChar { it.uppercase() }
-        val model = android.os.Build.MODEL.orEmpty().trim()
-        val os = "Android ${android.os.Build.VERSION.RELEASE}".trim()
-        // 有些厂商的 MODEL 本来就带着品牌（"Xiaomi 14"），那就别再加一遍前缀
-        val head = when {
-            model.isBlank() -> brand
-            brand.isBlank() || model.startsWith(brand, ignoreCase = true) -> model
-            else -> "$brand $model"
-        }
-        listOf(head, os).filter { it.isNotBlank() }.joinToString(" · ")
+        "Android App · Android ${android.os.Build.VERSION.RELEASE}"
     }
 
     suspend fun register(username: String, password: String): AuthResult =
@@ -344,7 +333,7 @@ object ApiClient {
 
     /**
      * 提交反馈。**不带令牌**——未登录也能发（拍板）；登录态多带一份 Authorization，
-     * 服务器把反馈挂到账号上。[device] = 机型/系统/应用版本/语言 的一行摘要。
+     * 服务器把反馈挂到账号上。[device] = 平台级摘要（系统版本 · 应用版本，无品牌/型号）。
      */
     suspend fun submitFeedback(content: String, clientId: String, device: String, token: String? = null): JsonObject {
         val body = JsonObject()
@@ -354,21 +343,27 @@ object ApiClient {
         return call("POST", "/feedback", token = token, body = body)
     }
 
-    /** 我的反馈（只读清单）：user_id 或 clientId 命中都算；未登录只带 clientId */
+    /** 我的反馈（清单）：user_id 或 clientId 命中都算；未登录只带 clientId（走 X-Client-Id 头） */
     suspend fun myFeedback(clientId: String, token: String? = null): JsonArray {
-        val o = call(
-            "GET",
-            "/feedback/mine?clientId=${java.net.URLEncoder.encode(clientId, "UTF-8")}",
-            token = token
-        )
+        val o = call("GET", "/feedback/mine", token = token, clientId = clientId)
         return o.getAsJsonArray("feedbacks") ?: JsonArray()
+    }
+
+    /** 删自己的反馈：Bearer 登录态或 X-Client-Id 设备认领。404 当已删（幂等） */
+    suspend fun deleteFeedback(id: String, clientId: String, token: String? = null) {
+        try {
+            call("DELETE", "/feedback/$id", token = token, clientId = clientId)
+        } catch (e: ApiError) {
+            if (e.status != 404) throw e
+        }
     }
 
     /**
      * 「FreeChat从夯到拉」评分（1.1.28）：一设备只评一次由客户端保证（评完卡片消失）。
      * 落库=评分/设备型号/提交时间/版本号/账号（登录则由令牌挂上）；匿名可评。
+     * 2026-10-15 合规砍设备型号 → 2026-10-17 用户翻案：砍收集只限 Web 版，安卓照常上报。
      */
-    suspend fun submitRating(score: Int, device: String, version: String, versionCode: Int, token: String? = null): JsonObject {
+    suspend fun submitRating(score: Int, device: String = "", version: String, versionCode: Int, token: String? = null): JsonObject {
         val body = JsonObject()
         body.addProperty("score", score)
         body.addProperty("device", device)

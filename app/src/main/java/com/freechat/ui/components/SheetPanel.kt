@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.safeDrawing
@@ -115,9 +116,10 @@ fun BoxScope.SheetPanel(
     content: @Composable ColumnScope.() -> Unit
 ) {
     // 返回键先关弹层（声明得比页面自己的 BackHandler 晚，所以由它先接）
-    BackHandler(enabled = visible) { onDismiss() }
+    BackHandler(enabled = visible && com.freechat.ui.animation.LocalPageActive.current) { onDismiss() }
 
-    val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    val tablet = com.freechat.ui.adaptive.LocalTabletUi.current
+    val shape = if (tablet) RoundedCornerShape(28.dp) else RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     val progress = materialProgress()
     val lastConfirmLabel = remember { mutableStateOf(confirmLabel.orEmpty()) }
     SideEffect { if (confirmLabel != null) lastConfirmLabel.value = confirmLabel }
@@ -153,7 +155,8 @@ fun BoxScope.SheetPanel(
 
     AnimatedVisibility(
         visible = visible,
-        modifier = Modifier.align(Alignment.BottomCenter),
+        modifier = Modifier.align(Alignment.BottomCenter)
+            .then(if (tablet) Modifier.padding(horizontal = 24.dp, vertical = 20.dp).widthIn(max = 520.dp) else Modifier),
         // 弹层上滑：320ms 减速入位（稳稳停住，收尾不「撞墙」），
         // 收起 240ms 加速 —— 2026-09 用户点名「参考 iOS」的那一套节奏
         enter = FreeChatAnimation.sheetEnter(),

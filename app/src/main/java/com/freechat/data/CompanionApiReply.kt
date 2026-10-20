@@ -6,6 +6,5 @@ import com.freechat.core.CompanionReply
 data class CompanionApiReply(val body: CompanionReply, val reasoningContent: String = "") {
     val emotion get() = body.emotion
     val segments get() = body.segments
-    val proactive get() = body.proactive
     val sources get() = body.sources
 }

@@ -1,5 +1,10 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.FloatingWindowBackButton
+import com.freechat.ui.adaptive.floatingHeaderInset
+
+import com.freechat.ui.adaptive.pageActionWidth
+
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -38,6 +43,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -62,10 +68,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -95,9 +103,27 @@ import com.freechat.model.ModelType
 import com.freechat.model.TempMode
 import com.freechat.model.ThemeMode
 import com.freechat.model.ChatMode
+import com.freechat.model.TabletDisplayMode
+import com.freechat.model.TabletFloatingSide
 import com.freechat.sync.Session
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.LocalPageActive
 import com.freechat.ui.animation.PageMotion
+import com.freechat.ui.adaptive.LocalTabletUi
+import com.freechat.ui.adaptive.LocalTabletDevice
+import com.freechat.ui.adaptive.LocalPaneControls
+import com.freechat.ui.adaptive.PaneExpandButton
+import com.freechat.ui.adaptive.TabletWorkspace
+import com.freechat.ui.adaptive.TabletPageMotion
+import com.freechat.ui.adaptive.paneImePadding
+import com.freechat.ui.adaptive.paneInteraction
+import com.freechat.ui.adaptive.tabletReadingGutter
+import com.freechat.ui.adaptive.tabletDisplayOptimization
+import com.freechat.ui.adaptive.tabletPageDisplayLogic
+import com.freechat.ui.adaptive.tabletDisplayModeLabel
+import com.freechat.ui.adaptive.tabletFloatingSideLabel
+import com.freechat.ui.adaptive.tabletFloatingPosition
+import com.freechat.ui.adaptive.tabletUnderlyingTouch
 import com.freechat.ui.components.MarkdownText
 import com.freechat.ui.components.ShareMenuRow
 import com.freechat.ui.components.SheetActionRow
@@ -108,10 +134,12 @@ import com.freechat.ui.theme.LocalMonoFontFamily
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.selectedFill
+import com.freechat.ui.theme.linkInk
 import com.freechat.ui.theme.selectedSubText
 import com.freechat.ui.theme.selectedText
 import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.frostedCard
+import com.freechat.ui.theme.floatingSurface
 import com.freechat.ui.components.HeaderIconButton
 import com.freechat.ui.components.HeaderTextButton
 import com.freechat.ui.components.NeumorphicSwitch as Switch
@@ -132,7 +160,41 @@ import com.freechat.util.saveBitmapToGallery
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
 
-private enum class SubScreen { LANGUAGE_MODEL, IMAGE_MODEL, VISION_MODEL, TTS_MODEL, ASR_MODEL, AI_MEMORY, FONT, INPUT_BOX, ABOUT_FREECHAT, AUTHOR, ICON, FEEDBACK, MY_FEEDBACK, MY_SHARES, DEV_PASSWORD, DEV_OPTIONS }
+private enum class SubScreen { LANGUAGE_MODEL, IMAGE_MODEL, VISION_MODEL, TTS_MODEL, ASR_MODEL, API_TUTORIAL, AI_MEMORY, FONT, INPUT_BOX, ABOUT_FREECHAT, AUTHOR, ICON, FEEDBACK, MY_FEEDBACK, MY_SHARES, DEV_PASSWORD, DEV_OPTIONS, TABLET_DISPLAY }
+
+private enum class SettingsCategory(val icon: ImageVector) {
+    TABLET_DISPLAY(Icons.Filled.TabletAndroid),
+    MODELS(Icons.Filled.SmartToy),
+    AI_OPTIMIZATION(Icons.Filled.AutoAwesome),
+    PERSONALIZATION(Icons.Filled.DarkMode),
+    GENERAL(Icons.Filled.Tune),
+    ABOUT(Icons.Filled.Info);
+
+    fun title(s: AppStrings): String = when (this) {
+        TABLET_DISPLAY -> s.tabletDisplayOptimization
+        MODELS -> s.sectionModels
+        AI_OPTIMIZATION -> s.sectionAiOptimize
+        PERSONALIZATION -> s.sectionSystemTheme
+        GENERAL -> s.sectionGeneral
+        ABOUT -> s.sectionAbout
+    }
+}
+
+private data class SettingsDetailPage(
+    val screen: SubScreen?,
+    val category: SettingsCategory,
+    val externalKey: String?,
+    val externalContent: (@Composable () -> Unit)?,
+)
+
+private fun modelPoolScreen(type: ModelType?): SubScreen? = when (type) {
+    ModelType.LANGUAGE -> SubScreen.LANGUAGE_MODEL
+    ModelType.VISUAL -> SubScreen.IMAGE_MODEL
+    ModelType.VISION -> SubScreen.VISION_MODEL
+    ModelType.TTS -> SubScreen.TTS_MODEL
+    ModelType.ASR -> SubScreen.ASR_MODEL
+    null -> null
+}
 
 /** 五个「模型池」二级页：顶部「添加模型」固定置顶，池子自己滚（1.1.29 工单④） */
 /**
@@ -176,11 +238,30 @@ fun SettingsScreen(
     openModelListOnLaunch: ModelType? = null,
     /** 1.1.26.7：滚动位置记忆（key=页面名，值=滚动像素）——由 MainActivity 持有，跨全屏旁路不丢 */
     levelScrolls: MutableMap<String, Int> = mutableMapOf(),
-    onAboutConsumed: () -> Unit = {}
+    onAboutConsumed: () -> Unit = {},
+    tabletModelPool: Boolean = false,
+    tabletDetailKey: String? = null,
+    tabletDetailBack: Boolean = false,
+    tabletDetailContent: (@Composable () -> Unit)? = null,
+    onTabletCategorySelected: () -> Unit = {},
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
+    val isTabletDevice = LocalTabletDevice.current || LocalTabletUi.current
+    val showTabletCategories = LocalTabletUi.current && !tabletModelPool
+    var selectedCategory by rememberSaveable {
+        mutableStateOf(when {
+            openAboutOnLaunch || openAuthorOnLaunch -> SettingsCategory.ABOUT
+            openModelListOnLaunch != null -> SettingsCategory.MODELS
+            else -> SettingsCategory.entries.getOrNull(levelScrolls["settings_selected_category"] ?: SettingsCategory.MODELS.ordinal) ?: SettingsCategory.MODELS
+        })
+    }
+    // The root clears this retained state on drawer entry, including the selected tablet category.
+    LaunchedEffect(selectedCategory, showTabletCategories) {
+        if (showTabletCategories) levelScrolls["settings_selected_category"] = selectedCategory.ordinal
+    }
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     val selectedModel by viewModel.selectedModel.collectAsState()
     val selectedVisualModel by viewModel.selectedVisualModel.collectAsState()
     val selectedVisionModel by viewModel.selectedVisionModel.collectAsState()
@@ -200,6 +281,9 @@ fun SettingsScreen(
     val fontSize by viewModel.fontSize.collectAsState()
     val inputStyle by viewModel.inputStyle.collectAsState()
     val inputBarState by viewModel.inputBarState.collectAsState()
+    val tabletDisplayMode by viewModel.tabletDisplayMode.collectAsState()
+    val tabletFloatingSide by viewModel.tabletFloatingSide.collectAsState()
+    val tabletUnderlyingTouch by viewModel.tabletUnderlyingTouch.collectAsState()
     val advancedMaterialSetting by viewModel.advancedMaterial.collectAsState()
     val headerBarStyle by viewModel.headerBarStyle.collectAsState()
     val advancedMaterial = LocalAdvancedMaterial.current
@@ -218,6 +302,8 @@ fun SettingsScreen(
     var previewCustomArgb by remember { mutableIntStateOf(0xFF346C98.toInt()) }
     var showInputStylePicker by remember { mutableStateOf(false) }
     var showInputBarStatePicker by remember { mutableStateOf(false) }
+    var showTabletDisplayModePicker by remember { mutableStateOf(false) }
+    var showTabletFloatingSidePicker by remember { mutableStateOf(false) }
     var showHeaderStylePicker by remember { mutableStateOf(false) }
     // 1.1.26.7：「我的分享」页共享状态（列表/多选/调节/动作菜单）——标题栏与浮层都在本页根 Box 渲染
     val myShares = remember { MySharesUiState() }
@@ -270,6 +356,31 @@ fun SettingsScreen(
     val feedbackStore = remember(context) { com.freechat.data.FeedbackDraftStore(context) }
     var feedbackDraft by remember { mutableStateOf(feedbackStore.load()) }
 
+    val dismissPageOverlays: () -> Unit = {
+        showThemePicker = false
+        showColorThemePicker = false
+        showInputStylePicker = false
+        showInputBarStatePicker = false
+        showTabletDisplayModePicker = false
+        showTabletFloatingSidePicker = false
+        showHeaderStylePicker = false
+        showTempPicker = false
+        showLengthPicker = false
+        showLanguagePicker = false
+        showChatModePicker = false
+        showFontSizePicker = false
+        showGlobalMemoryEditor = false
+        showWebSearchConfirm = false
+        showSearchSettings = false
+        showLiquidBackdropConfirm = false
+        showQrSaveSheet = false
+        if (showIconRestartConfirm) selectedIcon = activeIcon
+        showIconRestartConfirm = false
+        newMemoryText = ""
+        myShares.resetOverlays()
+        focusManager.clearFocus()
+    }
+
     // 作者页二维码保存：取那张**白底原图**（author_qr.jpg）写进相册 ——
     // 透明的那张只负责在页面里好看，直接存出去在相册里背景会变黑、扫不出来。
     // 1.0.50 起不再逐像素二值化（那会把中间的 logo 烧成一块黑）。
@@ -306,19 +417,42 @@ fun SettingsScreen(
     var subScreen by remember {
         mutableStateOf(
             if (openAuthorOnLaunch) SubScreen.AUTHOR
-            else if (openAboutOnLaunch) SubScreen.ABOUT_FREECHAT
-            else when (openModelListOnLaunch) {
-                ModelType.LANGUAGE -> SubScreen.LANGUAGE_MODEL
-                ModelType.VISUAL -> SubScreen.IMAGE_MODEL
-                ModelType.VISION -> SubScreen.VISION_MODEL
-                ModelType.TTS -> SubScreen.TTS_MODEL
-                ModelType.ASR -> SubScreen.ASR_MODEL
-                null -> null
-            }
+            else if (openAboutOnLaunch && !showTabletCategories) SubScreen.ABOUT_FREECHAT
+            else modelPoolScreen(openModelListOnLaunch)
         )
+    }
+    var tabletSubpageBack by remember { mutableStateOf(false) }
+    fun openSubScreen(screen: SubScreen) {
+        tabletSubpageBack = false
+        subScreen = screen
+    }
+    fun returnToAbout() {
+        tabletSubpageBack = true
+        subScreen = if (showTabletCategories) null else SubScreen.ABOUT_FREECHAT
+    }
+    var previousCategoryLayout by remember { mutableStateOf(showTabletCategories) }
+    LaunchedEffect(showTabletCategories) {
+        if (previousCategoryLayout && !showTabletCategories && selectedCategory == SettingsCategory.TABLET_DISPLAY) {
+            subScreen = SubScreen.TABLET_DISPLAY
+        } else if (!previousCategoryLayout && showTabletCategories && subScreen == SubScreen.TABLET_DISPLAY) {
+            selectedCategory = SettingsCategory.TABLET_DISPLAY
+            subScreen = null
+        } else if (!previousCategoryLayout && showTabletCategories && subScreen == SubScreen.ABOUT_FREECHAT) {
+            selectedCategory = SettingsCategory.ABOUT
+            subScreen = null
+        }
+        previousCategoryLayout = showTabletCategories
+    }
+    LaunchedEffect(openModelListOnLaunch, tabletModelPool) {
+        if (tabletModelPool && openModelListOnLaunch != null) {
+            subScreen = modelPoolScreen(openModelListOnLaunch)
+        }
     }
     LaunchedEffect(openAboutOnLaunch, openAuthorOnLaunch, openModelListOnLaunch) {
         if (openAboutOnLaunch || openAuthorOnLaunch || openModelListOnLaunch != null) onAboutConsumed()
+    }
+    LaunchedEffect(tabletDetailKey) {
+        if (showTabletCategories && tabletDetailKey != null) focusManager.clearFocus()
     }
 
     // 1.1.21/1.1.26.7：滚动位置记忆。低级页返回高级页回到点进去那一屏（「从哪点进去还回到哪」）；
@@ -328,19 +462,22 @@ fun SettingsScreen(
     // 子页返回键：优先返回设置主列表
     // Read the actual route inside the callback: a fast Back can arrive before recomposition
     // updates an enabled=subScreen!=null handler, otherwise it skips this level entirely.
-    BackHandler(enabled = com.freechat.ui.animation.LocalPageActive.current) {
+    val navigateBack: () -> Unit = {
         // 「我的分享」多选态：返回先退出多选，不跳页（对齐收藏页）
         if (subScreen == SubScreen.MY_SHARES && myShares.selectMode) {
             myShares.exitSelect()
-            return@BackHandler
-        }
-        // 「我的反馈」从反馈页进来：返回先回反馈页，再回设置（页级返回键同款）
-        when (subScreen) {
-            null -> onBack()
-            SubScreen.MY_FEEDBACK -> subScreen = SubScreen.FEEDBACK
-            // 作者页/非开源二级页都只从「关于FreeChat」进，返回回聚合页
-            SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS -> subScreen = SubScreen.ABOUT_FREECHAT
-            else -> subScreen = null
+        } else {
+            tabletSubpageBack = true
+            if (showTabletCategories) dismissPageOverlays()
+            if (tabletModelPool) onBack()
+            // 「我的反馈」从反馈页进来：返回先回反馈页，再回设置（页级返回键同款）
+            else when (subScreen) {
+                null -> onBack()
+                SubScreen.MY_FEEDBACK -> subScreen = SubScreen.FEEDBACK
+                // 作者页/非开源二级页都只从「关于FreeChat」进，返回回聚合页
+                SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS -> returnToAbout()
+                else -> subScreen = null
+            }
         }
     }
 
@@ -356,15 +493,17 @@ fun SettingsScreen(
     val pageTravelPx = with(LocalDensity.current) { com.freechat.ui.animation.MotionPolicy.PageTravelDp.dp.roundToPx() }
 
     CompositionLocalProvider(LocalSettingsHazeState provides hazeState) {
-    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+    val settingsPage: @Composable (Pair<SubScreen?, SettingsCategory>) -> Unit = { (pageScreen, pageCategory) ->
+    val readingGutter = tabletReadingGutter()
+    val settingsActive = LocalPageActive.current && (!showTabletCategories || tabletDetailKey == null)
+    CompositionLocalProvider(LocalPageActive provides settingsActive) {
+    BackHandler(enabled = settingsActive, onBack = navigateBack)
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)
+        .then(if (showTabletCategories) Modifier.paneInteraction(settingsActive) else Modifier)) {
         TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
-        PageMotion(
-            targetState = subScreen,
-            distancePx = pageTravelPx.toFloat(),
-            forward = { initial, target -> subScreenDepth(target) >= subScreenDepth(initial) },
-            label = "settings_subpage"
-        ) { screen ->
-        if (screen == null) {
+        val settingsBody: @Composable (Pair<SubScreen?, SettingsCategory>) -> Unit = { (screen, selectedCategory) ->
+        val embeddedAbout = showTabletCategories && screen == null && selectedCategory == SettingsCategory.ABOUT
+        if (screen == null && !embeddedAbout) {
             // ============ 主设置列表 ============
             Column(
                 modifier = Modifier
@@ -372,9 +511,10 @@ fun SettingsScreen(
                     .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                     // 果冻边界冗余（1.1.26.6）：主设置列表同款——顶/底继续拖跟手位移，松手回弹
                     .jellyOverscroll()
-                    .verticalScroll(com.freechat.ui.animation.rememberPersistentScrollState("main", levelScrolls))
+                    .verticalScroll(com.freechat.ui.animation.rememberPersistentScrollState(
+                        if (showTabletCategories) "settings_main_" + selectedCategory.name else "main", levelScrolls))
                     .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
-                    .padding(horizontal = 16.dp),
+                    .padding(horizontal = 16.dp + readingGutter),
                 // 卡片间距。**别再用 Spacer 微调卡片之间的间隙** ——
                 // spacedBy 是「相邻两个孩子之间」都插一份，写 Spacer(2.dp) 得到的是
                 // 8 + 2 + 8 = 18dp 而不是 2dp。1.0.53 之前这里一半卡片隔 8dp、一半隔 18dp，
@@ -385,40 +525,62 @@ fun SettingsScreen(
                 // 账号入口不在这儿 —— 它是侧栏左下角那个圆头像（未登录是灰的默认人像）。
                 // 设置页里再放一遍只会让人两处都去找。
 
+                if (isTabletDevice && !showTabletCategories) {
+                    SettingsRow {
+                        SettingsItem(Icons.Filled.TabletAndroid, s.tabletDisplayOptimization,
+                            s.tabletDisplayModeLabel(tabletDisplayMode), colors,
+                            onClick = { openSubScreen(SubScreen.TABLET_DISPLAY) })
+                    }
+                }
+                if (showTabletCategories && selectedCategory == SettingsCategory.TABLET_DISPLAY) {
+                    TabletDisplayPreferences(
+                        displayMode = tabletDisplayMode,
+                        floatingSide = tabletFloatingSide,
+                        underlyingTouch = tabletUnderlyingTouch,
+                        onOpenDisplayMode = { showTabletDisplayModePicker = true },
+                        onOpenFloatingSide = { showTabletFloatingSidePicker = true },
+                        onUnderlyingTouch = viewModel::setTabletUnderlyingTouch,
+                        showSectionLabel = false,
+                    )
+                }
+
                 // ──── 模型选择 ────
-                SectionLabel(Icons.Filled.SmartToy, s.sectionModels)
+                if (!showTabletCategories || selectedCategory == SettingsCategory.MODELS) {
+                if (!showTabletCategories) SectionLabel(Icons.Filled.SmartToy, s.sectionModels)
 
                 // 1.1.29 工单④：五个模型入口**各自独立一行**（不再把生图/识图、合成/识别各并一栏），
                 // 卡片与行距跟其它设置项完全一致（SettingsItem 同一套版式）。
                 // 语音两行的名字一律从**用户自己的模型库里查**（1.0.50）——没选/模型被删就说「未选择」。
                 SettingsRow {
                     SettingsItem(Icons.Filled.SmartToy, s.languageModel, selectedModel.displayName, colors,
-                        onClick = { subScreen = SubScreen.LANGUAGE_MODEL })
+                        onClick = { openSubScreen(SubScreen.LANGUAGE_MODEL) })
                 }
                 SettingsRow {
                     SettingsItem(Icons.Filled.Image, s.imageGenModel, selectedVisualModel.displayName, colors,
-                        onClick = { subScreen = SubScreen.IMAGE_MODEL })
+                        onClick = { openSubScreen(SubScreen.IMAGE_MODEL) })
                 }
                 SettingsRow {
                     SettingsItem(Icons.Filled.Visibility, s.visionModel, selectedVisionModel?.displayName ?: s.notSelected, colors,
-                        onClick = { subScreen = SubScreen.VISION_MODEL })
+                        onClick = { openSubScreen(SubScreen.VISION_MODEL) })
                 }
                 SettingsRow {
                     SettingsItem(Icons.Filled.RecordVoiceOver, s.voiceTtsLabel,
                         ttsModels.find { it.id == voiceModel }?.displayName ?: s.notSelected, colors,
-                        onClick = { subScreen = SubScreen.TTS_MODEL })
+                        onClick = { openSubScreen(SubScreen.TTS_MODEL) })
                 }
                 SettingsRow {
                     SettingsItem(Icons.Filled.Mic, s.voiceAsrLabel,
                         asrModels.find { it.id == asrModel }?.displayName ?: s.notSelected, colors,
-                        onClick = { subScreen = SubScreen.ASR_MODEL })
+                        onClick = { openSubScreen(SubScreen.ASR_MODEL) })
                 }
 
                 // 段间距：与 12dp 的卡片间距叠出 12+8+12 = 32dp —— 比卡片间距明显大，SectionLabel 才立得住
                 Spacer(modifier = Modifier.height(8.dp))
+                }
 
                 // ──── AI 系统优化 ────
-                SectionLabel(Icons.Filled.AutoAwesome, s.sectionAiOptimize)
+                if (!showTabletCategories || selectedCategory == SettingsCategory.AI_OPTIMIZATION) {
+                if (!showTabletCategories) SectionLabel(Icons.Filled.AutoAwesome, s.sectionAiOptimize)
 
                 // Parent/child settings share one surface, divider, and disclosure motion.
                 SettingsGroup(expanded = enableWebSearch && selectedModel.supportsWebSearch,
@@ -506,7 +668,7 @@ fun SettingsScreen(
                 // AI 记忆（二级页入口）
                 SettingsRow {
                     Row(
-                        Modifier.fillMaxWidth().clickable { subScreen = SubScreen.AI_MEMORY }
+                        Modifier.fillMaxWidth().clickable { openSubScreen(SubScreen.AI_MEMORY) }
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
@@ -524,9 +686,11 @@ fun SettingsScreen(
 
                 // 段间距：与 12dp 的卡片间距叠出 12+8+12 = 32dp —— 比卡片间距明显大，SectionLabel 才立得住
                 Spacer(modifier = Modifier.height(8.dp))
+                }
 
                 // ──── 系统主题 ────
-                SectionLabel(Icons.Filled.DarkMode, s.sectionSystemTheme)
+                if (!showTabletCategories || selectedCategory == SettingsCategory.PERSONALIZATION) {
+                if (!showTabletCategories) SectionLabel(Icons.Filled.DarkMode, s.sectionSystemTheme)
 
                 // 色彩
                 SettingsRow {
@@ -553,7 +717,7 @@ fun SettingsScreen(
                 }
 
                 SettingsRow {
-                    Row(Modifier.fillMaxWidth().clickable { subScreen = SubScreen.ICON }
+                    Row(Modifier.fillMaxWidth().clickable { openSubScreen(SubScreen.ICON) }
                         .padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Apps, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(10.dp))
@@ -569,7 +733,7 @@ fun SettingsScreen(
                 // 字体（二级页入口）
                 SettingsRow {
                     Row(
-                        Modifier.fillMaxWidth().clickable { subScreen = SubScreen.FONT }
+                        Modifier.fillMaxWidth().clickable { openSubScreen(SubScreen.FONT) }
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
@@ -589,7 +753,7 @@ fun SettingsScreen(
                 SettingsRow {
                     SettingsItem(Icons.Filled.Keyboard, s.inputBox,
                         "${inputStyleLabel(inputStyle, s)} · ${inputBarStateLabel(inputBarState, s)}",
-                        colors, onClick = { subScreen = SubScreen.INPUT_BOX })
+                        colors, onClick = { openSubScreen(SubScreen.INPUT_BOX) })
                 }
 
                 SettingsGroup(expanded = advancedMaterialSetting, parent = {
@@ -629,9 +793,11 @@ fun SettingsScreen(
 
                 // 段间距：与 12dp 的卡片间距叠出 12+8+12 = 32dp —— 比卡片间距明显大，SectionLabel 才立得住
                 Spacer(modifier = Modifier.height(8.dp))
+                }
 
                 // ──── 通用 ────
-                SectionLabel(Icons.Filled.Tune, s.sectionGeneral)
+                if (!showTabletCategories || selectedCategory == SettingsCategory.GENERAL) {
+                if (!showTabletCategories) SectionLabel(Icons.Filled.Tune, s.sectionGeneral)
 
                 // 主题（主题模式）
                 SettingsRow {
@@ -681,14 +847,16 @@ fun SettingsScreen(
 
                 // 段间距：与 12dp 的卡片间距叠出 12+8+12 = 32dp —— 比卡片间距明显大，SectionLabel 才立得住
                 Spacer(modifier = Modifier.height(8.dp))
+                }
 
                 // ──── 关于 ────
+                if (!showTabletCategories || selectedCategory == SettingsCategory.ABOUT) {
                 SectionLabel(Icons.Filled.Info, s.sectionAbout)
                 SettingsRow {
                     Column {
                         // 「关于FreeChat」聚合页（1.1.10）：logo + 版本号 + 检查更新 + 更新日志/关于作者/用户协议三个入口
                         Row(
-                            Modifier.fillMaxWidth().clickable { subScreen = SubScreen.ABOUT_FREECHAT }
+                            Modifier.fillMaxWidth().clickable { openSubScreen(SubScreen.ABOUT_FREECHAT) }
                                 .padding(horizontal = 16.dp, vertical = 12.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
@@ -702,7 +870,7 @@ fun SettingsScreen(
                         }
                         HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
                         Row(
-                            Modifier.fillMaxWidth().clickable { subScreen = SubScreen.FEEDBACK }
+                            Modifier.fillMaxWidth().clickable { openSubScreen(SubScreen.FEEDBACK) }
                                 .padding(horizontal = 16.dp, vertical = 14.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
@@ -716,7 +884,7 @@ fun SettingsScreen(
                         if (com.freechat.sync.Session.isLoggedIn()) {
                             HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
                             Row(
-                                Modifier.fillMaxWidth().clickable { subScreen = SubScreen.MY_SHARES }
+                                Modifier.fillMaxWidth().clickable { openSubScreen(SubScreen.MY_SHARES) }
                                     .padding(horizontal = 16.dp, vertical = 14.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
@@ -731,14 +899,20 @@ fun SettingsScreen(
                 }
 
                 Spacer(modifier = Modifier.height(32.dp))
+                }
             }
         } else {
+            val screen = if (embeddedAbout) SubScreen.ABOUT_FREECHAT else requireNotNull(screen)
+            // 云端模型目录实时同步（2026-10-18）：进模型选择页就拉一次，换模型/改名/下架即生效
+            androidx.compose.runtime.LaunchedEffect(screen) {
+                if (screen.isModelPool) viewModel.refreshBuiltInCatalog()
+            }
                 // ============ 二级页面 ============
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                    .then(if (screen == SubScreen.FEEDBACK) Modifier.imePadding().navigationBarsPadding() else Modifier)
+                    .then(if (screen == SubScreen.FEEDBACK) Modifier.paneImePadding().navigationBarsPadding() else Modifier)
                     // 果冻边界冗余（1.1.26.6）：全部二级页统一——滑到顶/底继续拖，页面跟手位移带阻尼，松手回弹。
                     // 1.1.29 模型池页例外（工单④）：滚动交给池子自己，固定头（添加模型+分页线）不跟弹 ——
                     // 外层一旦再滚就成嵌套滚动（戒律9：崩）且固定头随内容走，两头都不对。
@@ -759,28 +933,41 @@ fun SettingsScreen(
                             SubScreen.ICON -> 112.dp
                             else -> 32.dp
                         })
-                    .padding(horizontal = 16.dp),
+                    .padding(horizontal = 16.dp + readingGutter),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 when (screen) {
+                    SubScreen.TABLET_DISPLAY -> if (isTabletDevice) {
+                        TabletDisplayPreferences(
+                            displayMode = tabletDisplayMode,
+                            floatingSide = tabletFloatingSide,
+                            underlyingTouch = tabletUnderlyingTouch,
+                            onOpenDisplayMode = { showTabletDisplayModePicker = true },
+                            onOpenFloatingSide = { showTabletFloatingSidePicker = true },
+                            onUnderlyingTouch = viewModel::setTabletUnderlyingTouch,
+                            showSectionLabel = false,
+                        )
+                    }
                     SubScreen.ABOUT_FREECHAT -> AboutFreeChatPage(
                         colors = colors, s = s,
                         levelScrolls = levelScrolls,
                         onOpenChangelog = onOpenChangelog,
                         onOpenAgreement = onOpenAgreement,
-                        onOpenAuthor = { subScreen = SubScreen.AUTHOR },
-                        onOpenDevPassword = { subScreen = SubScreen.DEV_PASSWORD },
-                        onOpenDevOptions = { subScreen = SubScreen.DEV_OPTIONS }
+                        onOpenAuthor = { openSubScreen(SubScreen.AUTHOR) },
+                        onOpenDevPassword = { openSubScreen(SubScreen.DEV_PASSWORD) },
+                        onOpenDevOptions = { openSubScreen(SubScreen.DEV_OPTIONS) },
+                        onOpenFeedback = if (embeddedAbout) { { openSubScreen(SubScreen.FEEDBACK) } } else null,
+                        onOpenMyShares = if (embeddedAbout) { { openSubScreen(SubScreen.MY_SHARES) } } else null,
                     )
                     // 非开源区二级页接线（1.1.26.2）
                     SubScreen.DEV_PASSWORD -> com.freechat.dev.DevPasswordPage(
                         colors = colors,
-                        onUnlocked = { subScreen = SubScreen.ABOUT_FREECHAT },
-                        onBack = { subScreen = SubScreen.ABOUT_FREECHAT }
+                        onUnlocked = { returnToAbout() },
+                        onBack = { returnToAbout() }
                     )
                     SubScreen.DEV_OPTIONS -> com.freechat.dev.DevOptionsPage(
                         colors = colors,
-                        onExit = { subScreen = SubScreen.ABOUT_FREECHAT }
+                        onExit = { returnToAbout() }
                     )
                     // ===== 五个模型池页（1.1.29 工单④）：每类一栏，骨架统一 =====
                     SubScreen.LANGUAGE_MODEL -> {
@@ -841,6 +1028,7 @@ fun SettingsScreen(
                             }
                         }
                     }
+                    SubScreen.API_TUTORIAL -> ApiTutorialPage(colors, s)
                     SubScreen.AI_MEMORY -> AiMemoryPage(
                         viewModel = viewModel,
                         colors = colors,
@@ -885,16 +1073,26 @@ fun SettingsScreen(
             }
         }
         }
+        if (showTabletCategories) settingsBody(pageScreen to pageCategory)
+        else PageMotion(
+            targetState = subScreen to selectedCategory,
+            distancePx = pageTravelPx.toFloat(),
+            forward = { initial, target -> subScreenDepth(target.first) >= subScreenDepth(initial.first) },
+            label = "settings_subpage"
+        ) { settingsBody(it) }
 
         // 固定高度：实体标题栏与渐进模糊仅切换材质，不切换几何。
         // 1.1.29.3 ①：模型池页模糊带下延到「添加模型」卡片下方——内容上滑钻进高斯渐变被覆盖
         // （同侧滑页对话列表与「新对话/搜索」固定卡片的关系）。
+        // 2026-10-19 返修：solidHeight 默认值 = 带高-渐隐区，带子下延时实心底板跟着长高，
+        // 「添加模型」卡片区被实色板盖死——底板钉回标题栏（侧滑页同款），卡片区只剩高斯渐变。
         TopBarBackdrop(hazeState, colors.Background,
-            if (subScreen?.isModelPool == true) HazeSpec.drawerTopBandHeightDp(statusBarHeightDp, PoolHeaderBandDp)
-            else HazeSpec.topBandHeightDp(statusBarHeightDp))
+            if (pageScreen?.isModelPool == true) HazeSpec.drawerTopBandHeightDp(statusBarHeightDp, PoolHeaderBandDp)
+            else HazeSpec.topBandHeightDp(statusBarHeightDp),
+            solidHeight = HazeSpec.titleBarHeightDp(statusBarHeightDp))
 
         // 1.1.29.3 ①：「添加模型」悬浮置顶——画在模糊带之上、覆盖滚动池（分页线已撤）
-        val poolAddType = when (subScreen) {
+        val poolAddType = when (pageScreen) {
             SubScreen.LANGUAGE_MODEL -> ModelType.LANGUAGE
             SubScreen.IMAGE_MODEL -> ModelType.VISUAL
             SubScreen.VISION_MODEL -> ModelType.VISION
@@ -906,9 +1104,27 @@ fun SettingsScreen(
             Box(
                 Modifier.align(Alignment.TopCenter).fillMaxWidth()
                     .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp) + 4.dp)
-                    .padding(horizontal = 16.dp)
+                    .padding(horizontal = 16.dp + readingGutter)
             ) {
                 AddModelButton({ onOpenModelEditor(poolAddType, null) }, colors, s)
+            }
+            // 「如何获取API？」（2026-10-19 返修二，工单点名）：不要卡片，直接镂空悬浮——
+            // 链接蓝+斜体+下划线文案独自浮在内容之上，不带任何底卡
+            Box(
+                Modifier.align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp)
+            ) {
+                Text(
+                    s.apiTutorialLink,
+                    color = colors.linkInk,
+                    fontStyle = FontStyle.Italic,
+                    textDecoration = TextDecoration.Underline,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .clickable { openSubScreen(SubScreen.API_TUTORIAL) }
+                        .padding(horizontal = 20.dp, vertical = 10.dp)
+                )
             }
         }
 
@@ -918,14 +1134,15 @@ fun SettingsScreen(
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 「我的分享」多选换头走 contentReplacement（与收藏页多选完全一致）：
             // Close + 已选择x项 + 撤销分享。selectMode 由长按卡片进入。
-            if (subScreen == SubScreen.MY_SHARES && myShares.selectMode) {
+            if (pageScreen == SubScreen.MY_SHARES && myShares.selectMode) {
             AnimatedContent(
                 targetState = myShares.selectedIds.size,
+                modifier = Modifier.weight(1f),
                 transitionSpec = { FreeChatAnimation.contentReplacement() },
                 label = "settingsShareSelectHeader"
             ) { _ ->
@@ -952,27 +1169,25 @@ fun SettingsScreen(
                 }
             }
             } else {
-            HeaderIconButton(onClick = {
-                if (subScreen == SubScreen.MY_FEEDBACK) subScreen = SubScreen.FEEDBACK
-                else if (subScreen == SubScreen.AUTHOR || subScreen == SubScreen.DEV_PASSWORD || subScreen == SubScreen.DEV_OPTIONS) subScreen = SubScreen.ABOUT_FREECHAT
-                else if (subScreen != null) subScreen = null
-                else onBack()
-            }) {
+            FloatingWindowBackButton(onClick = navigateBack, root = pageScreen == null) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             // 二级页切换时标题跟着换字（1.1.26 动画补缺）：contentReplacement 同款，页面本体早有转场。
             AnimatedContent(
-                targetState = subScreen,
+                targetState = pageScreen to pageCategory,
+                modifier = Modifier.weight(1f),
                 transitionSpec = { FreeChatAnimation.contentReplacement() },
                 label = "settingsTitle"
-            ) { target ->
+            ) { (target, category) ->
                 Text(
                     when (target) {
+                        SubScreen.TABLET_DISPLAY -> s.tabletDisplayOptimization
                         SubScreen.LANGUAGE_MODEL -> s.languageModel
                         SubScreen.IMAGE_MODEL -> s.imageGenModel
                         SubScreen.VISION_MODEL -> s.visionModel
                         SubScreen.TTS_MODEL -> s.voiceTtsLabel
                         SubScreen.ASR_MODEL -> s.voiceAsrLabel
+                        SubScreen.API_TUTORIAL -> s.apiTutorialTitle
                         SubScreen.AI_MEMORY -> s.aiMemory
                         SubScreen.FONT -> s.font
                         SubScreen.INPUT_BOX -> s.inputBox
@@ -984,23 +1199,23 @@ fun SettingsScreen(
                         SubScreen.MY_SHARES -> s.myShares
                         SubScreen.DEV_PASSWORD -> com.freechat.dev.DevMode.TITLE_PASSWORD
                         SubScreen.DEV_OPTIONS -> com.freechat.dev.DevMode.TITLE_OPTIONS
-                        null -> s.settings
+                        null -> if (showTabletCategories) category.title(s) else s.settings
                     },
                     color = colors.TextPrimary,
                     fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleLarge
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             // 「我的反馈」入口（1.0.95）：反馈页标题栏右侧——进去只能看，不能改不能删
-            if (subScreen == SubScreen.FEEDBACK) {
-                Spacer(Modifier.weight(1f))
-                HeaderTextButton(onClick = { subScreen = SubScreen.MY_FEEDBACK }) {
+            if (pageScreen == SubScreen.FEEDBACK) {
+                HeaderTextButton(onClick = { openSubScreen(SubScreen.MY_FEEDBACK) }) {
                     Text(s.feedbackMy, style = MaterialTheme.typography.bodyMedium, color = colors.Primary)
                 }
             }
             // 「我的分享」标题栏右侧「调节」按钮（1.1.26.7，与收藏页同款悬浮菜单卡片）
-            if (subScreen == SubScreen.MY_SHARES) {
-                Spacer(Modifier.weight(1f))
+            if (pageScreen == SubScreen.MY_SHARES) {
                 HeaderIconButton(onClick = {
                     myShares.showTuneMenu = !myShares.showTuneMenu
                     if (myShares.showTuneMenu) myShares.tuneLevel = com.freechat.ui.components.TuneLevel.MAIN
@@ -1009,21 +1224,23 @@ fun SettingsScreen(
                 }
             }
             }
+            PaneExpandButton()
         }
 
         AnimatedVisibility(
-            visible = subScreen == SubScreen.ICON && selectedIcon != activeIcon,
+            visible = pageScreen == SubScreen.ICON && selectedIcon != activeIcon,
             modifier = Modifier.align(Alignment.BottomCenter),
             enter = FreeChatAnimation.sheetEnter(), exit = FreeChatAnimation.sheetExit()
         ) {
-            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp)) {
+            Column(Modifier.fillMaxWidth().navigationBarsPadding()
+                .padding(horizontal = 16.dp + readingGutter, vertical = 16.dp)) {
                 com.freechat.ui.animation.MotionButton(
                     onClick = {
                         if (viewModel.hasAnyActiveGeneration()) showIconRestartConfirm = true
                         else saveIconAndRestart()
                     },
                     enabled = !savingIcon,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    modifier = Modifier.pageActionWidth().heightIn(min = 52.dp),
                     shape = RoundedCornerShape(18.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.Primary, contentColor = colors.selectedText)
                 ) { Text(if (savingIcon) s.appIconRestarting else s.save) }
@@ -1083,6 +1300,31 @@ fun SettingsScreen(
 
         SearchSettingsPanel(showSearchSettings, searchConfig, viewModel::saveSearchConfig,
             { showSearchSettings = false }, colors, isDark, advancedMaterial, hazeState)
+
+        SheetPanel(showTabletDisplayModePicker, { showTabletDisplayModePicker = false },
+            s.tabletPageDisplayLogic, colors, isDark, advancedMaterial, hazeState) {
+            listOf(TabletDisplayMode.FLOATING, TabletDisplayMode.EMBEDDED).forEach { mode ->
+                SheetOption(
+                    selected = mode == tabletDisplayMode,
+                    title = s.tabletDisplayModeLabel(mode),
+                    colors = colors,
+                    onClick = { viewModel.setTabletDisplayMode(mode); showTabletDisplayModePicker = false },
+                )
+            }
+        }
+
+        SheetPanel(showTabletFloatingSidePicker && tabletDisplayMode == TabletDisplayMode.FLOATING,
+            { showTabletFloatingSidePicker = false }, s.tabletFloatingPosition,
+            colors, isDark, advancedMaterial, hazeState) {
+            TabletFloatingSide.entries.forEach { side ->
+                SheetOption(
+                    selected = side == tabletFloatingSide,
+                    title = s.tabletFloatingSideLabel(side),
+                    colors = colors,
+                    onClick = { viewModel.setTabletFloatingSide(side); showTabletFloatingSidePicker = false },
+                )
+            }
+        }
 
         SheetPanel(showHeaderStylePicker && advancedMaterialSetting, { showHeaderStylePicker = false },
             s.headerBarStyle, colors, isDark, advancedMaterial, hazeState) {
@@ -1245,7 +1487,7 @@ fun SettingsScreen(
 
         // ===== 「我的分享」调节菜单（筛选对话 / 排序方式，与收藏页 TuneMenu 同款同动画）=====
         AnimatedVisibility(
-            visible = subScreen == SubScreen.MY_SHARES && myShares.showTuneMenu && !myShares.selectMode,
+            visible = pageScreen == SubScreen.MY_SHARES && myShares.showTuneMenu && !myShares.selectMode,
             enter = fadeIn(FreeChatAnimation.overlayFadeIn),
             exit = fadeOut(FreeChatAnimation.overlayFadeOut)
         ) {
@@ -1259,7 +1501,7 @@ fun SettingsScreen(
             )
         }
         AnimatedVisibility(
-            visible = subScreen == SubScreen.MY_SHARES && myShares.showTuneMenu && !myShares.selectMode,
+            visible = pageScreen == SubScreen.MY_SHARES && myShares.showTuneMenu && !myShares.selectMode,
             modifier = Modifier.align(Alignment.TopEnd),
             enter = FreeChatAnimation.menuEnter(androidx.compose.ui.graphics.TransformOrigin(1f, 0f)),
             exit = FreeChatAnimation.menuExit(androidx.compose.ui.graphics.TransformOrigin(1f, 0f))
@@ -1400,7 +1642,7 @@ fun SettingsScreen(
                 Spacer(Modifier.height(4.dp))
                 Text(
                     s.settingsSlogan,
-                    fontSize = (14 * previewFontSize.scale).sp,
+                    fontSize = (14 * (previewFontSize.scale / fontSize.scale)).sp,
                     color = colors.TextPrimary,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
@@ -1504,6 +1746,146 @@ fun SettingsScreen(
         ) { }
     }
     }
+    }
+    val detailPane: @Composable () -> Unit = {
+        if (showTabletCategories) {
+            // Each outgoing route keeps its own content cell while the active route receives fresh props.
+            val retainedTabletDetailContent = remember(tabletDetailKey) { mutableStateOf(tabletDetailContent) }
+            retainedTabletDetailContent.value = tabletDetailContent
+            val tabletPage = remember(subScreen, selectedCategory, tabletDetailKey) {
+                val externalContent: (@Composable () -> Unit)? =
+                    if (tabletDetailKey != null && tabletDetailContent != null) {
+                        { retainedTabletDetailContent.value?.invoke() }
+                    } else null
+                SettingsDetailPage(subScreen, selectedCategory, tabletDetailKey, externalContent)
+            }
+            var previousTabletDetailKey by remember { mutableStateOf(tabletDetailKey) }
+            val tabletPageBack = remember(tabletPage) {
+                if (tabletDetailKey != null || previousTabletDetailKey != null) tabletDetailBack else tabletSubpageBack
+            }
+            SideEffect { previousTabletDetailKey = tabletDetailKey }
+            TabletPageMotion(
+                targetState = tabletPage,
+                back = tabletPageBack,
+                label = "settings_tablet_detail",
+            ) { page ->
+                if (page.externalContent != null) page.externalContent.invoke()
+                else settingsPage(page.screen to page.category)
+            }
+        } else settingsPage(subScreen to selectedCategory)
+    }
+    if (showTabletCategories) {
+        TabletWorkspace(
+            workspaceKey = "settings",
+            listPane = {
+                val paneControls = LocalPaneControls.current
+                SettingsCategoryPane(selectedCategory, levelScrolls, onBack = {
+                    dismissPageOverlays()
+                    onBack()
+                }) { category ->
+                    tabletSubpageBack = false
+                    if (selectedCategory != category || subScreen != null) {
+                        dismissPageOverlays()
+                        selectedCategory = category
+                        subScreen = null
+                    }
+                    onTabletCategorySelected()
+                    paneControls?.showDetail?.invoke()
+                }
+            },
+            detailPane = detailPane,
+        )
+    } else detailPane()
+    }
+}
+
+@Composable
+private fun TabletDisplayPreferences(
+    displayMode: TabletDisplayMode,
+    floatingSide: TabletFloatingSide,
+    underlyingTouch: Boolean,
+    onOpenDisplayMode: () -> Unit,
+    onOpenFloatingSide: () -> Unit,
+    onUnderlyingTouch: (Boolean) -> Unit,
+    showSectionLabel: Boolean = true,
+) {
+    val s = LocalStrings.current
+    val colors = LocalFreeChatColors.current
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (showSectionLabel) SectionLabel(Icons.Filled.TabletAndroid, s.tabletPageDisplayLogic)
+        SettingsGroup(expanded = displayMode == TabletDisplayMode.FLOATING,
+            parent = {
+                SettingsItem(Icons.Filled.TabletAndroid, s.tabletPageDisplayLogic,
+                    s.tabletDisplayModeLabel(displayMode), colors, onClick = onOpenDisplayMode)
+            }) {
+            SettingsItem(Icons.Filled.ViewSidebar, s.tabletFloatingPosition,
+                s.tabletFloatingSideLabel(floatingSide), colors, onClick = onOpenFloatingSide)
+            SettingsDivider(colors)
+            SettingsItem(Icons.Filled.TouchApp, s.tabletUnderlyingTouch, null, colors) {
+                Switch(checked = underlyingTouch,
+                    modifier = Modifier.semantics { contentDescription = s.tabletUnderlyingTouch },
+                    onCheckedChange = onUnderlyingTouch, colors = switchColors(colors))
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsCategoryPane(
+    selectedCategory: SettingsCategory,
+    levelScrolls: MutableMap<String, Int>,
+    onBack: () -> Unit,
+    onSelectCategory: (SettingsCategory) -> Unit,
+) {
+    val colors = LocalFreeChatColors.current
+    val s = LocalStrings.current
+    val advancedMaterial = LocalAdvancedMaterial.current
+    val hazeState = rememberHazeState()
+    val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
+        TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
+        Column(
+            Modifier.fillMaxSize()
+                .then(if (advancedMaterial) Modifier.hazeSource(hazeState).hazeBackground(colors.Background) else Modifier)
+                .jellyOverscroll()
+                .verticalScroll(com.freechat.ui.animation.rememberPersistentScrollState("settings_categories", levelScrolls))
+                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            SettingsCategory.entries.forEach { category ->
+                val selected = category == selectedCategory
+                val textColor by animateColorAsState(
+                    if (selected) colors.selectedText else colors.TextPrimary,
+                    FreeChatAnimation.colorTween, label = "settingsCategoryText",
+                )
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .frostedCard(hazeState, colors, advancedMaterial, RoundedCornerShape(14.dp), selected = selected)
+                        .selectable(selected, role = androidx.compose.ui.semantics.Role.Tab,
+                            onClick = { onSelectCategory(category) })
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(category.icon, null, tint = textColor, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(category.title(s), style = MaterialTheme.typography.bodyLarge,
+                        color = textColor, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                }
+            }
+        }
+        TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
+        Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(top = 8.8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            HeaderIconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
+            }
+            Text(s.settings, style = MaterialTheme.typography.titleLarge, color = colors.TextPrimary,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+            PaneExpandButton()
+        }
+    }
 }
 
 // 二级选择框（主题/色彩/温度/长度/语言/字号）与全局记忆编辑器，统一用
@@ -1539,6 +1921,8 @@ private fun ColumnScope.ModelPoolPage(
         // 头部卡片区占位（4+48+12dp）：池子从卡片下方起步，上滑时内容从卡片底下钻过去
         Spacer(modifier = Modifier.height(64.dp))
         pool()
+        // 「如何获取API？」入口不在列表里（2026-10-19 返修）——挪到屏幕底部悬浮，
+        // 多模型时列表成流也不怕被顶走（悬浮实现在二级页容器的 BottomCenter 层）
         Spacer(modifier = Modifier.height(32.dp))
     }
 }
@@ -1548,11 +1932,17 @@ private fun ColumnScope.ModelPoolPage(
 private fun AddModelButton(onClick: () -> Unit, colors: com.freechat.ui.theme.FreeChatColors, s: AppStrings) {
     val advancedMaterial = LocalAdvancedMaterial.current
     val hazeState = LocalSettingsHazeState.current
+    val isDark = colors.TextPrimary.luminance() > 0.5f
     Box(
         modifier = Modifier
-            .fillMaxWidth()
+            .pageActionWidth()
             .height(48.dp)
-            .frostedCard(hazeState, colors, advancedMaterial, RoundedCornerShape(14.dp))
+            // 2026-10-19 返修：浮在模糊带上的「操作区」走透光不透物磨砂玻璃（floatingSurface 纪律）——
+            // 旧 frostedCard 的 hazeState 是摆设参数，实色新拟态卡面把滑到其下的池行整块挡死。
+            .then(
+                if (advancedMaterial && hazeState != null) Modifier.floatingSurface(hazeState, isDark, RoundedCornerShape(14.dp))
+                else Modifier.frostedCard(null, colors, false, RoundedCornerShape(14.dp))
+            )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -1750,7 +2140,9 @@ private fun AboutFreeChatPage(
     onOpenAgreement: () -> Unit,
     onOpenAuthor: () -> Unit,
     onOpenDevPassword: () -> Unit = {},
-    onOpenDevOptions: () -> Unit = {}
+    onOpenDevOptions: () -> Unit = {},
+    onOpenFeedback: (() -> Unit)? = null,
+    onOpenMyShares: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1971,6 +2363,14 @@ private fun AboutFreeChatPage(
                     if (com.freechat.dev.DevMode.isUnlocked(context)) {
                         HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
                         AboutEntryRow(com.freechat.dev.DevMode.TITLE_OPTIONS, colors) { onOpenDevOptions() }
+                    }
+                    if (onOpenFeedback != null) {
+                        HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
+                        AboutEntryRow(s.feedbackEntry, colors) { onOpenFeedback() }
+                    }
+                    if (onOpenMyShares != null && Session.isLoggedIn()) {
+                        HorizontalDivider(color = colors.Divider, modifier = Modifier.padding(horizontal = 16.dp))
+                        AboutEntryRow(s.myShares, colors) { onOpenMyShares() }
                     }
                 }
             }

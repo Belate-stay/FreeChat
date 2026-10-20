@@ -6,6 +6,8 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.freechat.model.ModelInfo
 import com.freechat.model.HeaderBarStyle
+import com.freechat.model.TabletDisplayMode
+import com.freechat.model.TabletFloatingSide
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -47,6 +49,9 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         internal val KEY_INPUT_STYLE = intPreferencesKey("input_style")
         /** 输入框状态（1.0.71）：0 = 自动隐藏（现状），1 = 永久固定。老数据缺键 = 0 = 自动隐藏，零迁移 */
         internal val KEY_INPUT_BAR_STATE = intPreferencesKey("input_bar_state")
+        private val KEY_TABLET_DISPLAY_MODE = stringPreferencesKey("tablet_display_mode")
+        private val KEY_TABLET_FLOATING_SIDE = stringPreferencesKey("tablet_floating_side")
+        private val KEY_TABLET_UNDERLYING_TOUCH = booleanPreferencesKey("tablet_underlying_touch")
         internal val KEY_VOICE_MODEL = stringPreferencesKey("voice_model")
         internal val KEY_TTS_VOICE = stringPreferencesKey("tts_voice")
         internal val KEY_TTS_SPEED = floatPreferencesKey("tts_speed_v3")
@@ -383,6 +388,18 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
         prefs[KEY_SYSTEM_DARK_THEME] ?: false  // 默认深色（false=深色，true=黑色）
     }
 
+    val tabletDisplayMode: Flow<TabletDisplayMode> = dataStore.data.map { prefs ->
+        TabletDisplayMode.fromStored(prefs[KEY_TABLET_DISPLAY_MODE])
+    }.distinctUntilChanged()
+
+    val tabletFloatingSide: Flow<TabletFloatingSide> = dataStore.data.map { prefs ->
+        TabletFloatingSide.fromStored(prefs[KEY_TABLET_FLOATING_SIDE])
+    }.distinctUntilChanged()
+
+    val tabletUnderlyingTouch: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[KEY_TABLET_UNDERLYING_TOUCH] ?: true
+    }.distinctUntilChanged()
+
     // 流动炫彩：进阶视觉选项（每帧都在动，老机型会掉帧）。1.0.64 起改为默认开。
     val liquidBackdrop: Flow<Boolean> = dataStore.data.afterDefaultMigration().map { prefs ->
         SettingsPresentationPolicy.liquidBackdrop(prefs[KEY_LIQUID_BACKDROP])
@@ -634,6 +651,18 @@ class SettingsRepository internal constructor(private val dataStore: DataStore<P
 
     suspend fun saveInputBarState(ordinal: Int) {
         edit { prefs -> prefs[KEY_INPUT_BAR_STATE] = ordinal }
+    }
+
+    suspend fun saveTabletDisplayMode(mode: TabletDisplayMode) {
+        edit { prefs -> prefs[KEY_TABLET_DISPLAY_MODE] = mode.name }
+    }
+
+    suspend fun saveTabletFloatingSide(side: TabletFloatingSide) {
+        edit { prefs -> prefs[KEY_TABLET_FLOATING_SIDE] = side.name }
+    }
+
+    suspend fun saveTabletUnderlyingTouch(enabled: Boolean) {
+        edit { prefs -> prefs[KEY_TABLET_UNDERLYING_TOUCH] = enabled }
     }
 
     suspend fun saveVoiceModel(model: String) {

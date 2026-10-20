@@ -6,6 +6,7 @@
     登录令牌和同步进度都只属于**这台设备上的这一次登录**，
     既不该上云备份（cloud-backup），也不该在换机直传时过去（device-transfer）。
     聊天内容本身不排除 —— 那才是用户真正在乎的东西。
+    datastore/（freechat_settings，含模型 API Key）同理两段都排：Key 只存设备本地。
 -->
 <data-extraction-rules>
     <cloud-backup>
@@ -13,11 +14,13 @@
         <exclude domain="sharedpref" path="freechat_launcher_icon.xml" />
         <exclude domain="sharedpref" path="freechat_search_local.xml" />
         <exclude domain="sharedpref" path="freechat_session.xml" />
+        <exclude domain="file" path="datastore/" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="freechat_feedback_draft.xml" />
         <exclude domain="sharedpref" path="freechat_launcher_icon.xml" />
         <exclude domain="sharedpref" path="freechat_search_local.xml" />
         <exclude domain="sharedpref" path="freechat_session.xml" />
+        <exclude domain="file" path="datastore/" />
     </device-transfer>
 </data-extraction-rules>

@@ -97,8 +97,14 @@ fun ChatBubble(
     onRegenerate: (() -> Unit)? = null,
     onDeleteScene: (() -> Unit)? = null,
     onSpeak: (() -> Unit)? = null,
+    /** AI 语音未读（播放过即已读）：未读时气泡右侧亮红点（微信式） */
+    voiceUnread: Boolean = false,
     onQuote: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
+    /** 长按语音弹菜单（转文字/引用，2026-10-19）——AI 口播与用户录音共用 */
+    onVoiceMenu: (() -> Unit)? = null,
+    /** 转文字已展开：气泡下方显示口播台词/识别文本（文本本就随消息存着，无需识别） */
+    voiceTranscriptVisible: Boolean = false,
     isFavorited: Boolean = false,
     highlightKeyword: String? = null,
     highlightColor: Color? = null,
@@ -263,28 +269,65 @@ fun ChatBubble(
                                     .then(
                                         when {
                                             multiSelectEnabled -> Modifier
+                                            // 语音消息：手势全在 VoiceReplyBubble 内层（点按播放/长按转文字菜单）。
+                                            // 外层挂了也收不到——内层消费 down 后外层 combinedClickable 空转（2026-10-20 病根二进）
+                                            message.voicePath != null && onSpeak != null -> Modifier
                                             isCompanion -> Modifier.combinedClickable(
                                                 onClick = { onEdit?.invoke() },
+                                                // 文字长按=引用
                                                 onLongClick = { onQuote?.invoke() }
                                             )
+                                            // 文字气泡**不挂**长按——留给系统原生文字选中
                                             onEdit != null -> Modifier.combinedClickable(onClick = { onEdit() })
                                             else -> Modifier
                                         }
                                     )
-                                    .background(if (isCompanion) companionFill else colors.UserBubble)
-                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                                    // 语音消息用 VoiceReplyBubble 自己的壳（与 AI 侧同一只，大小/间距一致）——
+                                    // 外壳的底色与内边距在这里摘掉，防止双层壳把气泡撑大（返修病根）
+                                    .then(
+                                        if (message.voicePath != null && onSpeak != null) Modifier
+                                        else Modifier
+                                            .background(if (isCompanion) companionFill else colors.UserBubble)
+                                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                                    )
                             ) {
                                 SelectionBox(!multiSelectEnabled) {
-                                    Text(
-                                        buildHighlightedText(message.content, highlightKeyword, highlightColor),
-                                        style = MaterialTheme.typography.bodyMedium.copy(
-                                            fontFamily = LocalChatFontFamily.current,
-                                            lineBreak = cjkLineBreak
-                                        ),
-                                        color = if (isCompanion) colors.TextPrimary else colors.UserBubbleText
-                                    )
+                                    if (message.voicePath != null && onSpeak != null) {
+                                        // 用户语音消息（微信式）：录音原声可重放；与 AI 语音同渲染器
+                                        VoiceReplyBubble(
+                                            durationSec = ((java.io.File(message.voicePath!!).length()) / 32000L).toInt().coerceAtLeast(1),
+                                            playing = playingId == message.id,
+                                            onClick = { onSpeak() },
+                                            onLongClick = { onVoiceMenu?.invoke() },
+                                            fill = if (isCompanion) companionFill else colors.UserBubble,
+                                            tint = if (isCompanion) colors.TextPrimary else colors.UserBubbleText,
+                                            shape = if (isCompanion) RoundedCornerShape(16.dp)
+                                            else RoundedCornerShape(
+                                                topStart = 16.dp, topEnd = 16.dp,
+                                                bottomStart = 16.dp, bottomEnd = 4.dp
+                                            )
+                                        )
+                                    } else {
+                                        Text(
+                                            buildHighlightedText(message.content, highlightKeyword, highlightColor),
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                fontFamily = LocalChatFontFamily.current,
+                                                lineBreak = cjkLineBreak
+                                            ),
+                                            color = if (isCompanion) colors.TextPrimary else colors.UserBubbleText
+                                        )
+                                    }
                                 }
                             }
+                        }
+                        // 长按语音「转文字」（2026-10-19）：识别文本本就随消息存着（content），展开即可——无需再跑识别
+                        if (voiceTranscriptVisible && message.voicePath != null) {
+                            Text(
+                                message.content,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalChatFontFamily.current),
+                                color = colors.TextSecondary,
+                                modifier = Modifier.padding(top = 4.dp).widthIn(max = (320 * scale).dp)
+                            )
                         }
                     }
                 }
@@ -389,6 +432,40 @@ fun ChatBubble(
                     // A visual-only row is a system annotation, not spoken dialogue.
                     Text(display.answer, style = MaterialTheme.typography.bodySmall,
                         color = colors.TextSecondary, modifier = Modifier.fillMaxWidth())
+                } else if ((message.voiceText != null || message.voicePath != null) && onSpeak != null) {
+                    // 语音消息（2026-10-19）：用户录音原声 / AI 口播台词——微信式语音气泡，点按播放/暂停。
+                    // 未读红点（1.2.0.9 返修）：AI 语音播过即已读，未播时气泡右侧亮红点
+                    // 长按=转文字菜单（2026-10-19）：口播台词本就随消息存着，展开即可
+                    // 手势全在气泡内层（2026-10-20）：外层容器不挂手势（内层消费 down 后外层空转）
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            VoiceReplyBubble(
+                                durationSec = message.voiceText?.let { maxOf(1, (it.length + 3) / 4) }
+                                    ?: ((message.voicePath?.let { p -> java.io.File(p).length() } ?: 32000L) / 32000L).toInt().coerceAtLeast(1),
+                                playing = playingId == message.id,
+                                onClick = { onSpeak() },
+                                onLongClick = { onVoiceMenu?.invoke() ?: onQuote?.invoke() },
+                                fill = companionFill
+                            )
+                            if (message.voiceText != null && voiceUnread) {
+                                Spacer(Modifier.width(6.dp))
+                                Box(
+                                    Modifier
+                                        .size(8.dp)
+                                        .clip(RoundedCornerShape(percent = 50))
+                                        .background(colors.ErrorRed)
+                                )
+                            }
+                        }
+                        if (voiceTranscriptVisible && message.voiceText != null) {
+                            Text(
+                                message.content,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalChatFontFamily.current),
+                                color = colors.TextSecondary,
+                                modifier = Modifier.padding(top = 4.dp).widthIn(max = (320 * scale).dp)
+                            )
+                        }
+                    }
                 } else if (isCompanion && display.answer.isNotBlank()) {
                     // 逐字显现（Beta 1.1.26）：只改文字出现的过渡，最终态与整段立显完全一致。
                     TypewriterText(
@@ -1037,3 +1114,65 @@ private fun SpeechProgressBar(
     }
 }
 
+/**
+ * 微信式语音气泡（2026-10-19；1.2.0.9 返修统一）：声波 + 时长，**宽度随时长伸缩**（越长越长、
+ * 越短越短）；点按播放/暂停（走 TtsController 同一条音色链）。AI 与用户共用这一只——
+ * 大小/间距/宽度规则只此一处，防两套渲染漂移（返修病根）。无喇叭图标。
+ */
+@Composable
+private fun VoiceReplyBubble(
+    durationSec: Int,
+    playing: Boolean,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
+    fill: Color,
+    tint: Color = LocalFreeChatColors.current.TextPrimary,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(16.dp)
+) {
+    // 宽度随时长伸缩，**先快后慢**（根号曲线，1.2.0.9 拍板）：1→5s 拉一大截、5→10s 伸长量变小、
+    // 越往后每秒增量越小、50→60s 只挪一丝；60s 才到封顶。每差 1s 宽度都不同（浮点 dp）。
+    val sec = durationSec.coerceIn(1, 60)
+    val frac = kotlin.math.sqrt(sec / 60f)
+    val width = (84f + (268f - 84f) * frac).dp
+    Row(
+        modifier = Modifier
+            .width(width)
+            .clip(shape)
+            .background(fill)
+            // 点按/长按必须同一层（2026-10-20 病根二进）：内层 clickable 会消费 down，
+            // 外层 combinedClickable 的 awaitFirstDown(要求未消费) 空转——长按挂外层永远收不到。
+            // 长按入口（转文字菜单）在此层转发，外层容器不再挂任何手势。
+            .then(
+                if (onLongClick != null)
+                    Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                else Modifier.clickable(onClick = onClick)
+            )
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        VoiceWaves(playing = playing, tint = tint)
+        Spacer(Modifier.width(10.dp))
+        Text("${durationSec}″", style = MaterialTheme.typography.bodySmall, color = tint.copy(alpha = 0.7f))
+    }
+}
+
+/** 三道声波条：播放中起伏呼吸，静止时低位待命 */
+@Composable
+private fun VoiceWaves(playing: Boolean, tint: Color) {
+    val anim = rememberInfiniteTransition(label = "voiceWave")
+    val phase by anim.animateFloat(
+        initialValue = 0f, targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(tween(700, easing = LinearEasing)), label = "voiceWavePhase"
+    )
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        repeat(3) { i ->
+            val base = 0.45f + 0.55f * (if (playing) (0.5f + 0.5f * kotlin.math.sin(phase + i * 1.1f)) else 0.25f)
+            Box(
+                Modifier
+                    .size(width = 3.dp, height = (6 + 12 * base).dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(tint.copy(alpha = 0.35f + 0.5f * base))
+            )
+        }
+    }
+}

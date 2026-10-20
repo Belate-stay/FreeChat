@@ -1,5 +1,9 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.floatingHeaderInset
+
+import com.freechat.ui.adaptive.pageActionWidth
+
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
@@ -19,6 +23,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -29,6 +34,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.freechat.data.*
 import com.freechat.ui.components.HeaderIconButton
+import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.components.TopBarBackdrop
 import com.freechat.ui.components.TopBarBackdropSource
 import com.freechat.ui.animation.FreeChatAnimation
@@ -77,6 +83,11 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
     var completed by remember { mutableStateOf<VoiceCreationPreview?>(null) }
     var name by remember { mutableStateOf("") }
     var consent by remember { mutableStateOf(false) }
+    // 声纹单独同意（敏感个人信息 just-in-time）：样本/描述第一次离开设备前必须过确认闸。
+    // 页内会话闩（remember 随页面销毁）：同页创建/重做只弹一次，退出页面重进再弹。
+    var uploadConsent by remember { mutableStateOf(false) }
+    var consentDialog by remember { mutableStateOf(false) }
+    var pendingCreation by remember { mutableStateOf<VoiceCreationMode?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var creating by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
@@ -164,6 +175,42 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
         }
     }
 
+    /** 创建/试听、重新创建共用的上传收口：样本/描述在这里第一次离开设备（先过声纹确认闸）。 */
+    fun runCreation(creationMode: VoiceCreationMode) {
+        val generation = beginWork()
+        val currentReference = reference
+        val promptSnapshot = prompt
+        val styleSnapshot = style
+        val textSnapshot = previewText
+        clearPreview()
+        notice = null
+        creating = true
+        workJob = scope.launch {
+            try {
+                val config = if (creationMode == VoiceCreationMode.PROMPT) {
+                    MiMoVoiceConfig(modelId = BuiltInVoiceModel.DESIGN_API_ID, designPrompt = promptSnapshot,
+                        speakerStyle = styleSnapshot)
+                } else {
+                    val ref = currentReference ?: throw VoiceConfigurationException("请先上传或录制参考音频。")
+                    MiMoVoiceConfig(modelId = BuiltInVoiceModel.CLONE_API_ID, speakerStyle = styleSnapshot,
+                        sample = repository.readSample(ref))
+                }
+                val audio = TtsController.synthesizePreview(textSnapshot, config)
+                if (audio != null) {
+                    val preview = repository.preparePreview(creationMode, if (creationMode == VoiceCreationMode.PROMPT) promptSnapshot else "",
+                        styleSnapshot, currentReference, audio)
+                    drafts += preview.reference
+                    drafts += preview.preview
+                    completed = preview
+                    notice = "创建成功，可以试听并命名保存。"
+                    TtsController.speakSingle("mimo-custom-voice-preview", audio, 1f, 1f)
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { notice = error.message ?: "创建失败，请重试。" }
+            finally { if (generation == workGeneration) creating = false }
+        }
+    }
+
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (pageActive && mode == VoiceCreationMode.AUDIO && !busy) {
             if (granted) {
@@ -219,6 +266,8 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
     }
 
     val advancedMaterial = LocalAdvancedMaterial.current
+    val isDark = colors.TextPrimary.luminance() > 0.5f
+    val strings = com.freechat.i18n.LocaleManager.strings()
     val hazeState = rememberHazeState()
     val statusBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val topBandHeight = HazeSpec.topBandHeightDp(statusBarHeight)
@@ -343,40 +392,15 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                             MotionButton(enabled = !busy && !capture.isRecording && consent && previewText.isNotBlank() &&
                                 (if (currentMode == VoiceCreationMode.PROMPT) prompt.isNotBlank() else reference != null),
                                 onClick = {
-                                    val generation = beginWork()
                                     val creationMode = currentMode ?: return@MotionButton
-                                    val currentReference = reference
-                                    val promptSnapshot = prompt
-                                    val styleSnapshot = style
-                                    val textSnapshot = previewText
-                                    clearPreview()
-                                    notice = null
-                                    creating = true
-                                    workJob = scope.launch {
-                                        try {
-                                            val config = if (creationMode == VoiceCreationMode.PROMPT) {
-                                                MiMoVoiceConfig(modelId = BuiltInVoiceModel.DESIGN_API_ID, designPrompt = promptSnapshot,
-                                                    speakerStyle = styleSnapshot)
-                                            } else {
-                                                val ref = currentReference ?: throw VoiceConfigurationException("请先上传或录制参考音频。")
-                                                MiMoVoiceConfig(modelId = BuiltInVoiceModel.CLONE_API_ID, speakerStyle = styleSnapshot,
-                                                    sample = repository.readSample(ref))
-                                            }
-                                            val audio = TtsController.synthesizePreview(textSnapshot, config)
-                                            if (audio != null) {
-                                                val preview = repository.preparePreview(creationMode, if (creationMode == VoiceCreationMode.PROMPT) promptSnapshot else "",
-                                                    styleSnapshot, currentReference, audio)
-                                                drafts += preview.reference
-                                                drafts += preview.preview
-                                                completed = preview
-                                                notice = "创建成功，可以试听并命名保存。"
-                                                TtsController.speakSingle("mimo-custom-voice-preview", audio, 1f, 1f)
-                                            }
-                                        } catch (cancelled: CancellationException) { throw cancelled }
-                                        catch (error: Exception) { notice = error.message ?: "创建失败，请重试。" }
-                                        finally { if (generation == workGeneration) creating = false }
+                                    // 声纹单独同意：样本/描述第一次离开设备前先弹确认闸；同页已同意则不复弹
+                                    if (!uploadConsent) {
+                                        pendingCreation = creationMode
+                                        consentDialog = true
+                                    } else {
+                                        runCreation(creationMode)
                                     }
-                                }, modifier = Modifier.fillMaxWidth()) {
+                                }, modifier = Modifier.pageActionWidth()) {
                                 if (creating) {
                                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = colors.OnPrimary)
                                     Spacer(Modifier.width(8.dp)); Text("正在创建语音…")
@@ -414,7 +438,7 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                                     modifier = Modifier.fillMaxWidth(), singleLine = true,
                                     placeholder = { Text("例如：温柔电台", color = characterHintColor(colors)) },
                                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.TextPrimary), colors = fieldColors)
-                                MotionButton(enabled = !busy && name.isNotBlank(), modifier = Modifier.fillMaxWidth(), onClick = {
+                                MotionButton(enabled = !busy && name.isNotBlank(), modifier = Modifier.pageActionWidth(), onClick = {
                                     val generation = beginWork()
                                     saving = true
                                     notice = null
@@ -447,10 +471,31 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                 }
             }
             TopBarBackdrop(hazeState, colors.Background, topBandHeight)
-            Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(top = 8.8.dp),
+            Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(top = 8.8.dp).floatingHeaderInset(),
                 verticalAlignment = Alignment.CenterVertically) {
                 HeaderIconButton(onClick = { if (pageActive) goBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = colors.TextPrimary) }
                 Text("高级自定义", color = colors.TextPrimary, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleLarge)
+            }
+            // 声纹单独同意（敏感个人信息 just-in-time）：确认后闩上，同页不复弹；取消=不上传留在当前页
+            SheetPanel(
+                visible = consentDialog,
+                onDismiss = { consentDialog = false },
+                title = strings.voiceSampleConsentTitle,
+                colors = colors,
+                isDark = isDark,
+                advancedMaterial = advancedMaterial,
+                hazeState = hazeState,
+                confirmLabel = strings.voiceSampleConsentConfirm,
+                cancelLabel = strings.cancel,
+                onConfirm = {
+                    consentDialog = false
+                    uploadConsent = true
+                    pendingCreation?.let { runCreation(it) }
+                    pendingCreation = null
+                }
+            ) {
+                Text(strings.voiceSampleConsentBody, style = MaterialTheme.typography.bodyMedium,
+                    color = colors.TextSecondary)
             }
         }
     }

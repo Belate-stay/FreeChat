@@ -1,5 +1,7 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.pageActionWidth
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -48,7 +50,7 @@ internal fun DialogueModeScreen(
     val colors = LocalFreeChatColors.current
     val advanced = LocalAdvancedMaterial.current
     val statusHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    BackHandler(onBack = onBack)
+    BackHandler(enabled = com.freechat.ui.animation.LocalPageActive.current, onBack = onBack)
     Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
         TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusHeight))
         Column(
@@ -89,7 +91,7 @@ internal fun DialogueModeScreen(
                         color = colors.TextSecondary, modifier = Modifier.padding(horizontal = 4.dp))
                 }
             }
-            MotionButton(onClick = onNext, enabled = mode != null, modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+            MotionButton(onClick = onNext, enabled = mode != null, modifier = Modifier.pageActionWidth().heightIn(min = 50.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = colors.Primary, contentColor = colors.OnPrimary),
                 shape = RoundedCornerShape(25.dp)) {
                 Text(s.modeNext, style = MaterialTheme.typography.titleMedium)
@@ -101,6 +103,7 @@ internal fun DialogueModeScreen(
             Text(s.chooseDialogueMode, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold, color = colors.TextPrimary)
             HeaderIconButton(onClick = onImport) { Icon(Icons.Filled.Upload, s.importCharacter, tint = colors.TextSecondary) }
+            com.freechat.ui.adaptive.PaneExpandButton()
         }
     }
 }

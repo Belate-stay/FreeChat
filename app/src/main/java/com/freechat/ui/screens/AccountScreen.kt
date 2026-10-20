@@ -1,5 +1,10 @@
 package com.freechat.ui.screens
 
+import com.freechat.ui.adaptive.FloatingWindowBackButton
+import com.freechat.ui.adaptive.floatingHeaderInset
+
+import com.freechat.ui.adaptive.pageActionWidth
+
 import com.freechat.ui.components.HeaderIconButton
 
 import androidx.compose.foundation.background
@@ -295,10 +300,10 @@ fun AccountScreen(onBack: () -> Unit) {
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(top = 8.8.dp),
+                .padding(top = 8.8.dp).floatingHeaderInset(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            HeaderIconButton(onClick = onBack) {
+            FloatingWindowBackButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
@@ -664,7 +669,7 @@ private fun SignedOut(
             }
         },
         enabled = !busy,
-        modifier = Modifier.fillMaxWidth().height(48.dp),
+        modifier = Modifier.pageActionWidth().height(48.dp),
         shape = RoundedCornerShape(12.dp),
         colors = ButtonDefaults.buttonColors(containerColor = colors.Primary, contentColor = colors.OnPrimary)
     ) {

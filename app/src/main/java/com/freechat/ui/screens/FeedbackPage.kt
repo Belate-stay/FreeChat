@@ -1,6 +1,5 @@
 package com.freechat.ui.screens
 
-import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
@@ -15,11 +14,11 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import com.freechat.BuildConfig
 import com.freechat.i18n.AppStrings
 import com.freechat.sync.ApiClient
 import com.freechat.sync.Session
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.adaptive.pageActionWidth
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.frostedCard
@@ -27,7 +26,6 @@ import com.freechat.ui.theme.selectedText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Locale
 
 /**
  * 「建议与反馈」（1.0.95 接真后端）：提交即发送到服务器——**不要求登录**，
@@ -64,7 +62,7 @@ internal fun FeedbackPage(
     }
     Spacer(Modifier.height(12.dp))
     val enabled = text.isNotBlank() && !sending
-    Box(Modifier.fillMaxWidth().frostedCard(LocalSettingsHazeState.current, colors, advanced,
+    Box(Modifier.pageActionWidth().frostedCard(LocalSettingsHazeState.current, colors, advanced,
         RoundedCornerShape(16.dp), face = if (text.isNotBlank()) colors.Primary else colors.Surface)
         .clip(RoundedCornerShape(16.dp))
         .clickable(enabled = enabled, role = Role.Button) {
@@ -75,7 +73,7 @@ internal fun FeedbackPage(
                 val ok = withContext(Dispatchers.IO) {
                     runCatching {
                         val auth = Session.loadAuth()
-                        ApiClient.submitFeedback(content, clientId, deviceSummary(), token = auth?.token)
+                        ApiClient.submitFeedback(content, clientId, com.freechat.dev.DevHooks.deviceSummary(), token = auth?.token)
                     }.isSuccess
                 }
                 sending = false
@@ -97,11 +95,4 @@ internal fun FeedbackPage(
     }
 }
 
-/**
- * 随反馈附带的设备摘要（服务器反馈页给站长看「设备等信息」）：
- * 品牌机型 · 系统版本(SDK) · 应用版本 · 语言。一行、可读、无隐私内容（不带序列号/广告标识）。
- */
-private fun deviceSummary(): String {
-    val brand = Build.MANUFACTURER.orEmpty().replaceFirstChar { it.uppercaseChar() }
-    return "$brand ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · ${BuildConfig.VERSION_NAME} · ${Locale.getDefault().toLanguageTag()}"
-}
+// 设备摘要实现见 com.freechat.dev.DevHooks.deviceSummary()。

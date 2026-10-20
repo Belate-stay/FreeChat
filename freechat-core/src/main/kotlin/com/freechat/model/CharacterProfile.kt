@@ -35,6 +35,8 @@ data class CharacterProfile(
     val visionModelId: String = "",              // 每角色独立识图模型（空=跟随全局）
     val visualModelId: String = "",              // 每角色独立生图模型（空=跟随全局）
     val enhancedSceneContinuity: Boolean = false, // 增强同元延续（Beta）：叙事生图可参考最近仍保留的场景图，老档案缺字段保持关闭
+    val allowVoiceReply: Boolean = false, // 允许语音回复（2026-10-19）：开启后 AI **可以**（非必须）用语音回复，由模型按人设/关系/语境自决；不支持连接微信后使用
+    val voiceTimbre: String = "",   // 语音回复的音色（空=跟随全局；MiMo 预设音色名或自建音色 id）——允许语音回复的子设置；引擎由音色自带，不再单列「语音模型」
     val imagePresetAspect: Int = 0,  // 图片预设·画幅（1.1.26.6）：0无声明/1=1:1/2=4:3横/3=4:3竖/4=3:2横/5=3:2竖——仅作提示词
     val imagePresetSubject: Int = 0, // 图片预设·主体（1.1.26.6）：0无声明/1=完整场景/2=主角优先——仅作提示词
     val enableWebSearch: Boolean? = null,        // 每角色独立联网搜索（null=跟随全局）
@@ -82,7 +84,7 @@ data class CharacterProfile(
      */
     val deepThinkingMode: Boolean = true,
     val aiCreativity: Float = 5f,                // AI创造力 1.0-10.0（0.1 精度，默认 5）：越高越主动引入新话题/新角色/新剧情；4=旧版手感，>8 允许猎奇反直觉，<3 完全由用户主导
-    val proactiveEnabled: Boolean = false,       // 主动智能：TA 会自己在合适的时间主动找你（本地定时唤醒，非服务器推送），由模型判断时机与要不要开口，明显增加 token 消耗
+    val proactiveEnabled: Boolean = false,       // 主动智能（2026-10-20 云端化）：连接微信后可开——云端定时巡检，由模型按上下文/人设/人物关系决定何时主动发消息
     // ── 模拟设定扩增（1.0.34）：把「这个世界有谁、按什么规矩运转、用户是个什么人」交给用户 ──
     val supportingCast: String = "",             // 配角：这个世界里的其他人（关系/基本信息/前言故事），一个输入框装全部，可以写很多人
     val worldRules: String = "",                 // 规则：世界观与故事框架（等级体系/门派/势力/硬性设定）+ 人物习惯、环境、条件

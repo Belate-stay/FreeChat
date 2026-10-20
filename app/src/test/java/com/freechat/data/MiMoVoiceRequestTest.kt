@@ -118,14 +118,15 @@ class MiMoVoiceRequestTest {
     }
 
     @Test
-    fun builtInModelsHaveImmutableRoutesAndTheExistingKeyBinding() {
-        val models = BuiltInVoiceModel.createAll("fixture-key")
+    fun builtInModelsHaveImmutableRoutesAndNoKeyInThePackage() {
+        // 2026-10-18：内置模型收口代理 —— 路由钉死 BuiltInProxy.BASE、包里无 Key
+        val models = BuiltInVoiceModel.createAll()
         assertEquals(listOf(BuiltInVoiceModel.STOCK_ID, BuiltInVoiceModel.DESIGN_ID, BuiltInVoiceModel.CLONE_ID), models.map { it.id })
         models.forEach {
             assertTrue(it.isBuiltIn)
             assertEquals(ModelType.TTS, it.modelType)
-            assertEquals("fixture-key", it.apiKey)
-            assertEquals("https://api.xiaomimimo.com/v1", it.apiBaseUrl)
+            assertEquals("", it.apiKey)
+            assertEquals(com.freechat.data.BuiltInProxy.BASE, it.apiBaseUrl)
             assertFalse(ModelAccessPolicy.canEdit(it))
         }
         assertEquals(BuiltInVoiceModel.DESIGN_API_ID, BuiltInVoiceModel.apiModelId(BuiltInVoiceModel.DESIGN_ID))

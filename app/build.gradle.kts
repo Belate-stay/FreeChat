@@ -1,17 +1,11 @@
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// 从本地 secrets.properties 读取内置模型 key（该文件不提交 git，见 .gitignore）
-val secretsProps = Properties().apply {
-    val f = rootProject.file("secrets.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
-}
-fun secretKey(name: String): String = secretsProps.getProperty(name) ?: ""
+// 2026-10-18：内置模型 Key 已收口服务器（BuiltInProxy → freechater.com/api/ai/v1），
+// secrets.properties 的五把 Key 不再进 BuildConfig —— 包里没有 Key，反编译也拿不走。
 
 android {
     namespace = "com.freechat"
@@ -21,14 +15,8 @@ android {
         applicationId = "com.freechat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 249
-        versionName = "1.2.0"
-
-        buildConfigField("String", "XIAOMI_API_KEY", "\"${secretKey("XIAOMI_API_KEY")}\"")
-        buildConfigField("String", "DEEPSEEK_API_KEY", "\"${secretKey("DEEPSEEK_API_KEY")}\"")
-        buildConfigField("String", "DOUBAO_API_KEY", "\"${secretKey("DOUBAO_API_KEY")}\"")
-        buildConfigField("String", "MIMO_TTS_KEY", "\"${secretKey("MIMO_TTS_KEY")}\"")
-        buildConfigField("String", "CHATGPT_IMAGE_KEY", "\"${secretKey("CHATGPT_IMAGE_KEY")}\"")
+        versionCode = 259
+        versionName = "1.2.1"
     }
 
     buildTypes {

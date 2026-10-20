@@ -26,15 +26,15 @@ class CompanionEngineGoldenTest {
             character = CharacterProfile(dialogueMode = DialogueMode.WECHAT),
             systemPrompt = "SYS", memoryContext = "MEM", deepPrepNote = "PREP", quoteText = "QUOTE",
             history = history, imageContext = "IMG", forceReply = true, lengthHint = "LEN",
-            proactivePrompt = "FIRE", batchSize = 2, serpBlock = "SERP", searchGuidance = "GUIDE",
+            batchSize = 2, serpBlock = "SERP", searchGuidance = "GUIDE",
             includeReasoningContent = true
         )
         val contents = messages.map { it["content"] as String }
         // 全部材料都在（IMG 是嵌在长句里的，用 contains 找）
         assertTrue(contents[0] == "SYS")
         assertTrue("MEM" in contents && "PREP" in contents && "QUOTE" in contents)
-        assertTrue(contents.any { it.contains("IMG") } && "LEN" in contents && "FIRE" in contents && "SERP" in contents && "GUIDE" in contents)
-        // 次序：SYS → MEM → PREP → QUOTE → 历史 → IMG → 强制/长度/唤醒/多条 → SERP → GUIDE → 格式铁律
+        assertTrue(contents.any { it.contains("IMG") } && "LEN" in contents && "SERP" in contents && "GUIDE" in contents)
+        // 次序：SYS → MEM → PREP → QUOTE → 历史 → IMG → 强制/长度/多条 → SERP → GUIDE → 格式铁律
         val idxImg = contents.indexOfFirst { it.contains("IMG") }
         assertTrue(contents.indexOf("MEM") < contents.indexOf("PREP"))
         assertTrue(contents.indexOf("PREP") < contents.indexOf("QUOTE"))
@@ -77,12 +77,10 @@ class CompanionEngineGoldenTest {
     // ============ 回复解析 ============
 
     @Test
-    fun parserStripsProactiveThenEmotionThenBrackets() {
-        // 标记前的正文保留（「晚点聊」是指令行前的人话，不是指令的一部分）
-        val p = CompanionReplyParser.parse("[情绪:开心]\n好呀\n晚点聊 [主动智能] +30m | 约好了", narrativeMode = false)
+    fun parserEmotionThenBrackets() {
+        val p = CompanionReplyParser.parse("[情绪:开心]\n好呀\n晚点聊", narrativeMode = false)
         assertEquals("开心", p.emotion)
         assertEquals(listOf("好呀", "晚点聊"), p.bodyLines)
-        assertNotNull(p.proactive)
         // 裸标签兼容；识别不了的情绪当正文
         val bare = CompanionReplyParser.parse("[害羞]\n没有啦", narrativeMode = false)
         assertEquals("害羞", bare.emotion)

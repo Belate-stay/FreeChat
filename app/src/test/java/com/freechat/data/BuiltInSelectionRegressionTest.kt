@@ -14,7 +14,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BuiltInSelectionRegressionTest {
-    private val builtIn = BuiltInLanguageModel.create("fixture-not-a-secret")
+    private val builtIn = BuiltInLanguageModel.create()
     private val custom = builtIn.copy(isBuiltIn = false, displayName = "My relay",
         apiBaseUrl = "https://fixture.invalid", apiKey = "fixture-relay", deepThinkingDefault = true)
     private val visual = ModelInfo("fixture-image", "Fixture image", Provider.CUSTOM, modelType = ModelType.VISUAL)

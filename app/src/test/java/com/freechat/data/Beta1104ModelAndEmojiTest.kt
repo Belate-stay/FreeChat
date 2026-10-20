@@ -9,10 +9,12 @@ import org.junit.Test
 class Beta1104ModelAndEmojiTest {
     @Test
     fun builtInModelUsesTheRequestedIdentityAndCannotBeEdited() {
-        val model = BuiltInLanguageModel.create("fixture-not-a-secret")
+        val model = BuiltInLanguageModel.create()
         assertEquals("deepseek-flash", model.id)
         assertEquals("DeepSeek-V4.1-Flash", model.displayName)
-        assertEquals("https://api.deepseek.com", model.apiBaseUrl)
+        // 2026-10-18：内置模型收口代理，包里无 Key（BuiltInProxy 契约）
+        assertEquals(com.freechat.data.BuiltInProxy.BASE, model.apiBaseUrl)
+        assertEquals("", model.apiKey)
         assertEquals("DeepSeek 快速推理模型，作者自用 API，不保证随时在线", model.description) // 1.1.28 统一内置备注口径
         assertEquals(Provider.CUSTOM, model.provider)
         assertTrue(model.supportsWebSearch)
@@ -57,7 +59,7 @@ class Beta1104ModelAndEmojiTest {
         assertTrue("Full and compact input must both use the same mode guard",
             Regex("if \\(emojiAvailable\\)").findAll(source).count() >= 2)
         assertTrue(source.contains("visible = emojiAvailable && showEmojiPicker"))
-        assertTrue(source.contains("if (emojiAvailable) text += em"))
+        assertTrue(source.contains("if (emojiAvailable) { draftEditedByUser = true; text += em }"))
         assertTrue(source.contains("LaunchedEffect(emojiAvailable)"))
     }
 
@@ -75,7 +77,13 @@ class Beta1104ModelAndEmojiTest {
         assertFalse("There must be no legacy one-argument protocol helper",
             vm.contains("private fun deepThinkExtras(on: Boolean):"))
         assertTrue(vm.contains("ModelThinkingPolicy.parameters(model, on)"))
-        assertTrue(vm.contains("BuiltInLanguageModel.create(BuildConfig.DEEPSEEK_API_KEY)"))
+        assertTrue(vm.contains("BuiltInLanguageModel.create()"))
+        // 2026-10-18：内置模型 Key 已收口服务器 —— 包里不许再有任何 Key 引用
+        assertFalse(vm.contains("BuildConfig.DEEPSEEK_API_KEY"))
+        assertFalse(vm.contains("BuildConfig.CHATGPT_IMAGE_KEY"))
+        assertFalse(vm.contains("BuildConfig.MIMO_TTS_KEY"))
+        assertFalse(vm.contains("BuildConfig.XIAOMI_API_KEY"))
+        assertFalse(vm.contains("BuildConfig.DOUBAO_API_KEY"))
     }
 
     @Test
@@ -90,11 +98,10 @@ class Beta1104ModelAndEmojiTest {
     @Test
     fun companionTransportKeepsParsingAndReasoningSeparateWithoutChangingReplySegments() {
         val parsed = com.freechat.core.CompanionReplyParser.parse("[情绪:开心]\n刚到食堂\n你想吃什么？", false)
-        val body = com.freechat.core.CompanionReply(parsed.emotion, parsed.bodyLines, parsed.proactive)
+        val body = com.freechat.core.CompanionReply(parsed.emotion, parsed.bodyLines)
         val reply = CompanionApiReply(body, "fixture model reasoning")
         assertEquals(body.segments, reply.segments)
         assertEquals(body.emotion, reply.emotion)
-        assertEquals(body.proactive, reply.proactive)
         assertEquals("fixture model reasoning", reply.reasoningContent)
         assertEquals("", CompanionApiReply(body).reasoningContent)
     }

@@ -33,7 +33,8 @@ fun main() {
     val port = (System.getenv("FREECHAT_COMPANION_PORT") ?: "3100").toInt()
 
     val store = CompanionStore(dbPath)
-    val brain = CompanionBrain(store, MimoChatCompleter(apiKey = apiKey))
+    val completer = MimoChatCompleter(apiKey = apiKey)
+    val brain = CompanionBrain(store, completer)
 
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
     server.executor = Executors.newFixedThreadPool(4)
@@ -131,6 +132,67 @@ fun main() {
         }
     }
 
+    server.createContext("/companion/proactive/decide") { ex ->
+        if (ex.requestMethod != "POST") {
+            respond(ex, 405, """{"error":"method_not_allowed"}""")
+            return@createContext
+        }
+        try {
+            val raw = ex.requestBody.readBytes().toString(Charsets.UTF_8)
+            val body = JsonParser.parseString(raw).asJsonObject
+            val convId = body.get("convId")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+            if (!store.safeId(convId)) {
+                respond(ex, 400, """{"error":"bad_request"}""")
+                return@createContext
+            }
+            // 2026-10-20 云端主动智能：人设/关系/近况自取（材料在信息最全的大脑侧），调用方只给时间与配额
+            val objs = store.load(convId)
+            if (objs == null) {
+                respond(ex, 404, """{"error":"not_found"}""")
+                return@createContext
+            }
+            val ch = objs.conv.characterProfile?.normalized() ?: com.freechat.model.CharacterProfile()
+            val recent = objs.messages.takeLast(20).joinToString("\n") { m ->
+                val who = if (m.role == com.freechat.model.Role.USER) "TA" else "你"
+                "[$who ${java.time.Instant.ofEpochMilli(m.timestamp)}] ${m.content.replace('\n', ' ').take(160)}"
+            }
+            val prompt = com.freechat.core.CompanionPrompts.proactiveDecide(
+                ch = ch,
+                recentLines = recent,
+                nowText = body.get("nowText")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty(),
+                newTopicQuotaLeft = body.get("newTopicQuotaLeft")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
+                lastProactiveText = body.get("lastProactiveText")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty(),
+                sleepWindow = body.get("sleepWindow")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+            )
+            val out = kotlinx.coroutines.runBlocking {
+                completer.complete(
+                    listOf(
+                        mapOf("role" to "system", "content" to "你是主动决策器。只输出 JSON，不要围栏、不要多余文字。"),
+                        mapOf("role" to "user", "content" to prompt)
+                    ),
+                    0.8
+                )
+            }
+            val decision = parseProactiveDecision(out)
+            // 硬-2（2026-10-20）：台词先落 msgs 箱再回管道去发微信（大脑是箱的唯一写入方）
+            val o = JsonParser.parseString(decision).asJsonObject
+            if (o.get("action")?.asString == "message") {
+                val contents = o.get("content")?.takeIf { it.isJsonArray }?.asJsonArray
+                    ?.mapNotNull { it.takeIf { e -> e.isJsonPrimitive }?.asString }.orEmpty()
+                if (contents.isNotEmpty()) {
+                    val ids = kotlinx.coroutines.runBlocking { brain.persistProactiveMessages(convId, contents) }
+                    o.add("messageIds", JsonParser.parseString(
+                        ids.joinToString(",", "[", "]") { com.google.gson.Gson().toJson(it) }))
+                    respond(ex, 200, o.toString())
+                    return@createContext
+                }
+            }
+            respond(ex, 200, decision)
+        } catch (e: Exception) {
+            respond(ex, 500, """{"error":"internal"}""")
+        }
+    }
+
     Runtime.getRuntime().addShutdownHook(Thread { server.stop(0); store.close() })
     println("freechat-companion listening on 127.0.0.1:$port db=$dbPath")
     server.start()
@@ -141,4 +203,25 @@ private fun respond(ex: com.sun.net.httpserver.HttpExchange, code: Int, body: St
     ex.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
     ex.sendResponseHeaders(code, bytes.size.toLong())
     ex.responseBody.use { it.write(bytes) }
+}
+
+/** 模型输出→决策 JSON：剥围栏、截取首个 {…}、枚举校验；解析失败一律回落 none（宁可不发）。 */
+private fun parseProactiveDecision(out: String): String {
+    val s = out.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+    val start = s.indexOf('{'); val end = s.lastIndexOf('}')
+    if (start < 0 || end <= start) return """{"action":"none","kind":"new_topic","reason":"unparseable"}"""
+    val o = runCatching { JsonParser.parseString(s.substring(start, end + 1)).asJsonObject }.getOrNull()
+        ?: return """{"action":"none","kind":"new_topic","reason":"unparseable"}"""
+    val action = o.get("action")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+        .let { if (it in setOf("none", "message", "wait")) it else "none" }
+    val kind = o.get("kind")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+        .let { if (it in setOf("new_topic", "continuation", "anchor")) it else "new_topic" }
+    val delay = o.get("delayMinutes")?.takeIf { it.isJsonPrimitive }?.asInt?.coerceIn(0, 24 * 60) ?: 0
+    val content = o.get("content")?.takeIf { it.isJsonArray }?.asJsonArray
+        ?.mapNotNull { it.takeIf { e -> e.isJsonPrimitive }?.asString?.trim()?.takeIf { t -> t.isNotBlank() } }
+        ?.take(2).orEmpty()
+    val reason = o.get("reason")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty().take(200)
+    if (action == "message" && content.isEmpty()) return """{"action":"none","kind":"$kind","reason":"empty_content"}"""
+    val contentJson = content.joinToString(",", "[", "]") { com.google.gson.Gson().toJson(it) }
+    return """{"action":"$action","kind":"$kind","delayMinutes":$delay,"content":$contentJson,"reason":${com.google.gson.Gson().toJson(reason)}}"""
 }
