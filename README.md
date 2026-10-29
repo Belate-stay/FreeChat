@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/icon.png?v=1.2.1" width="120" height="120" alt="FreeChat Logo" />
+<img src="docs/icon.png?v=1.2.3" width="120" height="120" alt="FreeChat Logo" />
 
 # FreeChat
 
@@ -12,7 +12,7 @@ Android 多模型 AI 聊天应用 —— 全能 AI 助手，与专属拟人陪�
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](https://github.com/Belate-stay/FreeChat)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://github.com/Belate-stay/FreeChat)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material3-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white)](https://github.com/Belate-stay/FreeChat)
-[![Version](https://img.shields.io/badge/Version-1.2.1-0A84FF?style=flat-square)](https://github.com/Belate-stay/FreeChat/releases)
+[![Version](https://img.shields.io/badge/Version-1.2.3-0A84FF?style=flat-square)](https://github.com/Belate-stay/FreeChat/releases)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
 </div>
@@ -41,6 +41,7 @@ FreeChat 是一款 Android 端多模型 AI 聊天应用，提供两种互补的�
 - **语音交互** —— 语音输入（内置 MiMo-V2.5-ASR）与 AI 朗读（TTS 流式不中断）；支持自定义音色（提示词设计 / 音频复刻，Beta）
 - **推理过程展示** —— 模型思考过程实时可见，默认折叠，可展开回看
 - **Markdown 渲染** —— 结构化排版输出，含嵌套与表格
+- **数学公式显示**（1.2.3 新增）—— 绝大部分数学公式符号直接显示
 - **收藏与分享** —— 消息集中收藏；可导出 jpg / Markdown，或生成在线网页分享链接（免安装预览、可撤销）
 - **建议与反馈** —— 未登录亦可提交，可回看历史；「从夯到拉」评价卡一键反馈回复质量
 - **内置 Claude 风格助理** —— 开箱即用
@@ -59,6 +60,10 @@ FreeChat 是一款 Android 端多模型 AI 聊天应用，提供两种互补的�
 - **语音回复**（1.2.1 新增，Beta）—— 微信聊天档开启后角色可发送语音消息；长按语音键直接发送语音
 - **主动智能**（1.2.1 重写，Beta）—— 由服务器调用 API 在合适的时机主动发消息，不依赖客户端后台运行（依赖微信消息推送）
 - **连接微信**（Beta）—— 扫码绑定后用微信与角色对话：分条发送、正在输入、表情识别与回复，机制云端运行
+- **角色卡与角色池**（1.2.3 新增）—— 拟人逻辑重写：角色与对话分离，可单独创建角色/对话，或将多个角色与指定的对话绑定
+- **多角色群聊**（1.2.3 新增）—— 多个不同的角色在群中聊天对话，支持 拍一拍 和 @ 功能
+- **多角色文本**（1.2.3 新增）—— 多个不同的角色共同参与剧情补足创作，无主/配角之分，剧情走向随用户与 AI 共同完成
+- **内置角色池**（1.2.3 新增）—— 暂无内置角色卡，用户可选择上传自己的角色卡
 
 ### 模型接入
 
