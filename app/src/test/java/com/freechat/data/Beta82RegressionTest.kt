@@ -41,8 +41,9 @@ class Beta82RegressionTest {
 
     @Test fun wechatDoesNotUseOrEraseStoredOriginal() {
         val wechat = character(DialogueMode.WECHAT)
-        for (purpose in CharacterOriginalLearning.Purpose.entries)
+        for (purpose in listOf(CharacterOriginalLearning.Purpose.REPLY, CharacterOriginalLearning.Purpose.IMAGE))
             assertEquals("", CharacterOriginalLearning.prompt(wechat, purpose))
+        assertTrue(CharacterOriginalLearning.prompt(wechat, CharacterOriginalLearning.Purpose.PERSONA).contains("不绑定聊天模式"))
         assertEquals(original, wechat.normalized().originalLearningText)
         assertTrue(wechat.copy(referencePrototype = "原型", originalLearningText = original.repeat(4)).prototypeNeedsSearch())
         assertFalse(character().copy(referencePrototype = "原型", originalLearningText = original.repeat(4)).prototypeNeedsSearch())

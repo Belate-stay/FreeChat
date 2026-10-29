@@ -31,10 +31,25 @@ object SceneReferenceSelector {
         val source: String,
         val reference: ImageApiRequest.Reference,
         val sceneMessageId: String? = null,
-        internal val identities: Set<String> = emptySet()
+        internal val identities: Set<String> = emptySet(),
+        val characterId: String? = null
     )
 
     private data class Candidate(val source: String, val identity: String)
+
+    /** One appearance reference per cast member, labelled so a multi-person image cannot swap faces. */
+    fun prepare(story: com.freechat.model.StoryProfile, retainedHistory: List<Message>,
+        deletedMessageIds: Set<String> = emptySet(), httpClient: OkHttpClient = defaultHttpClient): List<PreparedReference> {
+        val characters = story.members.flatMap { member ->
+            val profile = member.persona.toProfile(com.freechat.model.DialogueMode.PLOT).normalized()
+            prepare(profile.copy(appearanceImagePaths = profile.appearanceImagePaths.take(1)), emptyList(),
+                httpClient = httpClient).map { it.copy(characterId = member.id) }
+        }
+        val scenes = if (story.enhancedSceneContinuity) prepare(CharacterProfile(
+            dialogueMode = com.freechat.model.DialogueMode.PLOT, enhancedSceneContinuity = true),
+            retainedHistory, deletedMessageIds, httpClient) else emptyList()
+        return characters + scenes
+    }
 
     /** Standard-mode uploads and retained generated pictures use the same bounded reference reader. */
     fun prepareSources(sources: List<String>, httpClient: OkHttpClient = defaultHttpClient): List<ImageApiRequest.Reference> =

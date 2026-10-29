@@ -33,7 +33,9 @@ data class Conversation(
     /** 只保存删除 ID，不保存文本；同步并集不能复活用户已删除的消息。 */
     val deletedMessageIds: List<String> = emptyList(),
     /** Subset of tombstones belonging to visual-only rows; these cannot invalidate story memory. */
-    val deletedVisualMessageIds: List<String> = emptyList()
+    val deletedVisualMessageIds: List<String> = emptyList(),
+    val groupChat: GroupChatProfile? = null,
+    val storyProfile: StoryProfile? = null
 )
 
 /** 记忆条目 — 来自一次对话的精简总结 */
@@ -47,7 +49,13 @@ data class MemoryEntry(
      *  增强检索模式下由摘录器填写——「上周三去了南京」这种，日期是上周三而不是今天。 */
     val eventDate: String = "",
     /** 摘要的来源。任一来源被删除，整个派生摘要失效。 */
-    val sourceMessageIds: List<String> = emptyList()
+    val sourceMessageIds: List<String> = emptyList(),
+    /** Narrative facts are not automatically knowledge available to the role. */
+    val storyState: String = "",
+    val roleKnowledge: String = "",
+    /** Status changes of promises/plans: pending, completed, cancelled or rescheduled. */
+    val openLoops: String = "",
+    val groupMemberId: String? = null
 ) {
     /** 是否为「硬盘」层记忆（剧情主线/重大事件）：长期不淘汰、检索时始终注入 */
     fun isPlot(): Boolean = kind == "plot"

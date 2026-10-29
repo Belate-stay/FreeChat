@@ -138,6 +138,8 @@ object Relay {
     // ============================================================
 
     suspend fun applyConversations(ops: List<ConvOp>) {
+        val changedIds = ops.filterIsInstance<ConvOp.Upsert>().map { it.conv.id }.toSet()
+        val previousMedia = conversations().filter { it.id in changedIds }.flatMap(::conversationMedia)
         withContext(Dispatchers.IO) {
             LocalStore.suspendApply {
                 ops.filterIsInstance<ConvOp.Remove>().forEach { ConversationDeletion.removeLocal(it.id) }
@@ -147,6 +149,7 @@ object Relay {
         val i = impl
         if (i != null) {
             i.applyConversations(allowed)
+            LocalStore.suspendApply { ImageSync.releaseUnreferenced(previousMedia) }
             return
         }
         LocalStore.suspendApply {
@@ -181,7 +184,27 @@ object Relay {
                 }
             }
         }
+        LocalStore.suspendApply { ImageSync.releaseUnreferenced(previousMedia) }
     }
+
+    private fun conversationMedia(conv: Conversation): List<String> = buildList {
+        fun profile(p: com.freechat.model.CharacterProfile?) {
+            if (p == null) return
+            add(p.avatarPath); add(p.appearanceImagePath); addAll(p.appearanceImagePaths)
+        }
+        profile(conv.characterProfile)
+        conv.groupChat?.let { group ->
+            add(group.avatarPath)
+            group.members.forEach { member ->
+                add(member.persona.avatarPath); add(member.persona.appearanceImagePath)
+                addAll(member.persona.appearanceImagePaths)
+            }
+        }
+        conv.storyProfile?.members?.forEach { member ->
+            add(member.persona.avatarPath); add(member.persona.appearanceImagePath)
+            addAll(member.persona.appearanceImagePaths)
+        }
+    }.filter { it.isNotBlank() }
 
     suspend fun applyMessages(convId: String, incoming: List<Message>) {
         if (ConversationDeletion.contains(convId)) return

@@ -18,6 +18,36 @@ data class ChangelogEntry(
 object ChangelogData {
     val entries: List<ChangelogEntry> = listOf(
         ChangelogEntry(
+            version = "Version 1.2.3",
+            date = "2026-10-29",
+            sections = listOf(
+                ChangelogSection("拟人优化", listOf(
+                    "重写 拟人逻辑，加入角色卡和角色池概念。将角色与对话分离，可单独创建角色/对话，或将多个角色与指定的对话绑定。",
+                    "新增 “多角色群聊”功能，支持多个不同的角色在群中聊天对话。",
+                    "新增 “多角色文本”功能，支持多个不同的角色共同参与 剧情补足 创作，无主/配角，剧情走向随用户与AI共同完成。",
+                    "新增 “多角色群聊”中支持 拍一拍 和 @ 功能。",
+                    "优化 完整语义与真人节奏，删去固定标签，由模型决定回复效果。",
+                    "优化 AI对角色提示词的理解，优化系统提示词，修复角色普遍繁忙、拒绝回复、回复敷衍的问题。",
+                    "优化 微信聊天 下的AI回复，去除大量“要是...就...”、“别让我...”等词汇，降低AI味，提升真人感。"
+                )),
+                ChangelogSection("新增功能", listOf(
+                    "新增 “内置角色池”，暂无内置角色卡，用户可选择上传自己的角色卡。"
+                )),
+                ChangelogSection("体验优化", listOf(
+                    "优化 标准模式下数学公式的输出，支持绝大部分数学公式符号的直接显示。"
+                )),
+                ChangelogSection("漏洞修补", listOf(
+                    "修复 部分页面选项卡片显示异常的问题。",
+                    "修复 部分页面返回时越级返回的问题。",
+                    "修复 “时间感知”中角色对于时间感知错误的问题。",
+                    "修复 平板视图下自动隐藏输入框模式下的输入框显示问题。"
+                )),
+                ChangelogSection("其他更新", listOf(
+                    "更新 新功能推荐内容。"
+                ))
+            )
+        ),
+        ChangelogEntry(
             version = "Version 1.2.1",
             date = "2026-10-20",
             sections = listOf(

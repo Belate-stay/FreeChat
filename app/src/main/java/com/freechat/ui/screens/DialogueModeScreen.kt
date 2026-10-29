@@ -8,6 +8,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,7 +58,7 @@ internal fun DialogueModeScreen(
             Modifier.fillMaxSize()
                 .then(if (advanced) Modifier.hazeSource(hazeState).hazeBackground(colors.Background) else Modifier)
                 .verticalScroll(rememberTopOnEntryScrollState())
-                .padding(top = HazeSpec.topContentPaddingDp(statusHeight, 24.dp), bottom = 32.dp)
+                .padding(top = HazeSpec.newPageContentPaddingDp(statusHeight, 24.dp), bottom = 32.dp)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
@@ -137,6 +138,7 @@ internal fun DialogueModeOptions(mode: Int?, onSelect: (Int) -> Unit, hazeState:
                 Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
                     color = titleColor)
                 Text(description, style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary)
+
             }
         }
     }

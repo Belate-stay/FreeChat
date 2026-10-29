@@ -26,9 +26,9 @@ class MemoryGoldenTest {
     }
 
     @Test
-    fun upsertRewritesDuplicateKeepingFirstKnownDateAndId() {
+    fun upsertMergesExactDuplicateButKeepsChangedFactsAndDatesDistinct() {
         val old = entry("养了一只叫咪咪的猫", ts = 1, date = "2026年9月1日", sources = listOf("a"), id = "id-1", keywords = listOf("猫"))
-        val new = entry("养了一只叫咪咪的猫（三花）", ts = 2, date = "", sources = listOf("b"), keywords = listOf("咪咪"), kind = "plot")
+        val new = entry(old.summary, ts = 2, date = old.eventDate, sources = listOf("b"), keywords = listOf("咪咪"), kind = "plot")
         val merged = MemoryLogic.upsert(listOf(old), new)
         assertEquals(1, merged.size)                                    // 不堆新条目
         assertEquals("id-1", merged[0].id)                              // 保留原 id
@@ -36,9 +36,11 @@ class MemoryGoldenTest {
         assertEquals("plot", merged[0].kind)                            // 任一是主线则升主线
         assertEquals(setOf("a", "b"), merged[0].sourceMessageIds.toSet())
         assertTrue(merged[0].keywords.containsAll(listOf("猫", "咪咪")))
-        // 新条目带明确事件日期时用新的
+        // 明确不同的事件日期不能冒充同一件事覆盖掉旧记录。
         val dated = MemoryLogic.upsert(listOf(old), new.copy(eventDate = "2026年9月5日"))
-        assertEquals("2026年9月5日", dated[0].eventDate)
+        assertEquals(2, dated.size)
+        assertEquals("2026年9月5日", dated[1].eventDate)
+        assertEquals(2, MemoryLogic.upsert(listOf(old), new.copy(summary = "养了一只叫咪咪的猫（三花）")).size)
         // 不相似就追加
         assertEquals(2, MemoryLogic.upsert(listOf(old), entry("今天吃了火锅")).size)
     }

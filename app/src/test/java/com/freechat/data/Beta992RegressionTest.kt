@@ -264,7 +264,7 @@ class Beta992RegressionTest {
 
     @Test fun requestsNeverOverwriteTheGlobalModelSelection() {
         val viewModel = source("viewmodel/ChatViewModel.kt")
-        for (name in listOf("applyPerConvSettings", "applyCharacterSettings", "restoreSettings", "describeImagePath")) {
+        for (name in listOf("applyPerConvSettings", "applyCharacterSettings", "requestSettings", "describeImagePath")) {
             val start = viewModel.indexOf("fun $name(")
             assertTrue("Missing function $name", start >= 0)
             val end = viewModel.indexOf("\n    }", start).takeIf { it >= 0 } ?: viewModel.length

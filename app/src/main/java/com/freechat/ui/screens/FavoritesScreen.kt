@@ -179,7 +179,7 @@ fun FavoritesScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 16.dp, end = 16.dp,
-                        top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 20.dp),
+                        top = HazeSpec.newPageContentPaddingDp(statusBarHeightDp, 20.dp),
                         bottom = 40.dp
                     )
                 ) {

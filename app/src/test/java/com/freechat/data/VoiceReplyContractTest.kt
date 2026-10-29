@@ -67,8 +67,11 @@ class VoiceReplyContractTest {
         // 2026-10-19 ①③：点点点节制（满屏「···」=人机感）+ 回复形态跟着上下文活（短碎/长文/语音/文字不锁死）
         val core = File("../freechat-core/src/main/kotlin/com/freechat/core/CompanionPrompts.kt").readText()
         assertTrue("省略号口癖节制条款", core.contains("【标点口癖——点点点省着用】"))
-        assertTrue("微信档不许连着几条飘点点点", core.contains("连着几条都飘点点点就成了人机口癖"))
-        assertTrue("长短跟着内容走", core.contains("可以是一条长消息，也可以连发几条长的"))
+        assertTrue("省略号随角色习惯，不给每句挂口癖", core.contains("按语气、情绪和角色习惯自然使用") &&
+            core.contains("不要无缘由地把省略号挂在每句话前后"))
+        assertFalse("不再规定每条消息的标点次数", core.contains("一条回复里最多出现一次"))
+        assertTrue("长短跟着内容走且不设固定条数", core.contains("按语义自然分条，不设固定条数") &&
+            core.contains("完整的一段也可单独发"))
         assertTrue("语音长短也活（长语音正当）", core.contains("几秒的短句到一分钟的长语音都自然"))
         assertTrue("偏好频率看人设", core.contains("你更偏爱哪种由人设决定"))
     }

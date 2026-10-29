@@ -106,9 +106,15 @@ object HazeSpec {
     fun topFadeStartDp(bandHeight: Dp, fadeHeight: Dp = TopProgressiveSpanDp): Dp =
         bandHeight - fadeHeight
 
-    /** 页面原有布局留白独立于模糊带，避免每次调模糊范围都把设置项往下推。 */
+    /** 保留页面各自的原有留白，模糊带调整不应把所有页面一起向下推。 */
     fun topContentPaddingDp(statusBarDp: Dp, originalGap: Dp = 8.dp): Dp =
         titleBarHeightDp(statusBarDp) + originalGap
+
+    /** 新增的角色库／群聊／故事等页面按需避让模糊带，不改变其他页面。
+     *  首行起点恰好落在模糊带下缘（模糊强度为 0 的那条线）——不探进模糊，也不再多留空白。
+     *  原有留白更大的页面仍按原值保留（谁大听谁）。 */
+    fun newPageContentPaddingDp(statusBarDp: Dp, originalGap: Dp = 8.dp): Dp =
+        maxOf(topContentPaddingDp(statusBarDp, originalGap), topBandHeightDp(statusBarDp))
 
     /** 底部模糊带高度（= 底部渐变 endY 的唯一来源） */
     fun bottomBandHeightDp(): Dp = BottomFadeHeightDp

@@ -46,8 +46,7 @@ import com.freechat.ui.theme.linkInk
 @Composable
 fun ApiTutorialPage(colors: FreeChatColors, s: AppStrings) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        // 首段下移（2026-10-19 返修）：贴顶会探进标题栏的高斯模糊层，压出一段呼吸再开始
-        Spacer(Modifier.height(28.dp))
+        // 首段起点由容器统一落在模糊带下缘（2026-10-28 统一顶距后旧补丁归零，不再二次下移）
         TutPara(colors, colors.TextSecondary,
             "FreeChat 不提供模型服务，内置模型仅供体验。自行申请 API Key 并填入「添加模型」页，即可稳定使用。\n本教程以 DeepSeek 为例，其他服务商见文末。")
 

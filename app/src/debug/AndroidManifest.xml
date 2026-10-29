@@ -9,6 +9,7 @@
             android:windowSoftInputMode="adjustNothing" />
         <activity android:name="com.freechat.qa.ImageRevealQaActivity" android:exported="true" />
         <activity android:name="com.freechat.qa.TabletSeedQaActivity" android:exported="true" />
+        <activity android:name="com.freechat.qa.GroupLibraryQaActivity" android:exported="true" />
         <receiver android:name="com.freechat.qa.TabletBusyQaReceiver" android:exported="true" />
     </application>
 </manifest>

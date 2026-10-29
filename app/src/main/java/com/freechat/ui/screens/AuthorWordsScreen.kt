@@ -58,7 +58,6 @@ fun AuthorWordsScreen(onBack: () -> Unit) {
                 .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 36.dp), bottom = 40.dp)
                 .padding(horizontal = 22.dp)
         ) {
-            Spacer(Modifier.height(24.dp))
             AuthorWordsContent(colors)
         }
 

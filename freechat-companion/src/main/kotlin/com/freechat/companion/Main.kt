@@ -89,6 +89,7 @@ fun main() {
             out.addProperty("emotion", result.emotion)
             out.add("segments", com.google.gson.Gson().toJsonTree(result.segments))
             out.add("messageIds", com.google.gson.Gson().toJsonTree(result.messageIds))
+            out.add("delaysMs", com.google.gson.Gson().toJsonTree(result.delaysMs))
             respond(ex, 200, out.toString())
         } catch (e: IllegalArgumentException) {
             respond(ex, 404, """{"error":"not_found","message":${com.google.gson.Gson().toJson(e.message ?: "not found")}}""")
@@ -152,28 +153,30 @@ fun main() {
                 return@createContext
             }
             val ch = objs.conv.characterProfile?.normalized() ?: com.freechat.model.CharacterProfile()
-            val recent = objs.messages.takeLast(20).joinToString("\n") { m ->
-                val who = if (m.role == com.freechat.model.Role.USER) "TA" else "你"
-                "[$who ${java.time.Instant.ofEpochMilli(m.timestamp)}] ${m.content.replace('\n', ' ').take(160)}"
+            // 2026-10-20 双保险：未开启「主动智能」的角色一律不决策（管道侧已硬闸，大脑再闸一道——
+            // 开关是承诺不是建议：没开就一条不发，顺带省下 LLM 调用）
+            if (!ch.proactiveEnabled) {
+                respond(ex, 200, """{"action":"none","kind":"continuation","reason":"未开启主动智能"}""")
+                return@createContext
             }
-            val prompt = com.freechat.core.CompanionPrompts.proactiveDecide(
+            val messages = com.freechat.core.CompanionPrompts.proactiveDecisionMessages(
                 ch = ch,
-                recentLines = recent,
+                history = objs.messages,
                 nowText = body.get("nowText")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty(),
                 newTopicQuotaLeft = body.get("newTopicQuotaLeft")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
                 lastProactiveText = body.get("lastProactiveText")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty(),
-                sleepWindow = body.get("sleepWindow")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+                sleepWindow = body.get("sleepWindow")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty(),
+                memories = if (objs.autoMemoryEnabled()) objs.memories else emptyList(),
+                deliveredProactiveHistory = body.get("deliveredProactiveHistory")?.takeIf { it.isJsonArray }?.asJsonArray,
+                deletedMessageIds = objs.conv.deletedMessageIds.toSet(),
+                deletedVisualMessageIds = objs.conv.deletedVisualMessageIds.toSet()
             )
-            val out = kotlinx.coroutines.runBlocking {
-                completer.complete(
-                    listOf(
-                        mapOf("role" to "system", "content" to "你是主动决策器。只输出 JSON，不要围栏、不要多余文字。"),
-                        mapOf("role" to "user", "content" to prompt)
-                    ),
-                    0.8
-                )
+            val decideRes = kotlinx.coroutines.runBlocking {
+                completer.complete(messages, 0.8)
             }
-            val decision = parseProactiveDecision(out)
+            // 微信也要进账本（2026-10-22）：主动决策同样是模型开销
+            store.recordAiUsage(objs.userId, "proactive", decideRes)
+            val decision = parseProactiveDecision(decideRes.text)
             // 硬-2（2026-10-20）：台词先落 msgs 箱再回管道去发微信（大脑是箱的唯一写入方）
             val o = JsonParser.parseString(decision).asJsonObject
             if (o.get("action")?.asString == "message") {
@@ -189,7 +192,10 @@ fun main() {
             }
             respond(ex, 200, decision)
         } catch (e: Exception) {
-            respond(ex, 500, """{"error":"internal"}""")
+            // 2026-10-20 联调：静默 500 查无可查——异常必须留痕；detail 回传只走 127.0.0.1 回环（dev 口径）
+            System.err.println("proactive.decide error: " + e)
+            e.printStackTrace()
+            respond(ex, 500, """{"error":"internal","detail":${com.google.gson.Gson().toJson(e.toString())}}""")
         }
     }
 
@@ -219,7 +225,7 @@ private fun parseProactiveDecision(out: String): String {
     val delay = o.get("delayMinutes")?.takeIf { it.isJsonPrimitive }?.asInt?.coerceIn(0, 24 * 60) ?: 0
     val content = o.get("content")?.takeIf { it.isJsonArray }?.asJsonArray
         ?.mapNotNull { it.takeIf { e -> e.isJsonPrimitive }?.asString?.trim()?.takeIf { t -> t.isNotBlank() } }
-        ?.take(2).orEmpty()
+        .orEmpty().let { com.freechat.core.CompanionRhythm.prepareSegments(it, narrative = false) }
     val reason = o.get("reason")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty().take(200)
     if (action == "message" && content.isEmpty()) return """{"action":"none","kind":"$kind","reason":"empty_content"}"""
     val contentJson = content.joinToString(",", "[", "]") { com.google.gson.Gson().toJson(it) }

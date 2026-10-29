@@ -139,7 +139,7 @@ fun FavoritesDetailScreen(
             contentPadding = PaddingValues(
                 start = 16.dp + com.freechat.ui.adaptive.tabletReadingGutter(),
                 end = 16.dp + com.freechat.ui.adaptive.tabletReadingGutter(),
-                top = HazeSpec.topContentPaddingDp(statusBarHeightDp),
+                top = HazeSpec.newPageContentPaddingDp(statusBarHeightDp),
                 bottom = 120.dp
             ),
             verticalArrangement = if (multi) Arrangement.spacedBy(12.dp) else Arrangement.Top

@@ -52,7 +52,7 @@ private fun iconRes(icon: AppIcon): Int = when (icon) {
 internal fun IconPickerPage(selected: AppIcon, active: AppIcon, saving: Boolean, onSelect: (AppIcon) -> Unit, s: AppStrings) {
     val colors = LocalFreeChatColors.current
     Text(s.appIconRestart, style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary,
-        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp))
+        modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp))
     AppIcon.entries.forEach { icon ->
         SettingsRow {
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))

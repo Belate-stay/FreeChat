@@ -1,5 +1,7 @@
 package com.freechat.ui.screens
 
+import com.freechat.i18n.storySettings
+
 import com.freechat.ui.adaptive.LocalPaneSize
 import com.freechat.ui.adaptive.LocalTabletUi
 import com.freechat.ui.adaptive.PaneExpandButton
@@ -24,6 +26,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import com.freechat.ui.theme.AppBoxWithConstraints as BoxWithConstraints
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -41,7 +45,6 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.OpenInFull
-import androidx.compose.material.icons.outlined.Create
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.SwapVert
@@ -57,7 +60,6 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -89,6 +91,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.freechat.data.TtsController
 import com.freechat.data.SearchPresentation
 import com.freechat.i18n.LocalStrings
+import com.freechat.i18n.groupSettings
 import com.freechat.model.ChatMode
 import com.freechat.model.DialogueMode
 import com.freechat.model.InputBarState
@@ -178,11 +181,9 @@ fun ChatScreen(
     isDark: Boolean,
     onOpenDrawer: () -> Unit,
     onOpenNewRules: () -> Unit = {},
-    onNewChatReveal: ((Rect) -> Unit)? = null,
-    revealTrigger: Int = 0,
-    onRevealComplete: () -> Unit = {},
-    onNewChat: () -> Unit = {},
     onOpenCharacterSetup: () -> Unit = {},
+    onOpenGroupSettings: () -> Unit = {},
+    onOpenStorySettings: () -> Unit = {},
     onOpenAsrEditor: () -> Unit = {},
     /** 长按「生成图片」快跳生图模型编辑页（1.0.71） */
     onOpenModelEditor: (ModelType, ModelInfo?) -> Unit = { _, _ -> },
@@ -237,6 +238,9 @@ fun ChatScreen(
     val isTyping by viewModel.isTyping.collectAsState()
     val currentMode by viewModel.currentMode.collectAsState()
     val currentCharacter by viewModel.currentCharacter.collectAsState()
+    val conversations by viewModel.conversations.collectAsState()
+    val groupChat = conversations.firstOrNull { it.id == currentConvId }?.groupChat
+    val storyProfile = conversations.firstOrNull { it.id == currentConvId }?.storyProfile
     val scrollTick by viewModel.scrollRequestTick.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     var showNoAsrDialog by remember { mutableStateOf(false) }
@@ -397,10 +401,11 @@ fun ChatScreen(
     val companionMode = currentMode == ChatMode.COMPANION
     // 对话模式：currentCharacter 在个别入口可能还是未迁移的原始对象，再过一次 normalized() 兜底
     // （1.0.28 前的老档案只写了 plotSimulation，dialogueMode 还是默认值）
-    val dialogueMode = currentCharacter?.normalized()?.dialogueMode ?: DialogueMode.WECHAT
+    val dialogueMode = if (storyProfile != null) DialogueMode.PLOT else if (groupChat != null) DialogueMode.WECHAT
+        else currentCharacter?.normalized()?.dialogueMode ?: DialogueMode.WECHAT
     // 剧情补足：AI 回复不套气泡框，以纯文本流呈现（用户消息仍有气泡，用于区分辨别）
     val textFlowAi = dialogueMode == DialogueMode.PLOT
-    val narrativeActions = com.freechat.data.CompanionFeaturePolicy.supportsNarrativeActions(currentCharacter)
+    val narrativeActions = storyProfile != null || (groupChat == null && com.freechat.data.CompanionFeaturePolicy.supportsNarrativeActions(currentCharacter))
     val photoUploadAllowed = currentMode == ChatMode.STANDARD ||
         com.freechat.data.CharacterPresentationPolicy.usesPhotoRecognition(dialogueMode)
     val sceneLockedIds = remember(messages, companionMode) {
@@ -430,6 +435,11 @@ fun ChatScreen(
     // 取消/退出一律清空输入框草稿，不还回旧草稿（用户拍板「退出改写后输入框中的文字一并清除不保留」）。
     val editingMessageId by viewModel.editingPromptId.collectAsState()
     var inputFocusTick by remember { mutableIntStateOf(0) }
+    var mentionRequest by remember(currentConvId) { mutableStateOf<MentionSelectionRequest?>(null) }
+    var mentionInsertion by remember(currentConvId) { mutableStateOf<MentionComposerInsertion?>(null) }
+    var mentionRevision by remember(currentConvId) { mutableIntStateOf(0) }
+    val mentionKeyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val mentionFocus = androidx.compose.ui.platform.LocalFocusManager.current
     // 1.1.29.1 ①：粒子粉碎退场——重生成/重回复删消息按最后一帧位置起爆（用户主动删除不走这）
     val shatterBursts = remember { mutableStateListOf<ShatterBurst>() }
     val msgRects = remember { mutableMapOf<String, androidx.compose.ui.geometry.Rect>() }
@@ -453,6 +463,7 @@ fun ChatScreen(
     }
     // 改写中页面锁定：系统返回不退出改写、也不离开本页——出口只有「取消」钮或改写成功
     androidx.activity.compose.BackHandler(enabled = latestPageActive.value && editingMessageId != null) { }
+    androidx.activity.compose.BackHandler(enabled = latestPageActive.value && showPlusMenu) { showPlusMenu = false }
     // 长按输入框叫出来的「全屏输入」菜单。菜单画在这一层而不是输入框里 ——
     // 磨砂玻璃要糊住背后的聊天内容，就得跟聊天内容待在同一个窗口（Popup 是独立窗口，糊不到）。
     var showFullscreenMenu by remember { mutableStateOf(false) }
@@ -569,7 +580,7 @@ fun ChatScreen(
     // 三态：null=查询中（首帧先不摆输入框，免得闪一下又换成告知条）、true/false=查过了
     var wechatAttached by remember(currentConvId) {
         mutableStateOf(
-            if (companionMode && dialogueMode == com.freechat.model.DialogueMode.WECHAT) viewModel.wechatAttachedCached(currentConvId ?: "")
+            if (groupChat == null && companionMode && dialogueMode == com.freechat.model.DialogueMode.WECHAT) viewModel.wechatAttachedCached(currentConvId ?: "")
             else false
         )
     }
@@ -577,7 +588,7 @@ fun ChatScreen(
     var wechatBindTick by remember { mutableStateOf(0) }
     LaunchedEffect(currentConvId, wechatBindTick) {
         val id = currentConvId
-        if (id != null && companionMode && dialogueMode == com.freechat.model.DialogueMode.WECHAT) {
+        if (id != null && groupChat == null && companionMode && dialogueMode == com.freechat.model.DialogueMode.WECHAT) {
             wechatAttached = viewModel.wechatAttachedNow(id)
         } else {
             wechatAttached = false
@@ -609,33 +620,41 @@ fun ChatScreen(
     val perConvMap by viewModel.perConvSettings.collectAsState()
     val pendingDraft by viewModel.pendingNewConvSettings.collectAsState()
     val globalWebSearch by viewModel.enableWebSearch.collectAsState()
-    val effWebSearch = if (currentConvId != null) {
+    val effWebSearch = if (storyProfile != null) storyProfile.enableWebSearch ?: globalWebSearch else if (currentConvId != null) {
         perConvMap[currentConvId]?.enableWebSearch ?: globalWebSearch
     } else {
         pendingDraft.enableWebSearch ?: globalWebSearch
     }
+    // 完整底行与简洁「+」菜单共用状态和入口，避免快捷开关改到不同设置层。
+    val onToggleWebSearch: () -> Unit = {
+        currentConvId?.let { id ->
+            val per = perConvMap[id] ?: PerConvSettings()
+            if (storyProfile != null) viewModel.updateStory(id, conversations.first { it.id == id }.title,
+                storyProfile.copy(enableWebSearch = !effWebSearch))
+            else viewModel.updatePerConvSettings(id, per.copy(enableWebSearch = !effWebSearch))
+        } ?: run {
+            // 首页只写新对话规则草稿，全局开关仍只在设置页修改。
+            viewModel.togglePendingWebSearch()
+        }
+    }
+    val onLongPressWebSearch: (() -> Unit)? =
+        if (navigationEnabled && currentConvId != null && editingMessageId == null)
+            (if (storyProfile != null) onOpenStorySettings else if (groupChat != null) onOpenGroupSettings else onOpenNewRules) else null
+    val deepThinkOn = viewModel.effectiveDeepThinking()
+    val deepThinkEnabled = viewModel.effectiveLangModel().supportsDeepThinking
+    val onToggleDeepThink: () -> Unit = { viewModel.toggleDeepThinking() }
+    val onLongPressDeepThink: (() -> Unit)? =
+        if (!navigationEnabled || currentConvId == null || editingMessageId != null) null
+        else if (storyProfile != null) onOpenStorySettings
+        else if (groupChat != null) onOpenGroupSettings
+        else if (companionMode) onOpenCharacterSetup else onOpenNewRules
     // 内置对话（「Claude风格助理」）：它是一条**已经存在的对话**，不是「新建对话」——
     // 空的时候给的是一张白页，不是那句「你好，我是 FreeChat」的问候语（那会让它看起来像刚新建的）
-    val conversations by viewModel.conversations.collectAsState()
+    val currentConversationTitle = conversations.firstOrNull { it.id == currentConvId }
+        ?.title?.ifBlank { "FreeChat" } ?: "FreeChat"
     val isBuiltInConversation = conversations.any { it.id == currentConvId && it.builtInAssistant.isNotBlank() }
     // 输入框隐藏偏移：实测输入框真实高度（多行时更高，避免顶部漏出）；单行兜底 88dp
     var inputBoxMaxPx by remember { mutableFloatStateOf(with(density) { 88.dp.toPx() }) }
-
-    // ──── 新对话过渡动画 ────
-    val revealAnim = remember { Animatable(0f) }
-    var revealPhase by remember { mutableIntStateOf(0) }
-    LaunchedEffect(revealTrigger) {
-        if (revealTrigger > 0 && messages.isNotEmpty()) {
-            revealPhase = 1
-            revealAnim.snapTo(0f)
-            revealAnim.animateTo(1f, FreeChatAnimation.revealEnter)
-            onNewChat()
-            revealPhase = 2
-            revealAnim.animateTo(0f, FreeChatAnimation.revealExit)
-            revealPhase = 0
-            onRevealComplete()  // 重置触发信号，避免返回 Chat 时 LaunchedEffect 重放导致误切新对话
-        }
-    }
 
     // IME
     val imeBottomDp = with(density) { WindowInsets.ime.getBottom(density).toDp() }
@@ -676,6 +695,14 @@ fun ChatScreen(
 
     // 输入框是否因上滑回翻旧消息而隐藏（滑动方向触发，非按比例跟随）
     var inputHidden by remember { mutableStateOf(false) }
+    // Short tablet chats have no consumed scroll gesture to bring a hidden composer back.
+    LaunchedEffect(tablet, listState) {
+        if (!tablet) return@LaunchedEffect
+        snapshotFlow {
+            messages.isEmpty() || (viewportRestored && listState.layoutInfo.totalItemsCount > 0 &&
+                !listState.canScrollBackward && !listState.canScrollForward)
+        }.collect { cannotScroll -> if (cannotScroll) inputHidden = false }
+    }
     val inputOffset = animateFloatAsState(
         targetValue = if (inputHidden && !keyboardVisible) inputBoxMaxPx else 0f,
         animationSpec = if (inputHidden && !keyboardVisible) FreeChatAnimation.inputHideTween
@@ -835,8 +862,6 @@ fun ChatScreen(
         viewModel.pruneMultiSelect()
     }
 
-    val chatNewChatRect = remember { mutableStateOf<Rect?>(null) }
-
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris: List<Uri> ->
@@ -866,7 +891,8 @@ fun ChatScreen(
     }
 
     // ──── 草稿 ────
-    val draftText = viewModel.getDraft(currentConvId)
+    val inputDrafts by viewModel.inputDrafts.collectAsState()
+    val draftText = inputDrafts[currentConvId.orEmpty()].orEmpty()
 
     val statusBarHeightDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     // 顶部模糊的渐变终点（px）：endY 默认是无穷大，会导致 easing 曲线只用到 t≈0 一小段、模糊「秒没」。
@@ -977,7 +1003,7 @@ fun ChatScreen(
                     userScrollEnabled = !isRecording,
                     contentPadding = PaddingValues(
                         start = 16.dp + contentGutter, end = 16.dp + contentGutter,
-                        top = topBandHeight + 8.dp,
+                        top = HazeSpec.newPageContentPaddingDp(statusBarHeightDp),
                         // 与原表达式逐项等价（只是把 静息 / 64 / 键盘 / 全屏输入四项收敛到单一数据源，见文件顶部常量注释）
                         // 静息那项随输入框样式走（完整 152dp / 简洁 116dp，见 restBottomPaddingDp）
                         bottom = restBottomPaddingDp +
@@ -1028,6 +1054,14 @@ fun ChatScreen(
                                             answerLinksRequested = SearchPresentation.linksRequested(messages.lastOrNull { it.role == Role.USER }?.content.orEmpty())
                                         ) else msgItem.msg,
                                         isDark = isDark,
+                                        groupChat = groupChat,
+                                        onMentionGroupMember = { id ->
+                                            viewModel.mentionGroupMember(id)
+                                            inputHidden = false
+                                            val value = viewModel.getDraft(currentConvId)
+                                            mentionInsertion = MentionComposerInsertion(value, value.length, ++mentionRevision)
+                                        },
+                                        onNudgeGroupMember = viewModel::nudgeGroupMember,
                                         imageGallery = conversationImages,
                                         generationLabel = if (msgItem.msg.isStreaming) generationStatus(viewModel) else null,
                                         liveThinkingMs = if (msgItem.msg.isStreaming) viewModel.thinkingTimeMs.collectAsState().value else 0L,
@@ -1116,6 +1150,10 @@ fun ChatScreen(
                                         },
                                         onRegenerate = when {
                                             isLoading || isTyping || exitBusy -> null
+                                            groupChat != null && msgItem.msg.failed -> ({
+                                                streamFollow.onGenerationRequested(!listState.canScrollForward)
+                                                viewModel.retryGroupMessage(msgItem.msg.id)
+                                            })
                                             msgItem.msg.sceneVisualization && companionMode && narrativeActions ->
                                                 ({
                                                     streamFollow.onGenerationRequested(!listState.canScrollForward)
@@ -1193,7 +1231,7 @@ fun ChatScreen(
             TopBarBackdrop(hazeState, colors.Background, topBandHeight,
                 seamFromEnd = false)
 
-            // ===== 悬浮标题栏按钮（菜单 + 新对话），固定悬浮在屏幕顶部，与「FreeChat」同一水平线 =====
+            // ===== 悬浮标题栏按钮，固定悬浮在屏幕顶部，与「FreeChat」同一水平线 =====
             Row(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -1208,8 +1246,9 @@ fun ChatScreen(
                 if (tablet) Text(
                     when {
                         multiSelect.active -> s.selectedCount(multiSelect.selectedIds.size)
-                        companionMode -> currentCharacter?.name?.ifBlank { "FreeChat" } ?: "FreeChat"
-                        else -> "FreeChat"
+                        groupChat != null -> currentConversationTitle
+                        companionMode -> currentCharacter?.name?.ifBlank { currentConversationTitle } ?: currentConversationTitle
+                        else -> currentConversationTitle
                     },
                     modifier = Modifier.weight(1f), color = colors.TextPrimary,
                     fontWeight = FontWeight.SemiBold, maxLines = 1,
@@ -1249,7 +1288,7 @@ fun ChatScreen(
                     // 连接微信：微信聊天档拟人对话专属；位置=快速定位键左侧。
                     // 1.0.94：未登录也显示（点进去讲清「云同步互传、仅登录可用」+「登录使用」跳登录页），
                     // 按钮人人可见、能力登录才放行。
-                    if (companionMode && dialogueMode == com.freechat.model.DialogueMode.WECHAT) {
+                    if (groupChat == null && companionMode && dialogueMode == com.freechat.model.DialogueMode.WECHAT) {
                         HeaderIconButton(onClick = { showWechatBind = true }, enabled = editingMessageId == null && navigationEnabled) {
                             com.freechat.ui.components.WechatIcon(Modifier.size(22.dp))
                         }
@@ -1264,37 +1303,15 @@ fun ChatScreen(
                     if (messages.isNotEmpty() || companionMode || currentConvId != null) {
                         HeaderIconButton(
                             onClick = {
-                                if (currentMode == com.freechat.model.ChatMode.COMPANION) onOpenCharacterSetup()
+                                if (storyProfile != null) onOpenStorySettings()
+                                else if (groupChat != null) onOpenGroupSettings()
+                                else if (currentMode == com.freechat.model.ChatMode.COMPANION) onOpenCharacterSetup()
                                 else onOpenNewRules()
                             },
                             enabled = editingMessageId == null && navigationEnabled
                         ) {
-                            Icon(Icons.Outlined.Tune, s.newRules, tint = colors.TextSecondary, modifier = Modifier.size(22.dp))
-                        }
-                    }
-                    // 新建图标：**已经在一个新对话里就不显示**（1.0.53）。
-                    // chat 首页那张问候语页就是这个状态 —— 眼前这条对话一条消息都还没有，
-                    // 右上角再摆一个「新建」是自相矛盾的（点了也只是把同样的空对话重开一遍）。
-                    // 内置对话（Claude 风格助理）不算「新对话」：它是一条早就存在的对话，
-                    // 空的时候给的是白页，那里留着新建是合理的。
-                    if (messages.isNotEmpty() || isBuiltInConversation || currentConvId != null) {
-                        HeaderIconButton(
-                            onClick = {
-                                val rect = chatNewChatRect.value
-                                if (rect != null && onNewChatReveal != null) {
-                                    onNewChatReveal(rect)
-                                } else {
-                                    onNewChat()
-                                }
-                            },
-                            enabled = editingMessageId == null && navigationEnabled,
-                            modifier = Modifier.onGloballyPositioned { coords ->
-                                val pos = coords.positionInRoot()
-                                val size = coords.size
-                                chatNewChatRect.value = Rect(pos.x, pos.y, pos.x + size.width, pos.y + size.height)
-                            }
-                        ) {
-                            Icon(Icons.Outlined.Create, s.newChat, tint = colors.TextSecondary, modifier = Modifier.size(22.dp))
+                            Icon(Icons.Outlined.Tune, if (storyProfile != null) s.storySettings else if (groupChat != null) s.groupSettings else s.newRules,
+                                tint = colors.TextSecondary, modifier = Modifier.size(22.dp))
                         }
                     }
                     }
@@ -1406,6 +1423,20 @@ fun ChatScreen(
                 draftText = draftText,
                 // 1.1.30 工单①：首页（无对话）草稿也落——切走再回首页照常显示未发送的提示词
                 onDraftChanged = { txt -> viewModel.saveDraft(currentConvId, txt) },
+                groupMentionDraft = viewModel.getGroupMentionDraft(currentConvId),
+                mentionInsertion = mentionInsertion,
+                onMentionQuery = if (groupChat == null) null else { value, caret ->
+                    val id = currentConvId
+                    if (id != null && viewModel.currentConversationId.value == id) {
+                        viewModel.saveDraft(id, value)
+                        val query = viewModel.getGroupMentionDraft(id)?.queryAt(caret)
+                        if (query != null) {
+                            mentionRequest = MentionSelectionRequest(id, value, query, caret)
+                            mentionKeyboard?.hide()
+                            mentionFocus.clearFocus()
+                        }
+                    }
+                },
                 onVoiceInput = voice@{ text, wav ->
                     if (!latestPageActive.value || !canInteract()) return@voice
                     // Selection updates in the VM before the next Compose frame; never deliver into another chat.
@@ -1439,7 +1470,7 @@ fun ChatScreen(
                 isCompanion = currentMode == com.freechat.model.ChatMode.COMPANION,
                 // 动作演绎 / 剧情补足：一次只发一条，发送后右侧键变终止键（点了撤回并退回输入框）
                 narrativeSingleSend = currentMode == com.freechat.model.ChatMode.COMPANION &&
-                    currentCharacter?.isNarrativeMode() == true,
+                    (storyProfile != null || currentCharacter?.isNarrativeMode() == true),
                 onRetract = {
                     // 撤回后紧接着把焦点请回输入框：退回的提示词就是拿来改的，
                     // 光标不落上去的话用户还得自己再点一下（超过 3 行会自动转全屏输入框）
@@ -1455,28 +1486,18 @@ fun ChatScreen(
                 forceImageGen = forceImageGen,
                 onToggleForceImageGen = { viewModel.setForceImageGen(!forceImageGen) },
                 webSearchOn = effWebSearch,
-                onToggleWebSearch = {
-                    currentConvId?.let { id ->
-                        val per = perConvMap[id] ?: PerConvSettings()
-                        viewModel.updatePerConvSettings(id, per.copy(enableWebSearch = !effWebSearch))
-                    } ?: run {
-                        // 1.0.75（改掉 1.0.71 的「首页写全局」——用户点名）：首页点按写的是
-                        // **新对话的规则草稿**，对话诞生时随对话落定；全局开关只在设置页动
-                        viewModel.togglePendingWebSearch()
-                    }
-                },
+                onToggleWebSearch = onToggleWebSearch,
                 onLongPressGenImage = if (navigationEnabled && editingMessageId == null && com.freechat.data.ModelAccessPolicy.canEdit(selectedVisualModel))
                     ({ onOpenModelEditor(ModelType.VISUAL, selectedVisualModel) }) else null,
                 // 1.0.75：首页不给长按（传 null）；对话内长按 → 跳**该对话**的新规则页
                 // 1.1.26.9：改写中页面锁定，长按导航一并停用（短按功能钮照常）
-                onLongPressWebSearch = if (navigationEnabled && currentConvId != null && editingMessageId == null) onOpenNewRules else null,
-                deepThinkOn = viewModel.effectiveDeepThinking(),
+                onLongPressWebSearch = onLongPressWebSearch,
+                deepThinkOn = deepThinkOn,
                 // 1.0.75：首页也能点（写新对话规则草稿）——灰色只剩「模型不支持」一种情形。
                 // 能力判定用**对话的生效模型**（新规则可能覆盖了语言模型），别拿全局选中模型当准
-                deepThinkEnabled = viewModel.effectiveLangModel().supportsDeepThinking,
-                onToggleDeepThink = { viewModel.toggleDeepThinking() },
-                onLongPressDeepThink = if (!navigationEnabled || currentConvId == null || editingMessageId != null) null
-                else if (companionMode) onOpenCharacterSetup else onOpenNewRules,
+                deepThinkEnabled = deepThinkEnabled,
+                onToggleDeepThink = onToggleDeepThink,
+                onLongPressDeepThink = onLongPressDeepThink,
                 editingHint = if (editingMessageId != null) s.editingPromptHint else null,
                 onCancelEdit = {
                     // 1.1.26.9：取消 = 退出改写，输入框一并清除不保留（用户拍板）；再点提示词可重进
@@ -1513,6 +1534,8 @@ fun ChatScreen(
                     .height(minOf(220.dp, (paneHeight - topBandHeight - restBottomPaddingDp - chatKeyboardDp - 16.dp).coerceAtLeast(48.dp))))
 
             // ===== "+" 附件菜单（窗口内悬浮，高级材质下真磨砂玻璃糊住背后聊天内容；缩放+淡入淡出，从输入框左上角弹出） =====
+            val plusMenuBottomPad = (chatKeyboardDp + 8.dp).coerceAtLeast(36.dp) + 60.dp
+            val plusMenuMaxHeight = (paneHeight - topBandHeight - plusMenuBottomPad - 12.dp).coerceAtLeast(48.dp)
             // 透明拦截层：点击外部关闭（淡入淡出）
             AnimatedVisibility(
                 visible = showPlusMenu,
@@ -1535,8 +1558,7 @@ fun ChatScreen(
                 // 正落卡片左下角（=「+」键旁），与收藏页调节菜单同一套「从触发钮长出」。
                 //12dp 均匀 padding 只为阴影溢出（Fade/scale 首帧不裁阴影）。
                 modifier = Modifier.align(Alignment.BottomStart).offset {
-                    val bottomPad = ((chatKeyboardDp + 8.dp).coerceAtLeast(36.dp) + 60.dp) - 12.dp
-                    IntOffset((8.dp + contentGutter).roundToPx(), -bottomPad.roundToPx())
+                    IntOffset((8.dp + contentGutter).roundToPx(), -(plusMenuBottomPad - 12.dp).roundToPx())
                 },
                 enter = FreeChatAnimation.menuEnter(TransformOrigin(0f, 1f)),
                 exit = FreeChatAnimation.menuExit(TransformOrigin(0f, 1f))
@@ -1545,12 +1567,13 @@ fun ChatScreen(
                     modifier = Modifier
                         .padding(12.dp)
                         .width(180.dp)
+                        .heightIn(max = plusMenuMaxHeight)
                         .then(
                             if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, RoundedCornerShape(20.dp), elevation = 6.dp)
                             else Modifier.background(colors.Surface, RoundedCornerShape(20.dp))
                         )
                 ) {
-                    Column {
+                    Column(Modifier.clip(RoundedCornerShape(20.dp)).verticalScroll(rememberScrollState())) {
                         if (photoUploadAllowed) Row(
                             modifier = Modifier.fillMaxWidth().clickable { showPlusMenu = false; imagePicker.launch("image/*") }.padding(horizontal = 16.dp, vertical = 13.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1603,6 +1626,23 @@ fun ChatScreen(
                                 Text(s.generateSceneImage, style = MaterialTheme.typography.bodyMedium,
                                     color = if (isLoading || isTyping) colors.TextTertiary else colors.TextPrimary)
                             }
+                        }
+                        if (inputStyle == InputStyle.COMPACT) {
+                            InputStateMenuItem(
+                                label = s.deepThinkingMode,
+                                checked = deepThinkOn,
+                                enabled = deepThinkEnabled,
+                                onToggle = onToggleDeepThink,
+                                onLongPress = onLongPressDeepThink,
+                                onDismiss = { showPlusMenu = false }
+                            )
+                            InputStateMenuItem(
+                                label = s.webSearch,
+                                checked = effWebSearch,
+                                onToggle = onToggleWebSearch,
+                                onLongPress = onLongPressWebSearch,
+                                onDismiss = { showPlusMenu = false }
+                            )
                         }
                     }
                 }
@@ -1695,24 +1735,37 @@ fun ChatScreen(
                 }
             }
 
-            if (revealPhase > 0) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer { alpha = revealAnim.value }
-                        .pageBackground(colors.Background)
-                )
-            }
-
             // 改写提示词不再用对话框：点气泡 → 原文进输入框、键盘直接弹出、其余消息压暗。
             // 原来的 AlertDialog 已经删掉（`s.editMessage` / `s.editMessageHint` 两个字符串保留，
             // 设置页的「发送示例」附近还在用同一套文案，删字符串会连带影响别处）。
 
+            GroupMentionSheet(visible = mentionRequest != null, members = groupChat?.members.orEmpty(),
+                onDismiss = {
+                    mentionRequest?.takeIf { it.conversationId == viewModel.currentConversationId.value }?.let {
+                        mentionInsertion = MentionComposerInsertion(it.text, it.caret, ++mentionRevision)
+                    }
+                    mentionRequest = null
+                }, onPick = { memberId ->
+                    mentionRequest?.takeIf { it.conversationId == viewModel.currentConversationId.value &&
+                        it.text == viewModel.getDraft(it.conversationId) }?.let { request ->
+                        viewModel.mentionGroupMemberAt(memberId, request.query.start, request.query.end)?.let { draft ->
+                            val end = draft.validBindings().firstOrNull { it.start == request.query.start && it.memberId == memberId }?.end
+                                ?: request.query.start
+                            val caret = end + if (draft.text.getOrNull(end)?.isWhitespace() == true) 1 else 0
+                            inputHidden = false
+                            mentionInsertion = MentionComposerInsertion(draft.text, caret, ++mentionRevision)
+                        }
+                    }
+                    mentionRequest = null
+                }, colors = colors, isDark = isDark, advanced = advancedMaterial, hazeState = hazeState)
+
+            val displayedAttachmentNotice = rememberSheetContent(attachmentNotice.takeIf { it.isNotBlank() }).orEmpty()
+            val displayedVoiceTarget = rememberSheetContent(voiceMenuTarget)
             SheetPanel(visible = attachmentNotice.isNotBlank(), onDismiss = viewModel::clearAttachmentNotice,
                 title = s.uploadFile, colors = colors, isDark = isDark,
                 advancedMaterial = advancedMaterial, hazeState = hazeState,
                 confirmLabel = s.confirm, onConfirm = viewModel::clearAttachmentNotice) {
-                Text(attachmentNotice, color = colors.TextSecondary, style = MaterialTheme.typography.bodyMedium)
+                Text(displayedAttachmentNotice, color = colors.TextSecondary, style = MaterialTheme.typography.bodyMedium)
             }
 
             // ===== 长按语音菜单（2026-10-19）：转文字（口播台词/识别文本本就随消息存着，展开即可）/ 引用 =====
@@ -1725,7 +1778,7 @@ fun ChatScreen(
                 advancedMaterial = advancedMaterial,
                 hazeState = hazeState
             ) {
-                val voiceTarget = voiceMenuTarget
+                val voiceTarget = displayedVoiceTarget
                 if (voiceTarget != null) {
                     val revealed = voiceTarget.id in revealedVoiceIds
                     SheetActionRow(if (revealed) s.voiceToTextHide else s.voiceToText, colors) {

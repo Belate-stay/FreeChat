@@ -1,13 +1,13 @@
 package com.freechat.ui.screens
 
 import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import com.freechat.ui.theme.FreeChatColors
+import com.freechat.ui.theme.FreeChatInputShape
 
 internal fun characterHintColor(colors: FreeChatColors) = colors.TextSecondary.copy(alpha = 0.84f)
 
@@ -28,7 +28,7 @@ internal fun CharacterTextField(
     OutlinedTextField(value = value, onValueChange = onValueChange,
         modifier = modifier.defaultMinSize(minHeight = 48.dp), enabled = enabled,
         singleLine = singleLine, minLines = minLines, maxLines = maxLines,
-        textStyle = textStyle, shape = RoundedCornerShape(12.dp), colors = colors,
+        textStyle = textStyle, shape = FreeChatInputShape, colors = colors,
         placeholder = placeholder?.let { hint ->
             { ProvideTextStyle(MaterialTheme.typography.bodySmall) { hint() } }
         })

@@ -2,6 +2,7 @@ package com.freechat.companion
 
 import com.freechat.data.AppJson
 import com.freechat.data.healed
+import com.freechat.core.DeletionLogic
 import com.freechat.model.Conversation
 import com.freechat.model.MemoryEntry
 import com.freechat.model.Message
@@ -49,6 +50,41 @@ class CompanionStore(dbPath: String) : AutoCloseable {
     /** id 白名单：对话 id 是客户端生成的 UUID/短串，只放行安全字符（拼进 SQL 前必须过这道） */
     fun safeId(id: String): Boolean = id.isNotEmpty() && id.length <= 64 && id.all { it.isLetterOrDigit() || it in "-_" }
 
+    /**
+     * 模型调用记账（2026-10-22）：附带动作，失败只留日志，绝不挡回复。
+     */
+    @Synchronized
+    fun recordAiUsage(userId: String, note: String, res: ChatResult) {
+        try {
+            conn.rollback()   // 与 writeBox 同款：收掉残留事务，这一把是全新事务
+            val ts = System.currentTimeMillis()
+            val day = java.time.LocalDate.ofInstant(java.time.Instant.ofEpochMilli(ts), java.time.ZoneId.of("Asia/Shanghai")).toString()
+            val username = runCatching {
+                conn.prepareStatement("SELECT username FROM users WHERE id=?").use { ps ->
+                    ps.setString(1, userId)
+                    ps.executeQuery().use { r -> if (r.next()) r.getString(1).orEmpty() else "" }
+                }
+            }.getOrDefault("")
+            conn.prepareStatement(
+                "INSERT INTO ai_usage (ts, day, user_id, username, install_id, model, upstream, path, status," +
+                    " prompt_tokens, completion_tokens, ms, ip, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            ).use { ps ->
+                ps.setLong(1, ts); ps.setString(2, day); ps.setString(3, userId); ps.setString(4, username)
+                // model 列恒记「微信通道」（2026-10-22 用户拍板：Tokens消耗 里微信与 App 内置分账，
+                // 两者的 API 现在同款、以后可能分开 —— 通道身份固定，上游模型看 upstream 列）
+                ps.setString(5, ""); ps.setString(6, BrainUpstream.WECHAT_ENTRY_ID); ps.setString(7, res.upstreamModel)
+                ps.setString(8, "/chat/completions"); ps.setInt(9, 200)
+                ps.setInt(10, res.promptTokens); ps.setInt(11, res.completionTokens); ps.setLong(12, res.ms)
+                ps.setString(13, ""); ps.setString(14, note)
+                ps.executeUpdate()
+            }
+            conn.commit()
+        } catch (e: Exception) {
+            try { conn.rollback() } catch (_: Exception) { }
+            System.err.println("ai_usage record failed: ${e.message}")
+        }
+    }
+
     /** Read only: validate the owner, attached role and binding generation without returning a token. */
     @Synchronized
     fun hasActiveWechatBinding(ownerId: String, convId: String, binding: WechatBinding): Boolean {
@@ -82,8 +118,21 @@ class CompanionStore(dbPath: String) : AutoCloseable {
         val messages: List<Message>,
         val memories: List<MemoryEntry>,
         val pcset: JsonObject,
-        val revs: Map<String, Long>   // kind → 当前 rev（写回时 +1）
-    )
+        val revs: Map<String, Long>,   // kind → 当前 rev（写回时 +1）
+        val globalSettings: JsonObject = JsonObject()
+    ) {
+        fun hasSameMemoryInputsAs(original: ConvObjects): Boolean =
+            conv.deletedMessageIds.toSet() == original.conv.deletedMessageIds.toSet() &&
+                autoMemoryEnabled() == original.autoMemoryEnabled() &&
+                original.memories.all { old -> memories.any { it.id == old.id } }
+
+        fun autoMemoryEnabled(): Boolean {
+            fun bool(o: JsonObject) = o.get("autoSummarizeMemory")?.takeIf { it.isJsonPrimitive }
+                ?.let { runCatching { it.asBoolean }.getOrNull() }
+            // Companion settings are character/global, never the standard-mode new-rules overlay.
+            return (if (conv.mode == com.freechat.model.ChatMode.COMPANION) null else bool(pcset)) ?: bool(globalSettings) ?: true
+        }
+    }
 
     /** 按对话 id 找到整套对象（conv 必须存在且未删；其它箱允许缺省=空）。[convId] 须先过 [safeId] */
     @Synchronized
@@ -92,10 +141,10 @@ class CompanionStore(dbPath: String) : AutoCloseable {
             val revs = mutableMapOf<String, Long>()
             var userId: String? = null
 
-            fun rawOf(kind: String): String? {
+            fun rawOf(kind: String, objectId: String = convId): String? {
                 val u = userId ?: return null
                 conn.prepareStatement("SELECT data, rev FROM objects WHERE user_id=? AND kind=? AND id=? AND deleted=0").use { ps ->
-                    ps.setString(1, u); ps.setString(2, kind); ps.setString(3, convId)
+                    ps.setString(1, u); ps.setString(2, kind); ps.setString(3, objectId)
                     ps.executeQuery().use { r ->
                         if (!r.next()) return null
                         revs[kind] = r.getLong(2)
@@ -121,7 +170,16 @@ class CompanionStore(dbPath: String) : AutoCloseable {
                 AppJson.gson.fromJson<List<MemoryEntry>>(rawOf("mems") ?: "[]", memType).orEmpty().map { it.healed() }
             }.getOrDefault(emptyList())
             val pcset = runCatching { JsonParser.parseString(rawOf("pcset") ?: "{}").asJsonObject }.getOrDefault(JsonObject())
-            return ConvObjects(u, conv, messages, memories, pcset, revs)
+            val global = runCatching { JsonParser.parseString(rawOf("settings", "global") ?: "{}").asJsonObject }.getOrDefault(JsonObject())
+            val deleted = conv.deletedMessageIds.toSet()
+            val memoryDeleted = DeletionLogic.memoryDeletionIds(deleted, conv.deletedVisualMessageIds.toSet())
+            val sources = pcset.get("atmosphereSourceMessageIds")?.takeIf { it.isJsonArray }?.asJsonArray
+                ?.mapNotNull { runCatching { it.asString }.getOrNull() }.orEmpty()
+            if (memoryDeleted.isNotEmpty() && (sources.isEmpty() || sources.any { it in memoryDeleted })) {
+                listOf("lastMood", "moodAtMs", "atmosphere", "warmth", "atmosphereSourceMessageIds").forEach(pcset::remove)
+            }
+            return ConvObjects(u, conv, DeletionLogic.filterMessages(messages, deleted),
+                DeletionLogic.filterMemories(memories, memoryDeleted), pcset, revs, global)
         } finally {
             // ★ 必须收掉读快照（1.0.99.4 修 SQLITE_BUSY_SNAPSHOT）：autoCommit=false 下 SELECT 会
             // 开着一个读事务，一直挂到后面的写才升级 —— 期间 Node 侧（App 同步/推图上云）一提交，
@@ -145,7 +203,10 @@ class CompanionStore(dbPath: String) : AutoCloseable {
     @Synchronized
     fun writeBox(
         userId: String, kind: String, id: String, baseRev: Long, jsonText: String, updatedAt: Long,
-        requiredWechatBinding: WechatBinding? = null
+        requiredWechatBinding: WechatBinding? = null,
+        expectedConvRev: Long? = null,
+        expectedPcsetRev: Long? = null,
+        expectedSettingsRev: Long? = null
     ): Long {
         val gz = gzip(jsonText)
         val rawSize = jsonText.toByteArray(Charsets.UTF_8).size.toLong()
@@ -157,6 +218,17 @@ class CompanionStore(dbPath: String) : AutoCloseable {
                 if (requiredWechatBinding != null && !queryActiveWechatBinding(userId, id, requiredWechatBinding)) {
                     throw CancellationException("wechat binding changed before persistence")
                 }
+                // Derived writes cannot race a parent deletion or a memory-off toggle.
+                fun requireRev(kind: String, expected: Long, objectId: String = id) {
+                    val actual = conn.prepareStatement("SELECT rev FROM objects WHERE user_id=? AND kind=? AND id=? AND deleted=0").use { ps ->
+                        ps.setString(1, userId); ps.setString(2, kind); ps.setString(3, objectId)
+                        ps.executeQuery().use { if (it.next()) it.getLong(1) else null }
+                    }
+                    if ((kind == "conv" && actual == null) || (actual ?: 0L) != expected) throw RevConflict()
+                }
+                expectedConvRev?.let { requireRev("conv", it) }
+                expectedPcsetRev?.let { requireRev("pcset", it) }
+                expectedSettingsRev?.let { requireRev("settings", it, "global") }
                 var newSeq = 0L
                 conn.prepareStatement("SELECT seq FROM users WHERE id=?").use { ps ->
                     ps.setString(1, userId)

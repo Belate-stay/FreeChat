@@ -40,8 +40,10 @@ class Beta11293Test {
         // 2026-10-19 返修三进（图4→图5）：顶留白也必须在滚动区内——挂外层=视口缩在标题栏下，
         // 上滑内容被顶缘硬裁且进不了模糊带（顶部糊不出残影）；外层不许再带 top 留白。
         assertTrue("添加页顶留白在滚动区内（图5 顶部高斯残影）",
-            editor.contains(".padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp), bottom = 40.dp)") &&
+            editor.contains(".padding(top = if (isAdd) HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp)") &&
                 editor.indexOf("topContentPaddingDp(statusBarHeightDp, 16.dp)") > scrollAt)
+        assertTrue("编辑页避开初始模糊带，添加页保留导入悬浮头布局",
+            editor.contains("else HazeSpec.newPageContentPaddingDp(statusBarHeightDp, 16.dp), bottom = 40.dp)"))
     }
 
     @Test fun builtinNotesAreTwoLinesAndIntroHasNoThinking() {

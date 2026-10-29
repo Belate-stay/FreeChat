@@ -7,6 +7,29 @@ import com.freechat.model.Role
 
 /** Only text/known facts go into the picture. It is never a new event in the story. */
 object SceneImagePrompt {
+    fun build(story: com.freechat.model.StoryProfile, history: List<Message>, memories: List<MemoryEntry>,
+        globalMemories: List<String> = emptyList(), conversationRules: String = "",
+        references: List<SceneReferenceSelector.PreparedReference> = emptyList()): String = buildString {
+        appendLine("根据本故事已发生的最新情境生成一张场景图。只将文字视觉化，不推进剧情，不画聊天界面或水印。")
+        appendLine("不固定主角；只绘制当前场景在场的角色，不把全部角色强行塞入画面。保留各角色外貌、服装、动作和关系的区别，不能混脸。")
+        appendLine("按场景和用户要求自主选择画幅、分辨率与风格。最新剧情与明确设定优先。")
+        appendLine("世界背景：${story.background}\n世界规则：${story.worldRules}\n开篇情境：${story.openingSituation}")
+        if (story.userPersona.isNotBlank()) appendLine("本故事用户形象：${story.userPersona}")
+        appendLine(com.freechat.core.StoryPrompts.cast(story))
+        references.forEachIndexed { index, ref ->
+            val member = story.members.find { it.id == ref.characterId }
+            appendLine("参考图 ${index + 1}：" + if (member != null) "${member.persona.name}（${member.id}）的形象" else "之前保留的场景，仅辅助服装和道具延续，不能改变最新情境")
+        }
+        if (conversationRules.isNotBlank()) appendLine("对话规则：$conversationRules")
+        globalMemories.forEach { appendLine(it) }
+        memories.sortedBy { it.timestamp }.forEach { appendLine(com.freechat.core.MemoryLogic.dated(it, includeStoryState = true)) }
+        appendLine("【剧情原文，末尾为当前情境】")
+        history.filterNot { it.sceneVisualization || it.failed || it.isStreaming }.forEach {
+            appendLine("${if (it.role == Role.USER) "用户推进" else "正文"}：${it.content}")
+        }
+        appendLine("只生成当前情境的图片，图片本身不构成剧情或记忆。")
+    }
+
     fun build(character: CharacterProfile, history: List<Message>, memories: List<MemoryEntry>,
         globalMemories: List<String> = emptyList(), conversationRules: String = "",
         characterReferenceCount: Int = 0, sceneReferenceCount: Int = 0): String = buildString {
@@ -45,7 +68,7 @@ object SceneImagePrompt {
             globalMemories.forEach { appendLine(it) }
         }
         appendLine("【对话记忆】")
-        memories.sortedBy { it.timestamp }.forEach { appendLine("${it.eventDate} ${it.summary}") }
+        memories.sortedBy { it.timestamp }.forEach { appendLine(com.freechat.core.MemoryLogic.dated(it, includeStoryState = true)) }
         appendLine("【剧情原文，末尾即当前场景】")
         history.filterNot { it.sceneVisualization || it.failed || it.isStreaming }.forEach { m ->
             appendLine("${if (m.role == Role.USER) "用户" else character.name}：${m.content}")

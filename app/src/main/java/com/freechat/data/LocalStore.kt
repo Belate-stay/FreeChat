@@ -59,6 +59,7 @@ object LocalStore {
     private const val PER_CONV_FILE = "freechat_perconv.json"
     private const val MSGS_PREFIX = "freechat_msgs_"
     private const val MEMORY_PREFIX = "freechat_memory_"
+    private const val CHARACTER_LIBRARY_FILE = "freechat_character_library.json"
 
     /**
      * 角色头像的**指纹**（同步用，见 `sync/Wire` 的「角色头像」一节）。
@@ -73,6 +74,7 @@ object LocalStore {
 
     const val CONVERSATIONS_KEY = "freechat:conversations"
     const val PER_CONV_KEY = "freechat:perconv"
+    const val CHARACTER_LIBRARY_KEY = "freechat:character-library"
     fun msgsKey(convId: String) = "freechat:msgs:$convId"
     fun memoryKey(convId: String) = "freechat:memory:$convId"
 
@@ -82,6 +84,7 @@ object LocalStore {
     fun init(filesDir: File) {
         dir = filesDir
         ConversationDeletion.reload()
+        CharacterLibraryStore.reload()
     }
 
     /** 本 App 的私有目录。**只给真正需要落一个"不是同步对象"的文件的地方用**（如角色头像），业务数据一律走上面那几个 File */
@@ -91,6 +94,7 @@ object LocalStore {
     fun perConvFile(): File = File(dir, PER_CONV_FILE)
     fun messagesFile(convId: String): File = File(dir, "$MSGS_PREFIX$convId.json")
     fun memoryFile(convId: String): File = File(dir, "$MEMORY_PREFIX$convId.json")
+    fun characterLibraryFile(): File = File(dir, CHARACTER_LIBRARY_FILE)
 
     /** 头像指纹文件。**故意不带 .json 后缀**：它不是同步对象，`keyOf` 认不出来就会原样返回文件名，监听方忽略掉它 */
     fun avatarHashFile(convId: String): File = File(dir, "$AVATAR_HASH_PREFIX$convId")
@@ -124,6 +128,8 @@ object LocalStore {
         return when {
             name == CONVERSATIONS_FILE -> CONVERSATIONS_KEY
             name == PER_CONV_FILE -> PER_CONV_KEY
+            name == CHARACTER_LIBRARY_FILE -> CHARACTER_LIBRARY_KEY
+            name.startsWith("img_") && name.endsWith(".jpg") -> "freechat:img:${name.removePrefix("img_").removeSuffix(".jpg")}"
             name.startsWith(MSGS_PREFIX) && name.endsWith(".json") ->
                 msgsKey(name.removePrefix(MSGS_PREFIX).removeSuffix(".json"))
             name.startsWith(MEMORY_PREFIX) && name.endsWith(".json") ->

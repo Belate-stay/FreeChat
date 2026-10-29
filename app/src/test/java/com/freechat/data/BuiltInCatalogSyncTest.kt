@@ -132,15 +132,32 @@ class BuiltInCatalogSyncTest {
         assertEquals("priority 高的先弹", listOf("n2", "n", "n3"), sorted.map { it.id })
     }
 
+    @Test fun reservedGateTreatsOutOfRangeBuiltinAsOffNotAbsent() {
+        val n = RemoteNotices.Notice(
+            id = "builtin-feature", style = "fullscreen", trigger = "feature", enabled = true,
+            title = "t", body = "b", buttons = emptyList(),
+            minVersion = "", maxVersion = "1.2.1", platform = "", maxImpressions = 0, cooldownHours = 0, priority = 0
+        )
+        // 「版本不在区间」必须判成关（false）——不能像早先那样丢表当「没配」回落默认照弹
+        assertEquals(false, RemoteNotices.reservedActive(n, "Beta 1.2.2"))
+        assertEquals(true, RemoteNotices.reservedActive(n, "1.2.1"))          // 上界含等于
+        assertEquals(false, RemoteNotices.reservedActive(n.copy(enabled = false), "1.2.1"))
+        assertEquals(false, RemoteNotices.reservedActive(n.copy(platform = "web"), "1.2.1"))
+        assertEquals(null, RemoteNotices.reservedActive(null, "Beta 1.2.2")) // 云单没这条=回落本地默认
+    }
+
     @Test fun wiringPins() {
         val vm = File("src/main/java/com/freechat/viewmodel/ChatViewModel.kt").readText()
         assertTrue("列表流要挂目录版本号才会实时重建", vm.contains("combine(_customModels, _builtInParams, _catalogVersion)"))
         assertTrue("启动要拉目录", vm.contains("refreshBuiltInCatalog()"))
         assertTrue("启动要拉云端弹窗", vm.contains("refreshRemoteNotices()"))
+        assertTrue("内置条目整表保留不按版本筛（筛了=区间外当没配）",
+            vm.contains(".filter { it.trigger != \"manual\" }"))
         val main = File("src/main/java/com/freechat/MainActivity.kt").readText()
         assertTrue("alert 外壳接线", main.contains("RemoteAlertDialog("))
         assertTrue("fullscreen 外壳接线", main.contains("RemoteFullscreenNotice("))
         assertTrue("弹出与选择留痕", main.contains("onRemoteNoticeShown") && main.contains("onRemoteNoticeChoice"))
+        assertTrue("feature 启停+版本区间走 reservedActive", main.contains("reservedActive(reserved[\"builtin-feature\"]"))
         val gradle = File("build.gradle.kts").readText()
         assertFalse("五把 Key 不进 BuildConfig", gradle.contains("DEEPSEEK_API_KEY") || gradle.contains("CHATGPT_IMAGE_KEY"))
     }

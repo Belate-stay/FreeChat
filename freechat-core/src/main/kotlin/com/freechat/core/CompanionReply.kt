@@ -10,12 +10,13 @@ import com.freechat.model.SearchCitation
 /** 拟人模式结构化回复：模型输出的情绪标签 + 分条回复（2026-10-20 本地主动指令链退役——云端主动智能不走输出指令） */
 data class CompanionReply(
     val emotion: String, val segments: List<String>,
-    val sources: List<SearchCitation> = emptyList()
+    val sources: List<SearchCitation> = emptyList(),
+    val silence: Boolean = false
 )
 
 /** [CompanionReplyParser.parse] 的产出：正文行 + 情绪（sources 由端上合并检索证据后补） */
 data class ParsedCompanionReply(
-    val emotion: String, val bodyLines: List<String>
+    val emotion: String, val bodyLines: List<String>, val silence: Boolean = false
 )
 
 object CompanionReplyParser {
@@ -51,13 +52,20 @@ object CompanionReplyParser {
             }
             emotion = parsed ?: ""
             val rawBodyLines = if (parsed != null) lines.drop(1) else lines
+            val silenceRow = Regex("^\\[回应[:：]不回复]$")
+            // Only an entire control-only result is deliberate silence. Written speech always wins.
+            val controls = rawBodyLines.filter { silenceRow.matches(it.trim()) }
+            if (controls.isNotEmpty() && rawBodyLines.all { silenceRow.matches(it.trim()) }) {
+                return ParsedCompanionReply(emotion, emptyList(), silence = true)
+            }
             val bracketToken = if (allowWechatEmoji) Regex("""\[[^\[\]\r\n]+]\s*""") else
                 Regex("""\[[^\]]{1,6}]\s*""")
-            bodyLines = rawBodyLines.map { line ->
+            bodyLines = rawBodyLines.filterNot { silenceRow.matches(it.trim()) }.map { line ->
                 // 语音消息行原样保留——标签里的台词不做方括号清洗（2026-10-19）
                 if (line.startsWith("<voice", ignoreCase = true)) line
                 else line.replace(bracketToken) { match ->
-                    if (allowWechatEmoji && WechatEmojiTokens.isKnownToken(match.value.trimEnd())) match.value else ""
+                    if (silenceRow.matches(match.value.trim()) ||
+                        (allowWechatEmoji && WechatEmojiTokens.isKnownToken(match.value.trimEnd()))) match.value else ""
                 }.trim()
             }.filter { it.isNotEmpty() }
         }

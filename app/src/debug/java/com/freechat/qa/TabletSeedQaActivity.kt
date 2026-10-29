@@ -51,7 +51,14 @@ class TabletSeedQaActivity : ComponentActivity() {
                 Conversation(id = "tablet-wechat", title = "晚风", messageCount = 18,
                     mode = ChatMode.COMPANION, characterProfile = CharacterProfile(name = "晚风", age = "23",
                         dialogueMode = DialogueMode.WECHAT, personaPrompt = "自然口语沟通。", languageModelId = offline.id)),
-            ) + (1..12).map { Conversation(id = "tablet-history-$it", title = "阅读笔记 $it", messageCount = 2) }
+            ) + (if (intent.getBooleanExtra("shortChats", false)) listOf(
+                Conversation(id = "tablet-short", title = "短对话 QA", messageCount = 2, isPinned = true),
+                Conversation(id = "tablet-empty", title = "空对话 QA", messageCount = 0, isPinned = true,
+                    deletedMessageIds = listOf("removed-offline-fixture")),
+                Conversation(id = "tablet-short-role", title = "短剧情 QA", messageCount = 2, isPinned = true,
+                    mode = ChatMode.COMPANION, characterProfile = CharacterProfile(name = "短剧情角色",
+                        dialogueMode = DialogueMode.PLOT, languageModelId = offline.id)),
+            ) else emptyList()) + (1..12).map { Conversation(id = "tablet-history-$it", title = "阅读笔记 $it", messageCount = 2) }
             for (chat in chats) {
                 val rows = (0 until chat.messageCount).map { n -> Message(id = "${chat.id}-$n",
                     role = if (n % 2 == 0) Role.USER else Role.ASSISTANT,
@@ -81,6 +88,15 @@ class TabletBusyQaReceiver : BroadcastReceiver() {
         if (phase == "notice") { vm.forceUpdateNotice(); return }
         if (phase == "draft") {
             vm.saveDraft(intent.getStringExtra("conversation") ?: id, intent.getStringExtra("text").orEmpty())
+            return
+        }
+        if (phase == "groupImage") {
+            val image = java.io.File(context.filesDir, "qa_group_pixel.png")
+            val bitmap = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+            bitmap.eraseColor(android.graphics.Color.rgb(55, 125, 210))
+            image.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            bitmap.recycle()
+            vm.addPendingImages(listOf(android.net.Uri.fromFile(image)))
             return
         }
         for ((method, enabled) in listOf("setConvLoading" to (phase == "thinking"), "setConvTyping" to (phase == "typing"))) {

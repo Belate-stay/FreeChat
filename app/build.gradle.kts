@@ -15,8 +15,8 @@ android {
         applicationId = "com.freechat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 259
-        versionName = "1.2.1"
+        versionCode = 280
+        versionName = "1.2.3"
     }
 
     buildTypes {

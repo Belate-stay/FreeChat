@@ -73,6 +73,7 @@ object FreeChatAnimation {
     val materialTween = tween<Float>(DURATION_NORMAL, easing = iosEaseOut)
     val controlTween = tween<Float>(DURATION_FAST, easing = iosEaseOut)
     val controlPositionTween = tween<Dp>(DURATION_FAST, easing = iosEaseOut)
+    val memberEditWiggle = tween<Float>(140, easing = iosEaseInOut)
     val controlPositionSpring = spring<Dp>(dampingRatio = 0.92f, stiffness = 650f)
     val pressDown = tween<Float>(DURATION_PRESS, easing = iosEaseOut)
     val pressRelease = spring<Float>(dampingRatio = 0.82f, stiffness = 850f, visibilityThreshold = 0.001f)

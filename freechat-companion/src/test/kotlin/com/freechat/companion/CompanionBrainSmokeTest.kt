@@ -34,7 +34,13 @@ class CompanionBrainSmokeTest {
         try {
             c.createStatement().use { st ->
                 st.execute("PRAGMA journal_mode = WAL")
-                st.execute("CREATE TABLE users (id TEXT PRIMARY KEY, seq INTEGER DEFAULT 0, bytes_used INTEGER DEFAULT 0, last_write INTEGER DEFAULT 0)")
+                st.execute("CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT DEFAULT '', seq INTEGER DEFAULT 0, bytes_used INTEGER DEFAULT 0, last_write INTEGER DEFAULT 0)")
+                st.execute("""CREATE TABLE ai_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER DEFAULT 0, day TEXT DEFAULT '',
+                    user_id TEXT DEFAULT '', username TEXT DEFAULT '', install_id TEXT DEFAULT '',
+                    model TEXT DEFAULT '', upstream TEXT DEFAULT '', path TEXT DEFAULT '',
+                    status INTEGER DEFAULT 0, prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0,
+                    ms INTEGER DEFAULT 0, ip TEXT DEFAULT '', note TEXT DEFAULT '')""")
                 st.execute("""CREATE TABLE objects (
                     user_id TEXT, kind TEXT, id TEXT, rev INTEGER DEFAULT 0,
                     updated_at INTEGER DEFAULT 0, seq INTEGER DEFAULT 0,
@@ -44,7 +50,8 @@ class CompanionBrainSmokeTest {
             }
             val conv = Conversation(
                 id = "conv-1", title = "测试对话", mode = ChatMode.COMPANION,
-                characterProfile = profile
+                // Fake-completer tests must never issue a real external search.
+                characterProfile = profile.copy(enableWebSearch = profile.enableWebSearch ?: false)
             )
             c.prepareStatement("INSERT INTO objects (user_id, kind, id, rev, seq, size_raw, data) VALUES ('u1','conv','conv-1', 3, 10, 100, ?)").use { ps ->
                 ps.setBytes(1, gzip(AppJson.gson.toJson(conv)))
@@ -63,31 +70,32 @@ class CompanionBrainSmokeTest {
     private class FakeCompleter : ChatCompleter {
         var calls = 0
         val requests = mutableListOf<List<Map<String, Any?>>>()
-        override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): String {
+        override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
             calls++
             requests += messages
             // 按提示词内容分流：深度推演 → 四行推演；摘录器 → JSON 草稿；其余（生成）→ 回复
             val prompt = messages.joinToString("\n") { it["content"]?.toString().orEmpty() }
-            return when {
+            val text = when {
                 prompt.contains("只做推演") ->
                     "1. 只是闲话\n2. 无\n3. 正常应对\n4. 无"
                 prompt.contains("记忆摘录器") || prompt.contains("记忆归纳器") ->
                     """{"summary":"用户说下周要一起去看展","kind":"plot","date":"2026-10-11","keywords":["看展","约定"],"mood":"开心","atmosphere":"聊得很热络","warmth":1}"""
                 else -> "[情绪:开心]\n好呀\n晚点聊"
             }
+            return ChatResult(text, upstreamModel = "up-fake", ms = 5, promptTokens = 100, completionTokens = 20)
         }
     }
 
     /** 挂起生成（测过期闸门用）：第一枪挂在 [gate] 上，被取消/释放才继续 */
     private class HangingCompleter(val gate: kotlinx.coroutines.CompletableDeferred<Unit>) : ChatCompleter {
         var calls = 0
-        override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): String {
+        override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
             calls++
             val prompt = messages.joinToString("\n") { it["content"]?.toString().orEmpty() }
             if (prompt.contains("记忆摘录器") || prompt.contains("记忆归纳器") || prompt.contains("只做推演"))
-                return """{"summary":"s","kind":"plot","date":"","keywords":[],"mood":"","atmosphere":"","warmth":0}"""
+                return ChatResult("""{"summary":"s","kind":"plot","date":"","keywords":[],"mood":"","atmosphere":"","warmth":0}""")
             gate.await()
-            return "[情绪:开心]\n好呀\n晚点聊"
+            return ChatResult("[情绪:开心]\n好呀\n晚点聊")
         }
     }
 
@@ -166,6 +174,18 @@ class CompanionBrainSmokeTest {
                         assertTrue(rs.next())
                         assertEquals(14L, rs.getLong(1))
                         assertTrue(rs.getLong(2) > 0)
+                    }
+                    // 账本（2026-10-22 微信也要进账本）：生成 + 记忆摘录各记一行；model 恒「微信通道」id
+                    st.executeQuery("SELECT note, model, upstream, prompt_tokens, completion_tokens FROM ai_usage ORDER BY id").use { rs ->
+                        assertTrue(rs.next())
+                        assertEquals("brain", rs.getString(1))
+                        assertEquals("wechat", rs.getString(2))
+                        assertEquals("up-fake", rs.getString(3))
+                        assertEquals(100, rs.getInt(4))
+                        assertEquals(20, rs.getInt(5))
+                        assertTrue(rs.next())
+                        assertEquals("brain,memory", rs.getString(1))
+                        assertFalse(rs.next())
                     }
                 }
             }
@@ -402,5 +422,330 @@ class CompanionBrainSmokeTest {
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun writtenMeaningSurvivesMoodAndHasOneDeliveryDelayPerMessage() {
+        val dir = createTempDir(prefix = "companion-lossless")
+        try {
+            val store = CompanionStore(setupDb(dir))
+            val brain = CompanionBrain(store, object : ChatCompleter {
+                override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>) =
+                    if (messages.first()["content"].toString().let { it.contains("记忆摘录器") || it.contains("记忆归纳器") }) ChatResult("{}")
+                    else ChatResult("[情绪:难过]\n我已经出门了\n地铁停运，改坐公交\n所以会晚十分钟，不是让你一直等")
+            })
+            val out = runBlocking { brain.reply("conv-1", "到哪了", batchId = "lossless") }
+            for (line in listOf("我已经出门了", "地铁停运，改坐公交", "所以会晚十分钟，不是让你一直等")) {
+                assertTrue("Lost: $line", out.segments.any { line in it })
+                assertTrue(store.load("conv-1")!!.messages.any { line in it.content })
+            }
+            assertEquals(out.segments.size, out.messageIds.size)
+            val wire = AppJson.gson.toJsonTree(out).asJsonObject
+            val delays = wire.getAsJsonArray("delaysMs")
+            assertNotNull("Brain must return the shared delivery plan", delays)
+            assertEquals(out.segments.size, delays.size())
+            assertTrue(delays.all { it.asLong in 0L..3000L })
+            runBlocking { brain.cancel("lossless") }
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test
+    fun deliberateSilenceIsNotRetriedButAnEmptyModelResponseIs() {
+        for (intentional in listOf(true, false)) {
+            val dir = createTempDir(prefix = "companion-silence")
+            try {
+                val store = CompanionStore(setupDb(dir))
+                var generationCalls = 0
+                val brain = CompanionBrain(store, object : ChatCompleter {
+                    override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
+                        if (messages.first()["content"].toString().let { it.contains("记忆摘录器") || it.contains("记忆归纳器") }) return ChatResult("{}")
+                        generationCalls++
+                        return ChatResult(if (intentional) "[情绪:生气]\n[回应:不回复]" else if (generationCalls == 1) "" else "[情绪:平静]\n我听到了")
+                    }
+                })
+                val out = runBlocking { brain.reply("conv-1", "这事晚点说", batchId = "silence") }
+                if (intentional) {
+                    assertTrue(out.silence)
+                    assertTrue(out.segments.isEmpty())
+                    assertEquals(1, generationCalls)
+                    assertFalse(store.load("conv-1")!!.messages.any { it.role == Role.ASSISTANT })
+                } else {
+                    assertFalse(out.silence)
+                    assertEquals(listOf("我听到了"), out.segments)
+                    assertEquals(2, generationCalls)
+                }
+                runBlocking { brain.cancel("silence") }
+                store.close()
+            } finally { dir.deleteRecursively() }
+        }
+    }
+
+    @Test
+    fun autoMemoryOffDoesNotEvenStartExtractionOrWriteAtmosphere() {
+        val dir = createTempDir(prefix = "companion-no-memory")
+        try {
+            val db = setupDb(dir)
+            val store = CompanionStore(db)
+            val state = store.load("conv-1")!!
+            store.writeBox(state.userId, "settings", "global", 0, """{"autoSummarizeMemory":false}""", 1)
+            val called = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val brain = CompanionBrain(store, object : ChatCompleter {
+                override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
+                    val prompt = messages.first()["content"].toString()
+                    if (prompt.contains("记忆摘录器") || prompt.contains("记忆归纳器")) {
+                        called.complete(Unit)
+                        return ChatResult("""{"summary":"不能写","mood":"开心","atmosphere":"不能写"}""")
+                    }
+                    return ChatResult("[情绪:平静]\n收到了")
+                }
+            })
+            runBlocking {
+                brain.reply("conv-1", "不要记忆", batchId = "no-memory")
+                assertNull("Disabled memory still starts extraction", kotlinx.coroutines.withTimeoutOrNull(200) { called.await() })
+            }
+            runBlocking { brain.cancel("no-memory") }
+            assertEquals("", boxRaw(db, "mems"))
+            assertFalse(boxRaw(db, "pcset").contains("不能写"))
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test
+    fun storeFiltersTombstonedSourcesBeforeRecall() {
+        val dir = createTempDir(prefix = "companion-recall-delete")
+        try {
+            val store = CompanionStore(setupDb(dir))
+            val state = store.load("conv-1")!!
+            val msgs = listOf(Message(id = "gone", role = Role.USER, content = "已删除私密事实", timestamp = 1))
+            store.writeBox(state.userId, "msgs", "conv-1", 5, store.messagesToWire(msgs), 1)
+            store.writeBox(state.userId, "mems", "conv-1", 0, """[{"summary":"已删除私密事实","sourceMessageIds":["gone"]}]""", 1)
+            store.writeBox(state.userId, "pcset", "conv-1", 0, """{"lastMood":"生气","atmosphere":"已删除的氛围","atmosphereSourceMessageIds":["gone"]}""", 1)
+            store.writeBox(state.userId, "conv", "conv-1", 3,
+                AppJson.gson.toJson(state.conv.copy(deletedMessageIds = listOf("gone"))), 1)
+            val filtered = store.load("conv-1")!!
+            assertTrue(filtered.messages.isEmpty())
+            assertTrue(filtered.memories.isEmpty())
+            assertFalse(filtered.pcset.toString().contains("已删除的氛围"))
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test
+    fun deletingAnUnsentReplyAlsoDeletesItsDerivedMemoryAndAtmosphere() {
+        val dir = createTempDir(prefix = "companion-cancel-memory")
+        try {
+            val db = setupDb(dir)
+            val store = CompanionStore(db)
+            val brain = CompanionBrain(store, object : ChatCompleter {
+                override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>) =
+                    if (messages.first()["content"].toString().let { it.contains("记忆摘录器") || it.contains("记忆归纳器") }) ChatResult("{}")
+                    else ChatResult("[情绪:平静]\n我八点到")
+            })
+            val out = runBlocking { brain.reply("conv-1", "明早见", batchId = "cancel-derived") }
+            // Install already-completed derivations, then exercise the real cancellation path.
+            val state = store.load("conv-1")!!
+            store.writeBox(state.userId, "mems", "conv-1", state.revs["mems"] ?: 0,
+                """[{"summary":"我八点到","sourceMessageIds":["${out.messageIds.first()}"]}]""", 1)
+            store.writeBox(state.userId, "pcset", "conv-1", state.revs["pcset"] ?: 0,
+                """{"atmosphere":"约好八点","atmosphereSourceMessageIds":["${out.messageIds.first()}"]}""", 1)
+            runBlocking { brain.cancel("cancel-derived") }
+            assertFalse(boxRaw(db).contains("我八点到"))
+            assertFalse(boxRaw(db, "mems").contains("我八点到"))
+            assertFalse(boxRaw(db, "pcset").contains("约好八点"))
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test
+    fun derivedWriteRejectsAChangedParentOrMemorySwitchSnapshotAtomically() {
+        val dir = createTempDir(prefix = "companion-derived-guard")
+        try {
+            val store = CompanionStore(setupDb(dir))
+            val old = store.load("conv-1")!!
+            store.writeBox(old.userId, "conv", "conv-1", 3,
+                AppJson.gson.toJson(old.conv.copy(deletedMessageIds = listOf("deleted-source"))), 1)
+            assertTrue(runCatching {
+                store.writeBox(old.userId, "mems", "conv-1", 0, "[]", 1, expectedConvRev = 3)
+            }.exceptionOrNull() is CompanionStore.RevConflict)
+            val current = store.load("conv-1")!!
+            store.writeBox(old.userId, "pcset", "conv-1", 0, """{"autoSummarizeMemory":false}""", 1)
+            assertTrue(runCatching {
+                store.writeBox(old.userId, "mems", "conv-1", 0, "[]", 1,
+                    expectedConvRev = current.revs["conv"], expectedPcsetRev = 0)
+            }.exceptionOrNull() is CompanionStore.RevConflict)
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test
+    fun optionalNativeSearchNeverSearchesOrdinarySpeechAndOnlyUsesValidatedIntent() {
+        for (needsSearch in listOf(false, true)) {
+            val dir = createTempDir(prefix = "companion-search-intent")
+            try {
+                val store = CompanionStore(setupDb(dir, CharacterProfile(name = "沈岚", enableWebSearch = true)))
+                store.writeBox("u1", "settings", "global", 0, """{"autoSummarizeMemory":false}""", 1)
+                var searches = 0
+                var calls = 0
+                val brain = CompanionBrain(store, object : ChatCompleter {
+                    override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
+                        calls++
+                        if (calls == 1) assertTrue(extras.containsKey("tools"))
+                        if (needsSearch && calls == 1) return ChatResult("", toolCalls = listOf(mapOf("id" to "q1", "type" to "function",
+                            "function" to mapOf("name" to "search_web", "arguments" to """{"queries":["杭州今天预警"]}"""))))
+                        if (needsSearch) {
+                            assertTrue(messages.any { it["role"] == "tool" && it["content"].toString().contains("fixture-evidence") })
+                            assertFalse(extras.containsKey("tools"))
+                        }
+                        return ChatResult("[情绪:平静]\n听到了")
+                    }
+                }, search = { intent ->
+                    searches++
+                    assertEquals(listOf("杭州今天预警"), intent.queries)
+                    "fixture-evidence"
+                })
+                runBlocking { brain.reply("conv-1", if (needsSearch) "查一下杭州今天有没有预警" else "昨天汇报被打断了，有点烦") }
+                assertEquals(if (needsSearch) 1 else 0, searches)
+                assertEquals(if (needsSearch) 2 else 1, calls)
+                store.close()
+            } finally { dir.deleteRecursively() }
+        }
+    }
+
+    @Test fun emptyReplyRetryReusesSearchEvidenceWithoutAnotherSearch() {
+        val dir = createTempDir(prefix = "companion-search-retry")
+        try {
+            val store = CompanionStore(setupDb(dir, CharacterProfile(name = "沈岚", enableWebSearch = true)))
+            store.writeBox("u1", "settings", "global", 0, """{"autoSummarizeMemory":false}""", 1)
+            var calls = 0
+            var searches = 0
+            val brain = CompanionBrain(store, object : ChatCompleter {
+                override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
+                    calls++
+                    if (calls == 1) return ChatResult("", toolCalls = listOf(mapOf("id" to "q1", "type" to "function",
+                        "function" to mapOf("name" to "search_web", "arguments" to """{"queries":["杭州今天预警"]}"""))))
+                    assertTrue(messages.any { it["content"].toString().contains("fixture-evidence") })
+                    assertFalse(extras.containsKey("tools"))
+                    return ChatResult(if (calls == 2) "" else "[情绪:平静]\n查到了")
+                }
+            }, search = { searches++; "fixture-evidence" })
+            val result = runBlocking { brain.reply("conv-1", "查杭州今天的预警", batchId = "search-retry") }
+            assertEquals(listOf("查到了"), result.segments)
+            assertEquals(3, calls)
+            assertEquals(1, searches)
+            runBlocking { brain.cancel("search-retry") }
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun persistenceRetriesMustRevalidateTheSameRoundMaterials() {
+        val dir = createTempDir(prefix = "companion-persist-materials")
+        try {
+            val store = CompanionStore(setupDb(dir))
+            val original = store.load("conv-1")!!
+            val changed = original.copy(conv = original.conv.copy(deletedMessageIds = listOf("source-deleted")))
+            assertTrue(original.hasSameMemoryInputsAs(original))
+            assertFalse(changed.hasSameMemoryInputsAs(original))
+            val off = original.copy(globalSettings = com.google.gson.JsonParser.parseString("""{"autoSummarizeMemory":false}""").asJsonObject)
+            assertFalse(off.hasSameMemoryInputsAs(original))
+            val source = java.io.File("src/main/kotlin/com/freechat/companion/CompanionBrain.kt").readText()
+            assertTrue(source.contains("persistMessages(convId, replyMsgs, wechatBinding, ::ensureRoundMaterialActive)"))
+            assertTrue(source.contains("persistMessages(convId, listOf(ellipsis), wechatBinding, ::ensureRoundMaterialActive)"))
+            val retry = source.substringAfter("private suspend fun persistMessages(")
+            assertTrue(retry.indexOf("snapshotGuard?.invoke(fresh)") in 1 until retry.indexOf("store.writeBox("))
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun globalMemoryOffAppliesEvenWhenCompanionHasALegacyOverride() {
+        val dir = createTempDir(prefix = "companion-global-memory")
+        try {
+            val store = CompanionStore(setupDb(dir))
+            store.writeBox("u1", "settings", "global", 0, """{"autoSummarizeMemory":false}""", 1)
+            store.writeBox("u1", "pcset", "conv-1", 0, """{"autoSummarizeMemory":true}""", 1)
+            val calls = java.util.concurrent.atomic.AtomicInteger()
+            val brain = CompanionBrain(store, object : ChatCompleter {
+                override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
+                    if (messages.first()["content"].toString().let { it.contains("记忆摘录器") || it.contains("记忆归纳器") }) calls.incrementAndGet()
+                    return ChatResult("[情绪:平静]\n好")
+                }
+            })
+            runBlocking { brain.reply("conv-1", "不要写记忆", batchId = "global-off"); kotlinx.coroutines.delay(150) }
+            assertEquals(0, calls.get())
+            runBlocking { brain.cancel("global-off") }
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun deletingOldMemoryDuringDeepPrepCancelsBeforeTheNextGenerationCall() {
+        val dir = createTempDir(prefix = "companion-deep-delete")
+        try {
+            val store = CompanionStore(setupDb(dir, CharacterProfile(name = "沈岚", deepThinking = true, highQualityMemory = true)))
+            store.writeBox("u1", "mems", "conv-1", 0, """[{"id":"old","summary":"已删除私密事实","keywords":[],"kind":"plot","sourceMessageIds":["old-source"]}]""", 1)
+            val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var generationCalls = 0
+            val brain = CompanionBrain(store, object : ChatCompleter {
+                override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
+                    if (messages.last()["content"].toString().contains("只做推演")) {
+                        entered.complete(Unit); release.await()
+                        return ChatResult("1. 私密事实\n2. 无\n3. 接话\n4. 无")
+                    }
+                    generationCalls++
+                    return ChatResult("[情绪:平静]\n不能发出的旧消息")
+                }
+            })
+            runBlocking {
+                val job = async { runCatching { brain.reply("conv-1", "接着聊") } }
+                kotlinx.coroutines.withTimeout(2000) { entered.await() }
+                val current = store.load("conv-1")!!
+                store.writeBox("u1", "conv", "conv-1", current.revs["conv"]!!,
+                    AppJson.gson.toJson(current.conv.copy(deletedMessageIds = listOf("old-source"))), 1)
+                release.complete(Unit)
+                assertTrue(job.await().exceptionOrNull() is kotlinx.coroutines.CancellationException)
+            }
+            assertEquals(0, generationCalls)
+            assertFalse(store.load("conv-1")!!.messages.any { it.role == Role.ASSISTANT })
+            store.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun lateOldExtractionCannotOvertakeANewerCancellationOrAtmosphere() {
+        val dir = createTempDir(prefix = "companion-memory-order")
+        try {
+            val store = CompanionStore(setupDb(dir))
+            val firstEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val releaseFirst = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val memoryCalls = java.util.concurrent.atomic.AtomicInteger()
+            val brain = CompanionBrain(store, object : ChatCompleter {
+                override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
+                    val system = messages.first()["content"].toString()
+                    if (system.contains("记忆摘录器") || system.contains("记忆归纳器")) {
+                        val first = memoryCalls.incrementAndGet() == 1
+                        if (first) { firstEntered.complete(Unit); releaseFirst.await() }
+                        return ChatResult(if (first) """{"roleKnowledge":"约好八点见","openLoops":"约定未完成","mood":"开心","atmosphere":"约好见面"}"""
+                            else """{"roleKnowledge":"已取消见面","openLoops":"约定已取消","mood":"平静","atmosphere":"取消后平静"}""")
+                    }
+                    return ChatResult("[情绪:平静]\n收到了")
+                }
+            })
+            runBlocking {
+                brain.reply("conv-1", "明早八点见", batchId = "older")
+                kotlinx.coroutines.withTimeout(2000) { firstEntered.await() }
+                brain.reply("conv-1", "刚刚的约定取消", batchId = "newer")
+                kotlinx.coroutines.withTimeout(2000) {
+                    while (store.load("conv-1")!!.memories.none { it.openLoops.contains("已取消") }) kotlinx.coroutines.delay(10)
+                }
+                releaseFirst.complete(Unit)
+                kotlinx.coroutines.withTimeout(2000) {
+                    while (store.load("conv-1")!!.memories.size < 2) kotlinx.coroutines.delay(10)
+                }
+            }
+            val state = store.load("conv-1")!!
+            assertEquals("约定已取消", state.memories.maxBy { it.timestamp }.openLoops)
+            assertEquals("取消后平静", state.pcset.get("atmosphere").asString)
+            runBlocking { brain.cancel("older"); brain.cancel("newer") }
+            store.close()
+        } finally { dir.deleteRecursively() }
     }
 }

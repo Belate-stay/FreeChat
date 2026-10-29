@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.sp
 import com.freechat.ui.theme.FreeChatColors
+import com.freechat.ui.theme.FreeChatInputShape
 import dev.chrisbanes.haze.HazeState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -247,7 +248,7 @@ fun AccountScreen(onBack: () -> Unit) {
                 )
                 .jellyOverscroll()
                 .verticalScroll(rememberTopOnEntryScrollState())
-                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 24.dp), bottom = 40.dp)
+                .padding(top = HazeSpec.newPageContentPaddingDp(statusBarHeightDp, 24.dp), bottom = 40.dp)
                 .padding(horizontal = 16.dp)
         ) {
             if (auth == null) {
@@ -384,6 +385,7 @@ fun AccountScreen(onBack: () -> Unit) {
             OutlinedTextField(
                 value = nameInput,
                 onValueChange = { nameInput = it; nameErr = null },
+                shape = FreeChatInputShape,
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = colors.Primary,
@@ -464,6 +466,7 @@ fun AccountScreen(onBack: () -> Unit) {
             OutlinedTextField(
                 value = pwdInput,
                 onValueChange = { pwdInput = it },
+                shape = FreeChatInputShape,
                 label = { Text(s.accountDeleteConfirm) },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
@@ -946,6 +949,7 @@ private fun Field(
     OutlinedTextField(
         value = value,
         onValueChange = onChange,
+        shape = FreeChatInputShape,
         label = { Text(label, color = colors.TextTertiary) },
         enabled = enabled,
         singleLine = true,

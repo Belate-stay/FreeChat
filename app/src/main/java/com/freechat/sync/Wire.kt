@@ -7,6 +7,9 @@ import com.freechat.model.CharacterProfile
 import com.freechat.model.Conversation
 import com.freechat.model.MemoryEntry
 import com.freechat.model.Message
+import com.freechat.model.CharacterPersona
+import com.freechat.model.CharacterCard
+import com.freechat.model.GroupChatPolicy
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
@@ -54,6 +57,28 @@ object Wire {
     /** 对话 → 线上格式（挖掉设备本地字段） */
     fun convToWire(conv: Conversation): JsonObject {
         val obj = AppJson.gson.toJsonTree(conv).asJsonObject
+        conv.groupChat?.let { group ->
+            require(GroupChatPolicy.isValid(group)) { "Invalid group membership" }
+            val wireGroup = obj.getAsJsonObject("groupChat")
+            wireGroup.addProperty("avatarPath", ImageSync.ensureCached(group.avatarPath) ?: group.avatarPath)
+            wireGroup.addProperty("languageModelId", "")
+            wireGroup.addProperty("visionModelId", "")
+            wireGroup.add("members", JsonArray().apply {
+                group.members.forEach { member ->
+                    add(AppJson.gson.toJsonTree(member).asJsonObject.apply { add("persona", personaToWire(member.persona)) })
+                }
+            })
+        }
+        conv.storyProfile?.let { story ->
+            require(com.freechat.model.StoryPolicy.isValid(story)) { "Invalid story cast" }
+            obj.getAsJsonObject("storyProfile").apply {
+                addProperty("languageModelId", "")
+                addProperty("visualModelId", "")
+                add("members", JsonArray().apply { story.members.forEach { member ->
+                    add(AppJson.gson.toJsonTree(member).asJsonObject.apply { add("persona", personaToWire(member.persona)) })
+                } })
+            }
+        }
         val profile = obj.subObject("characterProfile") ?: return obj
         // 头像：**本体跟着角色卡一起走**（另一台设备/网页端根本没有这个文件，只给路径等于什么都没给）
         val avatar = readFile(conv.characterProfile?.avatarPath)
@@ -98,7 +123,12 @@ object Wire {
      */
     fun convFromWire(el: JsonElement, local: Conversation?): Conversation? {
         val remote = runCatching { AppJson.gson.fromJson(el, Conversation::class.java) }.getOrNull() ?: return null
+        val remoteGroup = remote.groupChat
+        if (remoteGroup != null && !runCatching { GroupChatPolicy.isValid(remoteGroup) }.getOrDefault(false)) return null
         val healed = remote.healed()
+        val remoteStory = healed.storyProfile
+        if (remoteStory != null && (!com.freechat.model.StoryPolicy.isValid(remoteStory) ||
+            remote.groupChat != null || remote.characterProfile != null)) return null
         val lp = local?.characterProfile
         val avatar = adoptAvatar(el, lp)
         // 1.0.99.3 外貌参考图：远端引用解成缓存路径；本机已有同名槽位的路径优先
@@ -108,6 +138,21 @@ object Wire {
         val remoteDescs = healed.characterProfile?.appearanceImageDescs.orEmpty()
         val useRemoteImages = remotePaths.isNotEmpty() || remoteDescs.isNotEmpty()
         return healed.copy(
+            storyProfile = healed.storyProfile?.let { story -> story.copy(
+                members = story.members.map { it.copy(persona = personaFromWire(it.persona)) },
+                languageModelId = local?.storyProfile?.languageModelId ?: "",
+                visualModelId = local?.storyProfile?.visualModelId ?: "") } ?: local?.storyProfile,
+            groupChat = healed.groupChat?.let { group ->
+                runCatching {
+                    group.copy(
+                        members = group.members.map { it.copy(persona = personaFromWire(it.persona)) },
+                        avatarPath = resolveImage(group.avatarPath),
+                        userNickname = group.userNickname.ifBlank { "我" },
+                        languageModelId = local?.groupChat?.languageModelId ?: "",
+                        visionModelId = local?.groupChat?.visionModelId ?: "",
+                    )
+                }.getOrElse { return null }
+            } ?: local?.groupChat,
             characterProfile = healed.characterProfile?.copy(
                 avatarPath = avatar.path,
                 avatarHash = avatar.hash,
@@ -120,6 +165,32 @@ object Wire {
             )
         )
     }
+
+    fun cardToWire(card: CharacterCard): JsonObject = AppJson.gson.toJsonTree(card).asJsonObject.apply {
+        add("persona", personaToWire(card.persona))
+    }
+
+    fun cardFromWire(value: JsonElement): CharacterCard? = runCatching {
+        val card = AppJson.gson.fromJson(value, CharacterCard::class.java)
+        require(card.id.isNotBlank() && card.persona.name.isNotBlank())
+        card.copy(persona = personaFromWire(card.persona))
+    }.getOrNull()
+
+    private fun personaToWire(persona: CharacterPersona): JsonObject = AppJson.gson.toJsonTree(persona).asJsonObject.apply {
+        addProperty("avatarPath", ImageSync.ensureCached(persona.avatarPath) ?: persona.avatarPath)
+        addProperty("appearanceImagePath", ImageSync.ensureCached(persona.appearanceImagePath) ?: persona.appearanceImagePath)
+        add("appearanceImagePaths", JsonArray().apply {
+            persona.appearanceImagePaths.forEach { add(ImageSync.ensureCached(it) ?: it) }
+        })
+    }
+
+    private fun resolveImage(value: String): String = if (ImageSync.isRef(value)) ImageSync.resolveToPath(value) else value
+
+    private fun personaFromWire(persona: CharacterPersona): CharacterPersona = CharacterPersona.from(persona.toProfile()).copy(
+        avatarPath = resolveImage(persona.avatarPath),
+        appearanceImagePath = resolveImage(persona.appearanceImagePath),
+        appearanceImagePaths = persona.appearanceImagePaths.map(::resolveImage),
+    )
 
     /** 推送用的 updatedAt：有天然时间戳就用天然的，**它不是冲突判定的依据**（冲突一律看版本号） */
     fun convUpdatedAt(conv: Conversation?): Long = conv?.updatedAt ?: System.currentTimeMillis()
@@ -211,7 +282,6 @@ object Wire {
         }
 
         if (cleared) {
-            if (keep.path.isNotBlank()) runCatching { java.io.File(keep.path).delete() }
             return AdoptedAvatar("", "")
         }
 
@@ -226,6 +296,7 @@ object Wire {
         val arr = JsonArray()
         for (m in msgs) {
             val obj = AppJson.gson.toJsonTree(m).asJsonObject
+            m.groupSenderAvatar?.let { obj.addProperty("groupSenderAvatar", ImageSync.ensureCached(it) ?: it) }
             // 1.0.99.3 图片上云：本地图不丢格子，写成 `img:<hash>` 内容寻址引用
             // （ImageSync 顺手把压缩载荷落缓存，SyncEngine 的 IMG 推送按 hash 去重上传）。
             // 路径出不了设备，但「是哪张图」出得去 —— 与头像 avatarHash 同一哲学。
@@ -261,7 +332,7 @@ object Wire {
         // 1.0.99.3 图片上云：`img:<hash>` 引用就地解成缓存路径（收端下载已在 SyncEngine
         // 的 IMG 分支落过缓存；缓存缺失时引用原样透传，UI 当坏图占位，下次同步自动补）。
         return remote.map { m ->
-            val heal = m.healed()
+            val heal = m.healed().let { it.copy(groupSenderAvatar = it.groupSenderAvatar?.let(::resolveImage)) }
             val mine = localById[heal.id]
             if (mine == null) heal.copy(
                 imagePaths = ImageSync.canonicalEntries(heal.imagePaths),

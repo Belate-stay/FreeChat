@@ -96,7 +96,7 @@ fun BoxScope.NoticeDialog(
     // 勾选项是这一次弹窗的临时状态：重新弹出时回到未勾
     var checked by remember(visible) { mutableStateOf(false) }
     // 1.1.26.4：弹窗**只认按钮**——返回键吞掉不做响应（工单：只能点「取消」按钮消除）
-    BackHandler(enabled = visible) { /* 吞掉返回键，防误触退出 */ }
+    BackHandler(enabled = visible) { com.freechat.ui.animation.BackGate.cancelPending() /* 吞掉返回键，防误触退出 */ }
 
     val shape = RoundedCornerShape(20.dp)
     val progress = materialProgress()
@@ -173,7 +173,7 @@ fun BoxScope.NoticeDialog(
                             .clip(RoundedCornerShape(13.dp))
                             .background(colors.Surface)
                             .border(1.dp, colors.InputBorder, RoundedCornerShape(13.dp))
-                            .clickable { onDismiss(checked) }
+                            .clickable { com.freechat.ui.animation.BackGate.cancelPending(); onDismiss(checked) }
                             .then(if (tablet) Modifier.padding(horizontal = 8.dp, vertical = 10.dp) else Modifier),
                         contentAlignment = Alignment.Center
                     ) {

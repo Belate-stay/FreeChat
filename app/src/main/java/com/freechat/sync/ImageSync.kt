@@ -2,6 +2,7 @@ package com.freechat.sync
 
 import com.freechat.data.LocalStore
 import com.freechat.data.GeneratedImageStore
+import com.freechat.data.CharacterLibraryStore
 import com.google.gson.JsonElement
 import com.google.gson.JsonParser
 import java.io.File
@@ -163,12 +164,13 @@ object ImageSync {
     fun healReferences(hash: String, path: String) {
         val ref = refOf(hash)
         val targets = LocalStore.messageConvIds().map { LocalStore.messagesFile(it) } +
-            listOf(LocalStore.conversationsFile())
+            listOf(LocalStore.conversationsFile()) + CharacterLibraryStore.mediaFiles()
         for (file in targets) {
             LocalStore.transformText(file) { text ->
                 if (!text.contains(ref)) text else text.replace("\"$ref\"", "\"$path\"")
             }
         }
+        CharacterLibraryStore.reload()
     }
 
     /** 该引用对应的本地可显示路径：缓存在用缓存，缓存缺失就用原条目（http 等）兜底 */
@@ -189,12 +191,12 @@ object ImageSync {
      * 或另一条对话里的同图会被连坐删瞎。宁可漏删（占点配额），
      * 也绝不误删（用户看得见的图没了才是事故）。
      */
-    fun isReferencedLocally(hash: String): Boolean {
+    fun isReferencedLocally(hash: String, includeArchived: Boolean = true): Boolean {
         if (hash.isBlank()) return false
         val ref = refOf(hash)
         val cacheName = cacheFile(hash).name
         val imageFields = setOf("imagePaths", "imageUrls", "quotedImagePath",
-            "appearanceImagePath", "appearanceImagePaths")
+            "appearanceImagePath", "appearanceImagePaths", "avatarPath", "groupSenderAvatar")
         fun imageValueReferences(value: JsonElement): Boolean = when {
             value.isJsonArray -> value.asJsonArray.any { imageValueReferences(it) }
             value.isJsonPrimitive && value.asJsonPrimitive.isString -> refForLocal(value.asString) == ref
@@ -208,13 +210,48 @@ object ImageSync {
             else -> false
         }
         val targets = LocalStore.messageConvIds().map { LocalStore.messagesFile(it) } +
-            listOf(LocalStore.conversationsFile())
+            listOf(LocalStore.conversationsFile()) + if (includeArchived) CharacterLibraryStore.mediaFiles() else listOf(LocalStore.characterLibraryFile())
         return targets.any { f ->
             val text = runCatching { if (f.isFile) f.readText() else null }.getOrNull() ?: return@any false
             // 保留引用/缓存形态的快速路径。原图回退只读图片字段，正文提到路径不算引用。
             if (text.contains("\"$ref\"") || text.contains(cacheName)) true
             else runCatching { originalReferenced(JsonParser.parseString(text)) }.getOrDefault(false)
         }
+    }
+
+    /** New-only references are unsafe to upload to a server with the legacy image collector. */
+    fun requiresLibraryCapability(hash: String): Boolean = requiresCapability(hash, storyOnly = false)
+    fun requiresStoryCapability(hash: String): Boolean = requiresCapability(hash, storyOnly = true)
+
+    private fun requiresCapability(hash: String, storyOnly: Boolean): Boolean {
+        val ref = refOf(hash)
+        val cache = cacheFile(hash).name
+        fun hits(value: JsonElement?): Boolean = when {
+            value == null || value.isJsonNull -> false
+            value.isJsonArray -> value.asJsonArray.any { hits(it) }
+            value.isJsonObject -> value.asJsonObject.entrySet().any { (_, child) -> hits(child) }
+            value.isJsonPrimitive && value.asJsonPrimitive.isString -> value.asString.let {
+                it == ref || it.endsWith(cache) || refForLocal(it) == ref
+            }
+            else -> false
+        }
+        fun json(file: File): JsonElement? = runCatching {
+            LocalStore.readText(file)?.let(JsonParser::parseString)
+        }.getOrNull()
+        val libraryOwner = hits(json(LocalStore.characterLibraryFile()))
+        if (storyOnly && libraryOwner) return false
+        var protectedOwner = libraryOwner
+        val rows = json(LocalStore.conversationsFile())?.takeIf { it.isJsonArray }?.asJsonArray?.toList().orEmpty()
+        for (row in rows) {
+            val obj = row.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val id = obj.get("id")?.asString ?: continue
+            if (!hits(obj) && !hits(json(LocalStore.messagesFile(id)))) continue
+            if (storyOnly) {
+                if (obj.get("storyProfile")?.isJsonObject != true) return false
+            } else if (obj.get("groupChat")?.isJsonObject != true && obj.get("storyProfile")?.isJsonObject != true) return false
+            protectedOwner = true
+        }
+        return protectedOwner
     }
 
     /** 一组条目里的全部 hash（去重保序） */
@@ -235,7 +272,7 @@ object ImageSync {
     fun releaseUnreferenced(entries: List<String>): Set<String> = LocalStore.locked {
         val sources = entries.map { GeneratedImageStore.cachedSource(it) ?: it }.distinct()
         val removed = sources.mapNotNull { refForLocal(it)?.let(::hashOfRef) }.toSet()
-            .filterNot(::isReferencedLocally).toSet()
+            .filterNot { isReferencedLocally(it) }.toSet()
         val root = LocalStore.filesDir().canonicalFile.toPath()
         sources.forEach { path ->
             val hash = refForLocal(path)?.let(::hashOfRef) ?: return@forEach

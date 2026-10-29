@@ -12,8 +12,17 @@ build/
 # Isolated tablet QA emulator state, not a source fixture.
 _verify/v1202/emulator/
 secrets.properties
-# 非开源部分（用户点名不随 push 上 GitHub）：启动信标 + 开发者模式后门
-# 连同它们的内部契约测试（test/dev/）一起排除——开发者调试与用户信息收集的相关代码一律不入开源
+# 非开源部分（用户点名不随 push 上 GitHub）：开发者调试与用户信息收集相关代码
+# 连同它们的内部契约测试（test/dev/）与验证基线（_verify/）一起排除——一律不入开源
+# 2026-10-28：角色上传一套同规格排除——非开源区靠 ignore，不靠「还没 add」
 app/src/main/java/com/freechat/data/UsageBeacon.kt
+app/src/main/java/com/freechat/data/CharacterContributionMedia.kt
+app/src/main/java/com/freechat/data/CharacterContributionApi.kt
+app/src/main/java/com/freechat/i18n/CharacterContributionStrings.kt
+app/src/main/java/com/freechat/ui/screens/CharacterContributionCard.kt
+freechat-core/src/main/kotlin/com/freechat/data/CharacterContributionPayload.kt
+freechat-core/src/test/kotlin/com/freechat/data/CharacterContributionPayloadTest.kt
 app/src/main/java/com/freechat/dev/
 app/src/test/java/com/freechat/dev/
+# 验证基线整目录：内含红线源码副本与脱敏前旧文案，永不入开源
+_verify/

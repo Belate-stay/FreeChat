@@ -65,17 +65,24 @@ class DisplayScale1205Test {
         val tablet = page.substringAfter("private fun TabletFeatureRecContent(")
             .substringBefore("/** 演示片段文案")
         assertTrue(tablet.contains("fontSize = 28.sp"))
-        assertTrue(tablet.contains("fontSize = 18.sp"))
-        assertTrue(tablet.contains("lineHeight = 30.sp"))
+        assertTrue("功能名 18sp 加重、简介 14sp 弱化（2026-10-28 工单）",
+            tablet.contains("fontSize = 18.sp") && tablet.contains("fontSize = 14.sp"))
+        assertTrue(tablet.contains("lineHeight = 21.sp"))
         assertTrue("A landscape tablet at LARGE still has room for the two-column composition",
             tablet.contains("maxHeight >= 520.dp"))
         val demo = page.substringAfter("private fun FeatureRecDemo(")
-        assertTrue(demo.contains("val demoScroll = rememberScrollState()"))
-        assertTrue(demo.contains("verticalScroll(demoScroll, enabled = stage >= 8)"))
+        assertTrue("Revisiting a recommendation retains its reading position", demo.contains("val demoScroll = playback.scroll"))
+        assertTrue(demo.contains("verticalScroll(demoScroll, enabled = active)"))
         assertTrue(demo.contains("demoScroll.animateScrollTo(demoScroll.maxValue"))
-        assertTrue(demo.contains("MaterialTheme.typography.bodyLarge"))
-        assertTrue("Both demo hosts release their touch shield after playback so the card can scroll",
-            Regex("if \\(stage < 8\\) Box").findAll(page).count() == 2)
+        assertTrue("Real ChatBubble text uses the larger tablet style instead of scaling down the card",
+            demo.contains("val typography = MaterialTheme.typography") &&
+                demo.contains("if (LocalTabletDevice.current) typography.bodyLarge else typography.bodyMedium"))
+        assertTrue("Reduced motion still reveals the full scrollable demo without animated scrolling",
+            page.contains("if (!motionOn)") && page.contains("playback.stage = DEMO_LAST_STAGE") &&
+                demo.contains("else demoScroll.scrollTo(demoScroll.maxValue)"))
+        assertTrue("No touch shield blocks horizontal swipes or vertical reading while a demo plays",
+            page.contains("HorizontalPager(") && !page.contains("detectTapGestures") &&
+                !page.contains("userScrollEnabled = false"))
     }
 
     @Test fun nativeWindowsReprovideTheOuterAppDensityInsideTheirNewComposeRoot() {
@@ -212,6 +219,6 @@ class DisplayScale1205Test {
         assertTrue(picker.contains("EMOJI_LIST.chunked(columns)"))
         assertTrue(picker.contains("heightIn(max = availableHeight * 0.4f)"))
         assertTrue(picker.contains("verticalScroll(rememberScrollState())"))
-        assertTrue(picker.contains("if (emojiAvailable) { draftEditedByUser = true; text += em }"))
+        assertTrue(picker.contains("if (emojiAvailable) { draftEditedByUser = true; editText(text + em) }"))
     }
 }

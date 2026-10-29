@@ -233,7 +233,7 @@ internal fun MySharesScreen(s: AppStrings, state: MySharesUiState) {
             if (state.loadFailed) s.networkUnreachable else s.shareLinkHint,
             style = MaterialTheme.typography.bodyMedium,
             color = colors.TextSecondary,
-            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp).clickable(enabled = state.loadFailed) {
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp).clickable(enabled = state.loadFailed) {
                 scope.launch { state.reload() }
             }
         )

@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.os.Environment
 import android.provider.MediaStore
+import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -38,6 +39,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
@@ -55,10 +61,16 @@ import coil.request.ImageRequest
 import com.freechat.data.TtsController
 import com.freechat.data.SearchPresentation
 import com.freechat.i18n.LocalStrings
+import com.freechat.i18n.groupMentionMember
+import com.freechat.i18n.groupNudgeMember
+import com.freechat.i18n.groupRetry
+import com.freechat.i18n.groupUnknownMember
+import com.freechat.model.GroupChatProfile
 import com.freechat.model.Message
 import com.freechat.model.MultiSelectAction
 import com.freechat.model.Role
 import com.freechat.ui.animation.FreeChatAnimation
+import com.freechat.ui.animation.LocalMotionEnabled
 import com.freechat.ui.animation.MotionPolicy
 import com.freechat.ui.animation.pressMotion
 import com.freechat.ui.theme.FreeChatColors
@@ -71,6 +83,7 @@ import com.freechat.ui.theme.LocalLiquidMode
 import com.freechat.ui.theme.LocalColorTheme
 import com.freechat.model.ColorTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -116,9 +129,21 @@ fun ChatBubble(
     // 剧情补足：AI 回复不套气泡框，像小说正文一样以纯文本流直接铺开（左对齐满宽、不解析 Markdown）。
     // 只影响 AI 侧；用户消息仍带气泡，方便区分「谁说的」和「谁写的」。
     textFlow: Boolean = false,
-    emphasizeDialogue: Boolean = false
+    emphasizeDialogue: Boolean = false,
+    groupChat: GroupChatProfile? = null,
+    onMentionGroupMember: ((String) -> Unit)? = null,
+    onNudgeGroupMember: ((String) -> Unit)? = null,
+    /** 演示页的「我」只用未设置头像的默认灰（2026-10-28 工单）：不把账号真头像带进展示 */
+    useDefaultUserAvatar: Boolean = false,
 ) {
     val colors = LocalFreeChatColors.current
+    if (groupChat != null && message.role == Role.SYSTEM && message.groupEventType != null) {
+        GroupSystemRow(message, modifier.then(if (multiSelectEnabled)
+            Modifier.clickable { onToggleSelect?.invoke() } else Modifier),
+            onRegenerate = onRegenerate, onEnterMultiSelect = onEnterMultiSelect,
+            multiSelectEnabled = multiSelectEnabled)
+        return
+    }
     val companionFill = lerp(colors.Background, colors.SurfaceVariant,
         if (LocalLiquidMode.current) 1f else 0.6f).copy(alpha = 1f)
     val s = LocalStrings.current
@@ -191,7 +216,9 @@ fun ChatBubble(
     }
 
     // 入场归聊天列表统一处理；visible=true 的 AnimatedVisibility 本来不会播放入场。
-    Box(modifier) {
+    GroupMessageFrame(message, groupChat, conversationId, modifier,
+        onMentionGroupMember.takeUnless { multiSelectEnabled },
+        onNudgeGroupMember.takeUnless { multiSelectEnabled }, useDefaultUserAvatar) {
       Box {
         if (isUser) {
             // ========== 用户消息 — 图片网格（若有）+ 文本气泡 + 长按 ==========
@@ -309,7 +336,9 @@ fun ChatBubble(
                                         )
                                     } else {
                                         Text(
-                                            buildHighlightedText(message.content, highlightKeyword, highlightColor),
+                                            buildHighlightedText(message.content, highlightKeyword, highlightColor,
+                                                groupMentionText(message.content, message.groupMentions.orEmpty(),
+                                                    colors.Primary, colors.Primary.copy(alpha = 0.12f))),
                                             style = MaterialTheme.typography.bodyMedium.copy(
                                                 fontFamily = LocalChatFontFamily.current,
                                                 lineBreak = cjkLineBreak
@@ -709,6 +738,103 @@ fun ChatBubble(
             )
         }
       }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun GroupMessageFrame(
+    message: Message,
+    groupChat: GroupChatProfile?,
+    conversationId: String?,
+    modifier: Modifier,
+    onMentionGroupMember: ((String) -> Unit)?,
+    onNudgeGroupMember: ((String) -> Unit)?,
+    useDefaultUserAvatar: Boolean = false,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    if (groupChat == null) {
+        Box(modifier, content = content)
+        return
+    }
+    val colors = LocalFreeChatColors.current
+    val s = LocalStrings.current
+    val isUser = message.role == Role.USER
+    val identity = GroupMessageIdentity.resolve(message, groupChat)
+    val name = if (isUser) groupChat.userNickname else identity.name.ifBlank { s.groupUnknownMember }
+    val avatarSize = (36f * LocalFontScale.current).dp.coerceIn(36.dp, 52.dp)
+    Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!isUser) {
+            val memberId = identity.memberId
+            key(conversationId, message.id, memberId) {
+                val view = LocalView.current
+                val motionEnabled = LocalMotionEnabled.current
+                val nudgeRotation = remember { Animatable(0f) }
+                val scope = rememberCoroutineScope()
+                val nudgeMember: () -> Unit = {
+                    if (memberId != null && identity.isCurrentMember && onNudgeGroupMember != null) {
+                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                            nudgeRotation.snapTo(0f)
+                            if (motionEnabled) {
+                                nudgeRotation.animateTo(0f, keyframes {
+                                    durationMillis = FreeChatAnimation.DURATION_NORMAL
+                                    0f at 0 using FreeChatAnimation.iosEaseInOut
+                                    -3f at durationMillis / 4 using FreeChatAnimation.iosEaseInOut
+                                    3f at durationMillis * 2 / 3 using FreeChatAnimation.iosEaseInOut
+                                    0f at durationMillis
+                                })
+                            }
+                        }
+                        onNudgeGroupMember(memberId)
+                    }
+                }
+                val gestureModifier = if (memberId != null && identity.isCurrentMember &&
+                    (onMentionGroupMember != null || onNudgeGroupMember != null)) {
+                    Modifier.combinedClickable(
+                        onClick = {},
+                        onLongClickLabel = s.groupMentionMember,
+                        onLongClick = { onMentionGroupMember?.invoke(memberId) },
+                        onDoubleClick = nudgeMember,
+                    ).then(Modifier.semantics {
+                        contentDescription = name
+                        customActions = listOf(
+                            CustomAccessibilityAction(s.groupMentionMember) { onMentionGroupMember?.invoke(memberId); true },
+                            CustomAccessibilityAction(s.groupNudgeMember) { nudgeMember(); true },
+                        )
+                    })
+                } else Modifier.semantics { contentDescription = name }
+                GroupParticipantAvatar(identity.avatarPath, name, Modifier.size(avatarSize).graphicsLayer {
+                    rotationZ = if (motionEnabled) nudgeRotation.value else 0f
+                }.then(gestureModifier))
+            }
+        }
+        Column(Modifier.weight(1f), horizontalAlignment = if (isUser) Alignment.End else Alignment.Start) {
+            if (groupChat.showMemberNames) {
+                Text(name, style = MaterialTheme.typography.labelMedium, color = colors.TextSecondary,
+                    modifier = Modifier.padding(bottom = 4.dp))
+            }
+            Box(Modifier.fillMaxWidth(), content = content)
+        }
+        if (isUser) GroupUserAvatar(Modifier.size(avatarSize).semantics { contentDescription = name }, useDefaultUserAvatar)
+    }
+}
+
+@Composable
+private fun GroupSystemRow(message: Message, modifier: Modifier = Modifier,
+    onRegenerate: (() -> Unit)?, onEnterMultiSelect: ((MultiSelectAction) -> Unit)?, multiSelectEnabled: Boolean) {
+    val colors = LocalFreeChatColors.current
+    val s = LocalStrings.current
+    Column(modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(message.content, style = MaterialTheme.typography.bodySmall, color = colors.TextSecondary, textAlign = TextAlign.Center)
+        if (message.failed && !multiSelectEnabled) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (onRegenerate != null) MessageActionIcon(onClick = onRegenerate) {
+                Icon(Icons.Filled.Refresh, s.groupRetry, tint = colors.TextSecondary, modifier = Modifier.size(16.dp))
+            }
+            if (onEnterMultiSelect != null) MessageActionIcon(onClick = { onEnterMultiSelect(MultiSelectAction.DELETE) }) {
+                Icon(Icons.Filled.DeleteOutline, s.deleteMessage, tint = colors.TextSecondary, modifier = Modifier.size(16.dp))
+            }
+        }
     }
 }
 

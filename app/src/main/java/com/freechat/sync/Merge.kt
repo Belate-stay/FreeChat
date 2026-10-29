@@ -74,11 +74,32 @@ object Merge {
      * 都完整就留内容长的（正文 + 思考过程一起算）；还是一样长就留远端那条。
      */
     private fun betterMessage(a: Message, b: Message): Message {
-        if (a.isStreaming != b.isStreaming) return if (a.isStreaming) b else a
         val la = a.content.length + a.reasoningContent.length
         val lb = b.content.length + b.reasoningContent.length
-        if (la != lb) return if (la > lb) a else b
-        return b
+        val winner = when {
+            a.isStreaming != b.isStreaming -> if (a.isStreaming) b else a
+            la != lb -> if (la > lb) a else b
+            else -> b
+        }
+        val other = if (winner === a) b else a
+        return winner.copy(
+            groupMemberId = winner.groupMemberId ?: other.groupMemberId,
+            groupSenderName = winner.groupSenderName ?: other.groupSenderName,
+            groupSenderAvatar = winner.groupSenderAvatar ?: other.groupSenderAvatar,
+            groupTurnId = winner.groupTurnId ?: other.groupTurnId,
+            groupStepId = winner.groupStepId ?: other.groupStepId,
+            groupTriggerMessageIds = winner.groupTriggerMessageIds.ifEmpty { other.groupTriggerMessageIds },
+            mentionedMemberIds = winner.mentionedMemberIds.ifEmpty {
+                if (winner.content == other.content) other.mentionedMemberIds else emptyList()
+            },
+            groupMentions = com.freechat.core.GroupMentionDraft(winner.content, winner.groupMentions.orEmpty()).validBindings().ifEmpty {
+                if (winner.content == other.content)
+                    com.freechat.core.GroupMentionDraft(winner.content, other.groupMentions.orEmpty()).validBindings()
+                else emptyList()
+            },
+            groupEventType = winner.groupEventType ?: other.groupEventType,
+            groupTargetMemberId = winner.groupTargetMemberId ?: other.groupTargetMemberId,
+        )
     }
 
     private fun cmpMessage(a: Message, b: Message): Int {
@@ -103,13 +124,24 @@ object Merge {
     // ============================================================
 
     /**
-     * 同 id 取远端：记忆一旦生成就不再改动，两边同 id 必然内容一致，取谁都一样。
-     * （真要是内容不同，说明两边各自总结出了同一个 id —— 不可能，id 是随机 UUID。）
+     * 同 id 默认取远端；旧端回传相同摘要时，保留它不认识的新状态字段。
+     * 来源删除过滤最后执行，不因补齐字段而恢复已删内容。
      */
     fun mergeMemories(local: List<MemoryEntry>, remote: List<MemoryEntry>, deleted: Set<String> = emptySet()): List<MemoryEntry> {
+        fun key(m: MemoryEntry) = m.id + "\u0000" + m.groupMemberId.orEmpty()
         val byId = LinkedHashMap<String, MemoryEntry>(local.size + remote.size)
-        for (m in local) if (m.id.isNotEmpty()) byId[m.id] = m
-        for (m in remote) if (m.id.isNotEmpty()) byId[m.id] = m
+        for (m in local) if (m.id.isNotEmpty()) byId[key(m)] = m
+        for (m in remote) if (m.id.isNotEmpty()) {
+            val scoped = if (m.groupMemberId == null) local.singleOrNull { it.id == m.id }?.let {
+                m.copy(groupMemberId = it.groupMemberId)
+            } ?: m else m
+            val old = byId[key(scoped)]
+            // An older peer can round-trip the same record while dropping unknown optional fields.
+            byId[key(scoped)] = if (old != null && old.summary == m.summary && old.eventDate == m.eventDate &&
+                m.storyState.isBlank() && m.roleKnowledge.isBlank() && m.openLoops.isBlank())
+                scoped.copy(storyState = old.storyState, roleKnowledge = old.roleKnowledge, openLoops = old.openLoops)
+            else scoped
+        }
         return com.freechat.data.MessageDeletion.filterMemories(byId.values.toList(), deleted).sortedBy { it.timestamp }
     }
 
@@ -127,6 +159,28 @@ object Merge {
         val visualDeleted = (local.deletedVisualMessageIds + remote.deletedVisualMessageIds).filter { it in deleted }.distinct().sorted()
         val lp = local.characterProfile
         val rp = remote.characterProfile
+        if (local.storyProfile != null || remote.storyProfile != null) {
+            val a = local.storyProfile
+            val b = remote.storyProfile
+            val owner = if (a == null) remote else if (b == null || a.updatedAt > b.updatedAt) local else remote
+            val story = owner.storyProfile
+            val newer = if (remote.updatedAt >= local.updatedAt) remote else local
+            return ConvMerge(newer.copy(title = owner.title, storyProfile = story, characterProfile = null, groupChat = null,
+                mode = ChatMode.COMPANION, deletedMessageIds = deleted, deletedVisualMessageIds = visualDeleted), null)
+        }
+        if (local.groupChat != null || remote.groupChat != null) {
+            val lg = local.groupChat
+            val rg = remote.groupChat
+            val group = when {
+                lg == null -> rg
+                rg == null -> lg
+                maxOf(rg.updatedAt, rg.announcementAt) >= maxOf(lg.updatedAt, lg.announcementAt) -> rg
+                else -> lg
+            }
+            val newer = if (remote.updatedAt >= local.updatedAt) remote else local
+            return ConvMerge(newer.copy(groupChat = group, characterProfile = null, mode = ChatMode.COMPANION,
+                deletedMessageIds = deleted, deletedVisualMessageIds = visualDeleted), null)
+        }
         // 1.0.99.3：判定面收窄到「云端长相」（samePersona）——头像指纹/设备本地字段的
         // wire 往返差异不再误判成人设冲突，冲突副本不会每轮同步长一条（见 samePersona 注释）。
         val profileDiffers = !samePersona(lp, rp)

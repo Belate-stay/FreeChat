@@ -89,18 +89,42 @@ class TabletStartup1205ContractTest {
         assertTrue("The landscape action stays inside the intro column", introColumn.contains("action()"))
     }
 
-    @Test fun recommendationKeepsTheExistingTimelineGateAndRealDemoComponents() {
+    @Test fun recommendationKeepsRealPlaybackButUnlocksButtonsAfterIndependentForegroundDwell() {
         val page = feature
-        assertTrue(page.contains("intArrayOf(400, 250, 3600, 2600, 1200, 900, 3200, 1800)"))
-        assertTrue(page.contains("delay(ms.toLong())"))
-        assertTrue(page.contains("stage = i + 1"))
-        assertTrue(page.contains("enabled = stage >= 8"))
-        assertTrue("Demo tap targets remain intercepted without blocking page scrolling",
-            Regex("detectTapGestures\\(onTap = \\{\\}, onLongPress = \\{\\}\\)").findAll(page).count() >= 2)
-        for (component in listOf("FeatureRecDemo(stage, colors)", "TypewriterText(", "SiriOrb(", "GeneratedImage(")) {
+        val bubble = source("ui/components/ChatBubble.kt")
+        val lastStage = Regex("DEMO_LAST_STAGE = (\\d+)").find(page)!!.groupValues[1].toInt()
+        val timelines = Regex("intArrayOf\\(([^)]*)\\)").findAll(page)
+            .map { match -> match.groupValues[1].split(',').map { it.trim().toInt() } }.toList()
+        assertEquals("Both recommendations have their own playback timeline", 2, timelines.size)
+        assertTrue("Both real demos retain their full delayed playback independently of the CTA",
+            timelines.all { it.size == lastStage && it.all { delayMs -> delayMs > 0 } && it.sum() >= 5000 })
+        assertTrue(page.contains("playback.stageElapsedMs += elapsedMs"))
+        assertTrue(page.contains("playback.stage += 1"))
+        assertTrue("Each page has its own four-second foreground wait, not a full-playback requirement",
+            page.contains("FEATURE_CTA_WAIT_MS = 4_000L") && page.contains("dwellMs >= FEATURE_CTA_WAIT_MS") &&
+                page.contains("enabled = canAdvance") && !page.contains("enabled = stage >= DEMO_LAST_STAGE"))
+        assertTrue("Revisits retain the same playback without inheriting another page's progress（停留解锁为全局一次钟，2026-10-28）",
+            page.contains("List(FEATURE_REC_IDS.size) { FeatureRecPlaybackState() }") &&
+                !page.contains("playback.dwellMs"))
+        assertTrue("Native pager swipes remain available during playback and the button wait",
+            page.contains("HorizontalPager(") && !page.contains("userScrollEnabled = false") &&
+                !page.contains("detectTapGestures"))
+        for (component in listOf("FeatureRecDemo(pageIndex, playback, active)", "ChatBubble(", "rememberMessageEntrance(")) {
             assertTrue("Recommendation must keep the real $component", page.contains(component))
         }
-        assertTrue(page.contains("FreeChatAnimation.menuEnter(TransformOrigin(0f, 1f))"))
-        assertTrue(page.contains("source = if (stage >= 7) scenePath else null"))
+        assertTrue("Group messages retain real member identities",
+            page.contains("groupChat = demoGroup") && page.contains("groupMemberId = line.senderId"))
+        assertTrue("Stories use shared narrative typography, typewriter and dialogue emphasis",
+            page.contains("textFlow = story") && page.contains("emphasizeDialogue = story") &&
+                bubble.contains("TypewriterText(") && bubble.contains("SiriOrb("))
+        assertTrue(page.contains("animationSpec = FreeChatAnimation.pageTween"))
+        assertTrue("Playback and nested effects stop in the background or on another pager page",
+            page.contains("repeatOnLifecycle(Lifecycle.State.RESUMED)") &&
+                page.contains("pagerState.settledPage.takeUnless { pagerState.isScrollInProgress }") &&
+                page.contains("LocalMotionEnabled provides (motionOn && active)"))
+        assertTrue("Reduced motion shows the complete demo and uses immediate button navigation",
+            page.contains("if (!motionOn)") && page.contains("playback.stage = DEMO_LAST_STAGE") &&
+                page.contains("else pagerState.scrollToPage(1)"))
+        assertFalse("The retired scene-image recommendation cannot return", page.contains("R.drawable.feature_rec_scene"))
     }
 }

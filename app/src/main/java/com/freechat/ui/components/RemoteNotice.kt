@@ -78,7 +78,7 @@ private fun NoticeButtonRow(
                     .clip(RoundedCornerShape(13.dp))
                     .background(if (primary) colors.Primary else colors.Surface)
                     .then(if (primary) Modifier else Modifier.border(1.dp, colors.InputBorder, RoundedCornerShape(13.dp)))
-                    .clickable(enabled = enabled) { onButton(b) }
+                    .clickable(enabled = enabled) { com.freechat.ui.animation.BackGate.cancelPending(); onButton(b) }
                     .padding(horizontal = 8.dp, vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -120,7 +120,7 @@ fun BoxScope.RemoteAlertDialog(
     if (notice == null) return
     val progress = materialProgress()
     // 与 NoticeDialog 同纪律：只认按钮，返回键与边缘点击都不关（拒绝走 dismiss 钮）
-    BackHandler(enabled = visible) { }
+    BackHandler(enabled = visible) { com.freechat.ui.animation.BackGate.cancelPending() }
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn(FreeChatAnimation.overlayFadeIn),
@@ -181,7 +181,7 @@ fun RemoteFullscreenNotice(
     onButton: (RemoteNotices.Button) -> Unit
 ) {
     // 强制：返回键吞掉，出口只有按钮
-    BackHandler { }
+    BackHandler { com.freechat.ui.animation.BackGate.cancelPending() }
     val scroll = rememberScrollState()
     // 「必须看完」：短文（滚不动）直接算看完；长文滚到底解锁按钮
     var readThrough by remember(notice.id) { mutableStateOf(false) }

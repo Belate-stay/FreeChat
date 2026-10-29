@@ -43,13 +43,17 @@ class TabletNavigationContractTest {
     @Test fun supportingEditorCannotBeBypassedByChatShortcuts() {
         val main = source("MainActivity.kt")
         val chatRoute = main.substringAfter("Screen.CHAT -> ChatScreen(").substringBefore("Screen.SETTINGS ->")
-        for (route in listOf("onOpenModelEditor =", "onOpenAsrEditor =", "onOpenAccount =", "onNewChat =")) {
+        for (route in listOf("onOpenModelEditor =", "onOpenAsrEditor =", "onOpenAccount =")) {
             assertTrue("Missing live navigation guard for $route",
                 chatRoute.substringAfter(route).substringBefore("},").contains("canNavigateFromChat()"))
         }
+        assertFalse("Chat 标题栏不再提供新建入口", chatRoute.contains("onNewChat ="))
         val chat = source("ui/screens/ChatScreen.kt")
         assertTrue(chat.contains("onLongPressGenImage = if (navigationEnabled"))
-        assertTrue(chat.contains("onLongPressWebSearch = if (navigationEnabled"))
+        assertTrue(chat.contains("val onLongPressWebSearch: (() -> Unit)? =") &&
+            chat.contains("if (navigationEnabled && currentConvId != null && editingMessageId == null)") &&
+            chat.contains("if (groupChat != null) onOpenGroupSettings else onOpenNewRules") &&
+            chat.contains("onLongPressWebSearch = onLongPressWebSearch"))
     }
 
     @Test fun retainedTabletFormsDoNotResetWhenAPaneBecomesVisibleAgain() {

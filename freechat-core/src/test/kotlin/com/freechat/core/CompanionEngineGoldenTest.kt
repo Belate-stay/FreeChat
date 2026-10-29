@@ -6,7 +6,6 @@ import com.freechat.model.Message
 import com.freechat.model.Role
 import org.junit.Assert.*
 import org.junit.Test
-import kotlin.random.Random
 
 /**
  * M1 第三刀 golden：请求装配次序、回复解析、节奏表——
@@ -24,7 +23,7 @@ class CompanionEngineGoldenTest {
         val history = listOf(msg(Role.USER, "在吗", 1000L), msg(Role.ASSISTANT, "在", 2000L))
         val messages = CompanionRequestBuilder.build(
             character = CharacterProfile(dialogueMode = DialogueMode.WECHAT),
-            systemPrompt = "SYS", memoryContext = "MEM", deepPrepNote = "PREP", quoteText = "QUOTE",
+            systemPrompt = "SYS", stateContext = "STATE", memoryContext = "MEM", deepPrepNote = "PREP", quoteText = "QUOTE",
             history = history, imageContext = "IMG", forceReply = true, lengthHint = "LEN",
             batchSize = 2, serpBlock = "SERP", searchGuidance = "GUIDE",
             includeReasoningContent = true
@@ -32,14 +31,17 @@ class CompanionEngineGoldenTest {
         val contents = messages.map { it["content"] as String }
         // 全部材料都在（IMG 是嵌在长句里的，用 contains 找）
         assertTrue(contents[0] == "SYS")
-        assertTrue("MEM" in contents && "PREP" in contents && "QUOTE" in contents)
+        assertTrue("STATE" in contents && "MEM" in contents && "PREP" in contents && "QUOTE" in contents)
         assertTrue(contents.any { it.contains("IMG") } && "LEN" in contents && "SERP" in contents && "GUIDE" in contents)
-        // 次序：SYS → MEM → PREP → QUOTE → 历史 → IMG → 强制/长度/多条 → SERP → GUIDE → 格式铁律
+        // 次序（2026-10-22 缓存刀）：SYS → 历史 → STATE → MEM → PREP → QUOTE → IMG → 强制/长度/多条 → SERP → GUIDE → 格式铁律
+        val idxHist = contents.indexOfFirst { it.contains("在吗") }
         val idxImg = contents.indexOfFirst { it.contains("IMG") }
+        assertTrue(idxHist == 1)                              // 历史紧贴系统提示词 = 可缓存稳定前缀
+        assertTrue(contents.indexOf("STATE") == idxHist + 2)   // 状态块在整段历史正后方
+        assertTrue(contents.indexOf("STATE") < contents.indexOf("MEM"))
         assertTrue(contents.indexOf("MEM") < contents.indexOf("PREP"))
         assertTrue(contents.indexOf("PREP") < contents.indexOf("QUOTE"))
-        assertTrue(contents.indexOf("QUOTE") < contents.indexOfFirst { it.contains("在吗") })
-        assertTrue(contents.indexOfFirst { it.contains("在吗") } < idxImg)
+        assertTrue(contents.indexOf("QUOTE") < idxImg)
         assertTrue(idxImg < contents.indexOf("LEN"))
         assertTrue(contents.indexOf("SERP") < contents.indexOf("GUIDE"))
         // ★ 格式铁律压尾：模型开写前读到的最后一段话
@@ -64,7 +66,7 @@ class CompanionEngineGoldenTest {
         val withImg = CompanionRequestBuilder.build(
             systemPrompt = "S", history = listOf(msg(Role.USER, "", 1L, images = listOf("/x.jpg"), imageContext = "一只猫"))
         )
-        assertTrue((withImg[1]["content"] as String).contains("[这张图片的内容：一只猫]"))
+        assertTrue((withImg[1]["content"] as String).contains(CompanionPrompts.imageObservationContext("一只猫")))
         val imgOnly = CompanionRequestBuilder.build(
             systemPrompt = "S", history = listOf(msg(Role.USER, "", 1L, images = listOf("/x.jpg")))
         )
@@ -104,30 +106,19 @@ class CompanionEngineGoldenTest {
     // ============ 节奏表 ============
 
     @Test
-    fun rhythmSegmentCountFollowsMoodAndRegenOverridesAngerSilence() {
-        val fixed = Random(42)
-        // 叙事档最多 3 段
-        assertEquals(3, CompanionRhythm.segmentCount(CompanionMood.NEUTRAL, narrative = true, regenerating = false, segmentTotal = 10, random = fixed))
-        // 生气：重生成时不许沉默
-        assertEquals(1, CompanionRhythm.segmentCount(CompanionMood.ANGRY, narrative = false, regenerating = true, segmentTotal = 5, random = fixed))
-        // 消极情绪恒 1 条
-        assertEquals(1, CompanionRhythm.segmentCount(CompanionMood.SAD, narrative = false, regenerating = false, segmentTotal = 5, random = fixed))
-        assertEquals(1, CompanionRhythm.segmentCount(CompanionMood.DISMISSIVE, narrative = false, regenerating = false, segmentTotal = 5, random = fixed))
-        // 兴奋/开心 2-3 条
-        repeat(20) {
-            val n = CompanionRhythm.segmentCount(CompanionMood.EXCITED, narrative = false, regenerating = false, segmentTotal = 9, random = fixed)
-            assertTrue(n in 2..3)
-        }
+    fun rhythmKeepsNaturalMessagesAndNeverSplitsNarrative() {
+        val lines = listOf("先到门口", "没带钥匙", "麻烦帮我开一下")
+        val text = CompanionRhythm.prepareSegments(lines, false)
+        assertEquals(lines, text)
+        lines.forEach { line -> assertTrue(text.any { line in it }) }
+        assertEquals(listOf(lines.joinToString("\n\n")), CompanionRhythm.prepareSegments(lines, true))
     }
 
     @Test
-    fun rhythmIntervalsStayWithinEmotionBands() {
-        val fixed = Random(7)
-        repeat(20) {
-            assertTrue(CompanionRhythm.segmentIntervalMs(CompanionMood.ANGRY, false, fixed) in 4000L..7000L)
-            assertTrue(CompanionRhythm.segmentIntervalMs(CompanionMood.EXCITED, false, fixed) in 800L..2000L)
-            assertTrue(CompanionRhythm.segmentIntervalMs(CompanionMood.NEUTRAL, true, fixed) in 1500L..3000L)
-            assertTrue(CompanionRhythm.initialTypingDelayMs(fixed) in 1500L..4500L)
-        }
+    fun rhythmIntervalsAreContentSensitiveBoundedAndSubtractGenerationTime() {
+        val plan = CompanionRhythm.deliveryDelaysMs(listOf("好", "到了发你消息"), false, 30_000)
+        assertEquals(0L, plan.first())
+        assertTrue(plan.last() in 400L..2600L)
+        assertEquals(plan, CompanionRhythm.validatedDelaysMs(listOf(99999L), listOf("好", "到了发你消息"), false, 30_000))
     }
 }

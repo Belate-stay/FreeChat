@@ -50,8 +50,8 @@ class Beta1127NavAndShareTest {
         assertTrue("模型编辑返回走深链闩回来源模型列表", main.contains("settingsOpenModelList = modelEditorType"))
         assertTrue("模型列表闩被设置页消费", settings.contains("openModelListOnLaunch"))
         assertTrue("三级页返回上一级（作者/开发者→关于）",
-            settings.contains("SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS -> returnToAbout()") &&
-                settings.contains("subScreen = if (showTabletCategories) null else SubScreen.ABOUT_FREECHAT"))
+            settings.contains("subScreen = settingsBackScreen(subScreen, apiTutorialOrigin, showTabletCategories)") &&
+                settings.contains("SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS -> if (showTabletCategories) null else SubScreen.ABOUT_FREECHAT"))
     }
 
     @Test fun scrollPositionsSurviveFullScreenDetours() {

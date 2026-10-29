@@ -1,7 +1,6 @@
 package com.freechat.companion
 
 import com.freechat.core.CompanionHistory
-import com.freechat.core.CompanionMood
 import com.freechat.core.CompanionPrompts
 import com.freechat.core.CompanionReplyParser
 import com.freechat.core.CompanionRequestBuilder
@@ -11,9 +10,8 @@ import com.freechat.core.MemoryLogic
 import com.freechat.core.TimeState
 import com.freechat.core.detectGoodnight
 import com.freechat.core.generateSleepSchedule
-import com.freechat.core.moodWithResidue
-import com.freechat.core.parseEmotionLabel
 import com.freechat.data.AppJson
+import com.freechat.data.SearchIntent
 import com.freechat.model.CharacterProfile
 import com.freechat.model.ChatMode
 import com.freechat.model.DialogueMode
@@ -52,9 +50,11 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class CompanionBrain(
     private val store: CompanionStore,
-    private val completer: ChatCompleter
+    private val completer: ChatCompleter,
+    private val search: suspend (SearchIntent) -> String = { intent -> BrainSearch.infoBlock(intent) }
 ) {
     private val locks = ConcurrentHashMap<String, Mutex>()
+    @Volatile private var functionToolsSupported = true
 
     // 记忆摘录的后台作用域（1.0.99.3 提速：摘录不挡回复返回，见 replyLocked 第 6 步）
     private val memoryScope = kotlinx.coroutines.CoroutineScope(
@@ -84,20 +84,18 @@ class CompanionBrain(
 
         val createdAtMs: Long = System.currentTimeMillis()
 
-        @Synchronized fun tryCommit(): Boolean {
+        @Synchronized fun tryCommit(ids: List<String>): Boolean {
             if (cancelled) return false
+            persistedIds += ids
             responded = true
             return true
         }
 
         /** @return true=还没落库（弃写即够）；false=已定案（调用方要清掉半截） */
         @Synchronized fun tryCancel(): Boolean {
-            if (responded) return false
             cancelled = true
-            return true
+            return !responded
         }
-
-        @Synchronized fun notePersisted(id: String) { persistedIds += id }
 
         @Synchronized fun drainPersisted(): List<String> {
             val out = persistedIds.toList()
@@ -124,7 +122,8 @@ class CompanionBrain(
         val emotion: String = "",
         val segments: List<String> = emptyList(),
         /** 回复消息的 id（M4 收口：App 瘦客户端按这些 id 逐条揭示，同步合并同 id 不重复） */
-        val messageIds: List<String> = emptyList()
+        val messageIds: List<String> = emptyList(),
+        val delaysMs: List<Long> = emptyList()
     )
 
     companion object {
@@ -140,7 +139,6 @@ class CompanionBrain(
         )
 
         // pcset 线上键（与 PerConvBridge 的常量同名——改一处必须同步另一处）
-        private const val K_AUTO_MEM = "autoSummarizeMemory"
         private const val K_MOOD = "lastMood"
         private const val K_MOOD_AT = "moodAtMs"
         private const val K_ATMOSPHERE = "atmosphere"
@@ -207,10 +205,24 @@ class CompanionBrain(
             repeat(5) { attempt ->
                 val objs = store.load(convId) ?: return
                 val drop = ids.toSet()
-                if (objs.messages.none { it.id in drop }) return
                 try {
                     store.writeBox(objs.userId, "msgs", convId, objs.revs["msgs"] ?: 0L,
-                        store.messagesToWire(objs.messages.filterNot { it.id in drop }), System.currentTimeMillis())
+                        store.messagesToWire(objs.messages.filterNot { it.id in drop }), System.currentTimeMillis(),
+                        expectedConvRev = objs.revs["conv"])
+                    writeBoxRetrying(convId, "mems") { fresh ->
+                        val filtered = com.freechat.core.DeletionLogic.filterMemories(fresh.memories, drop)
+                        if (filtered == fresh.memories) null else AppJson.gson.toJson(filtered)
+                    }
+                    writeBoxRetrying(convId, "pcset") { fresh ->
+                        val state = AppJson.gson.fromJson(fresh.pcset, com.freechat.model.PerConvSettings::class.java)
+                        val cleared = com.freechat.core.DeletionLogic.atmosphere(state, drop)
+                        if (cleared == state) return@writeBoxRetrying null
+                        fresh.pcset.deepCopy().apply {
+                            addProperty(K_MOOD, cleared.lastMood); addProperty(K_MOOD_AT, cleared.moodAtMs)
+                            addProperty(K_ATMOSPHERE, cleared.atmosphere); addProperty(K_WARMTH, cleared.warmth)
+                            add(K_ATMO_SOURCES, AppJson.gson.toJsonTree(cleared.atmosphereSourceMessageIds))
+                        }.toString()
+                    }
                     return
                 } catch (_: CompanionStore.RevConflict) {
                     kotlinx.coroutines.delay(30L * (attempt + 1))
@@ -286,7 +298,12 @@ class CompanionBrain(
         val narrative = character.isNarrativeMode()
         val hq = character.highQualityMemory
         val assoc = character.synonymAssociation
-        val autoMem = objs.pcset.get(K_AUTO_MEM)?.takeIf { it.isJsonPrimitive }?.asBoolean ?: true
+        val autoMem = objs.autoMemoryEnabled()
+        fun ensureRoundMaterialActive(fresh: CompanionStore.ConvObjects = store.load(convId) ?: throw CancellationException("conversation deleted")) {
+            ensureWechatBindingActive()
+            if (!fresh.hasSameMemoryInputsAs(objs))
+                throw CancellationException("conversation memory or sources changed during generation")
+        }
 
         // —— 材料先算好再装配（与 App 的 callCompanionApi 同构）——
         val timeState = TimeState(
@@ -300,24 +317,30 @@ class CompanionBrain(
         )
         val systemPrompt = CompanionPrompts.buildCompanionSystemPrompt(
             character = character, messages = working,
-            convRules = objs.conv.rules.orEmpty(), timeState = timeState,
+            convRules = objs.conv.rules.orEmpty(),
             allowWechatEmoji = allowWechatEmoji
         )
-        val memoryContext = if (autoMem) MemoryLogic.buildMemoryContext(objs.memories, turnText, hq, assoc) else ""
-        // 联网搜索（1.1.30X 默认开启）：单发检索（AnySearch 免 Key，与 search.js 同协议），
-        // 结果以信息源块并入上下文材料；角色显式关掉（enableWebSearch=false）才不搜。
-        val searchNote = if (character.enableWebSearch != false && BRAIN_MODEL.supportsWebSearch)
-            BrainSearch.infoBlock(turnText) else ""
+        // 动态状态块（2026-10-22 缓存刀）：气氛+时间每轮必变，装配在历史之后
+        val stateContext = CompanionPrompts.buildStateBlocks(working, character, timeState)
+        val memoryContext = if (autoMem) MemoryLogic.buildModelManagedContext(objs.memories, hq,
+            includeStoryState = character.dialogueMode == DialogueMode.PLOT) else ""
+        // 联网开关授予能力；只有模型提交有效检索意图时才发出外部查询。
+        val searchOn = character.enableWebSearch != false && BRAIN_MODEL.supportsWebSearch
+        var searchResolved = !searchOn
+        var searchNote = ""
         val history = CompanionHistory.pickHistory(working, CompanionHistory.historyBudgetTokens(hq))
         // 深度推演（1.0.99.4 补大脑）：deepThinking ∧ 高质量记忆才跑（App 的 callCompanionApi 同条件）
-        ensureWechatBindingActive()
+        ensureRoundMaterialActive()
+        // 账本记号（2026-10-22 微信进账本）：微信通道 = wechat，App 瘦客户端 = brain
+        val chan = if (wechatBinding != null) "wechat" else "brain"
         val deepPrepNote = if (character.deepThinking && hq)
-            runDeepPrepPass(character, systemPrompt, working, objs.memories, turnText, assoc, autoMem) else ""
+            runDeepPrepPass(character, systemPrompt, stateContext, working, objs.memories, autoMem, objs.userId, "$chan,prep") else ""
 
         suspend fun generate(forceReply: Boolean, lengthHint: String? = null): com.freechat.core.ParsedCompanionReply {
-            ensureWechatBindingActive()
+            ensureRoundMaterialActive()
             val request = CompanionRequestBuilder.build(
-                character = character, systemPrompt = systemPrompt, memoryContext = memoryContext + searchNote,
+                character = character, systemPrompt = systemPrompt, stateContext = stateContext,
+                memoryContext = memoryContext + searchNote,
                 deepPrepNote = deepPrepNote, history = history, forceReply = forceReply, lengthHint = lengthHint,
                 batchSize = batch.size, includeReasoningContent = false
             )
@@ -325,24 +348,67 @@ class CompanionBrain(
             // 深度思考「尽力开」：与 App 的 companionDeepThink 同语义（角色开关 ∧ 模型能力位）；
             // 1.1.30X 起模型能力位置真、角色默认开 = 默认开启
             val deepThink = character.deepThinkingMode && BRAIN_MODEL.supportsDeepThinking
-            val raw = completer.complete(request, temperature, CompanionPrompts.deepThinkExtras(deepThink))
-            ensureWechatBindingActive()
-            return CompanionReplyParser.parse(raw, narrative, allowWechatEmoji = allowWechatEmoji)
+            val extras = CompanionPrompts.deepThinkExtras(deepThink)
+            val res = try {
+                if (!searchResolved && !functionToolsSupported) throw IllegalStateException("API error 400: tools unsupported")
+                completer.complete(request, temperature, extras + if (!searchResolved)
+                    mapOf("tools" to listOf(SearchIntent.toolDefinition), "tool_choice" to "auto") else emptyMap())
+            } catch (e: IllegalStateException) {
+                // Only a protocol rejection can switch to JSON planning; never retry network/5xx failures.
+                if (searchResolved || (e.message?.contains("API error 400") != true && e.message?.contains("API error 422") != true) ||
+                    !Regex("tool|function", RegexOption.IGNORE_CASE).containsMatchIn(e.message.orEmpty())) throw e
+                functionToolsSupported = false
+                searchNote = try {
+                    ensureRoundMaterialActive()
+                    val plan = completer.complete(request + mapOf("role" to "system", "content" to
+                        SearchIntent.guidance + "\n此处只判断检索必要性，输出 JSON {\"search\":false}；需要时改为 true 并填 queries。"), 0.1, CompanionPrompts.deepThinkExtras(false))
+                    store.recordAiUsage(objs.userId, "$chan,search-plan", plan)
+                    SearchIntent.fromDecision(plan.text)?.let { search(it) }.orEmpty()
+                } catch (e: CancellationException) { throw e } catch (_: Exception) { "" }
+                searchResolved = true
+                ensureRoundMaterialActive()
+                completer.complete(request + mapOf("role" to "system", "content" to searchNote.ifBlank { "本轮没有外部检索证据，不编造来源。" }), temperature, extras)
+            }
+            store.recordAiUsage(objs.userId, chan, res)
+            ensureRoundMaterialActive()
+            searchResolved = true
+            var final = res
+            if (res.toolCalls.isNotEmpty()) {
+                val continuation = request.toMutableList()
+                continuation += mapOf("role" to "assistant", "content" to res.text, "tool_calls" to res.toolCalls,
+                    "reasoning_content" to res.reasoningContent)
+                res.toolCalls.forEach { call ->
+                    val fn = call["function"] as? Map<*, *>
+                    val intent = if (searchOn && fn?.get("name") == SearchIntent.TOOL_NAME)
+                        com.freechat.core.JsonLoose.extractObject(fn["arguments"]?.toString().orEmpty())?.let(SearchIntent::fromArguments) else null
+                    val evidence = if (intent == null) "未执行：无有效检索意图。" else try {
+                        search(intent).ifBlank { "本轮检索失败或无有效结果，不得编造来源。" }
+                    } catch (e: CancellationException) { throw e } catch (_: Exception) { "本轮检索失败，不得编造来源。" }
+                    searchNote += evidence
+                    continuation += mapOf("role" to "tool", "tool_call_id" to call["id"], "content" to evidence)
+                }
+                continuation += mapOf("role" to "system", "content" to CompanionPrompts.modeFormatRule(character.dialogueMode))
+                ensureRoundMaterialActive()
+                final = completer.complete(continuation, temperature, extras)
+                store.recordAiUsage(objs.userId, "$chan,search-reply", final)
+                ensureRoundMaterialActive()
+            }
+            return CompanionReplyParser.parse(final.text, narrative, allowWechatEmoji = allowWechatEmoji)
         }
 
         var parsed = generate(forceReply = false)
+        if (parsed.silence) return ReplyResult(emotion = parsed.emotion, silence = true)
         if (parsed.bodyLines.isEmpty()) parsed = generate(forceReply = true)
         if (parsed.bodyLines.isEmpty()) {
             // 仍空：与 App 同款发省略号（自然无语，不显示「（空回复）」）
             ensureWechatBindingActive()
-            if (!gate.tryCommit()) return ReplyResult(emotion = "", silence = true)
             val ellipsis = Message(
                 id = CompanionStore.newMessageId(), role = com.freechat.model.Role.ASSISTANT,
                 content = "…", timestamp = System.currentTimeMillis(), modelName = BRAIN_MODEL.displayName, mode = ChatMode.COMPANION
             )
             working += ellipsis
-            gate.notePersisted(ellipsis.id)
-            persistMessages(convId, listOf(ellipsis), wechatBinding)
+            if (!gate.tryCommit(listOf(ellipsis.id))) return ReplyResult(silence = true)
+            persistMessages(convId, listOf(ellipsis), wechatBinding, ::ensureRoundMaterialActive)
             return ReplyResult(emotion = "", segments = listOf("…"), messageIds = listOf(ellipsis.id))
         }
         if (narrative && CompanionPrompts.countChars(parsed.bodyLines.joinToString("")) <
@@ -352,17 +418,13 @@ class CompanionBrain(
             if (retried.bodyLines.isNotEmpty()) parsed = retried
         }
 
-        // 4) 情绪 → 条数（叙事档整段最多 3 段；微信档情绪化条数，生气可能不回）
-        val mood = if (narrative) CompanionMood.NEUTRAL else
-            (parseEmotionLabel(parsed.emotion) ?: moodWithResidue(turnText, perFrom(objs.pcset), nowMs))
-        val maxCount = CompanionRhythm.segmentCount(mood, narrative, regenerating = false, segmentTotal = parsed.bodyLines.size)
-        val toShow = parsed.bodyLines.take(maxCount)
+        // 4) 合并兼容文字段，保留全部语义与语音载体。
+        val toShow = CompanionRhythm.prepareSegments(parsed.bodyLines, narrative)
         if (toShow.isEmpty()) return ReplyResult(emotion = parsed.emotion, silence = true)
 
         // 5) 分条落库（时间戳逐条 +1 保序）
         //    落库前最后看一眼过期闸门：被并批/被中止 → 弃写，不在箱里留孤儿回复
         ensureWechatBindingActive()
-        if (!gate.tryCommit()) return ReplyResult(emotion = parsed.emotion, silence = true)
         val baseTs = System.currentTimeMillis()
         val replyIds = mutableListOf<String>()
         val replyMsgs = mutableListOf<Message>()
@@ -375,10 +437,10 @@ class CompanionBrain(
             )
             working += m
             replyMsgs += m
-            gate.notePersisted(id)
         }
+        if (!gate.tryCommit(replyIds)) return ReplyResult(emotion = parsed.emotion, silence = true)
         ensureWechatBindingActive()
-        persistMessages(convId, replyMsgs, wechatBinding)
+        persistMessages(convId, replyMsgs, wechatBinding, ::ensureRoundMaterialActive)
         sleepingMissedMessages[convId] = 0
 
         // 6) 记忆摘录 + 氛围快照（与 App 的 summarizeAndRemember 同款；摘录失败不拖回复）
@@ -391,14 +453,15 @@ class CompanionBrain(
         val replyText = toShow.joinToString("\n")
         gate.addJob(memoryScope.launch {
             try {
-                extractAndRemember(convId, gate, turnText, replyText, batch.map { it.id }, replyIds, narrative, hq, assoc, autoMem)
+                extractAndRemember(convId, gate, turnText, replyText, batch.map { it.id }, replyIds, narrative, hq, assoc, autoMem, objs.userId, "$chan,memory", baseTs)
             } catch (e: CancellationException) {
                 throw e   // 戒律 7：被并批作废的摘录以取消收场，不许装作正常完成
             } catch (_: Exception) {
                 // 记忆是增强不是必需：摘录挂了这轮照样算完
             }
         })
-        return ReplyResult(emotion = parsed.emotion, segments = toShow, messageIds = replyIds)
+        return ReplyResult(emotion = parsed.emotion, segments = toShow, messageIds = replyIds,
+            delaysMs = CompanionRhythm.deliveryDelaysMs(toShow, narrative, System.currentTimeMillis() - nowMs))
     }
 
     /** 写一箱，rev 冲突就重读重试（[rebuild] 拿最新箱内容算出这一把要写什么） */
@@ -407,7 +470,9 @@ class CompanionBrain(
             val objs = store.load(convId) ?: return
             val json = rebuild(objs) ?: return
             try {
-                store.writeBox(objs.userId, kind, convId, objs.revs[kind] ?: 0L, json, System.currentTimeMillis())
+                store.writeBox(objs.userId, kind, convId, objs.revs[kind] ?: 0L, json, System.currentTimeMillis(),
+                    expectedConvRev = objs.revs["conv"], expectedPcsetRev = if (kind == "mems") objs.revs["pcset"] ?: 0L else null,
+                    expectedSettingsRev = objs.revs["settings"] ?: 0L)
                 return
             } catch (_: CompanionStore.RevConflict) {
                 kotlinx.coroutines.delay(30L * (attempt + 1))
@@ -423,20 +488,16 @@ class CompanionBrain(
     private suspend fun runDeepPrepPass(
         character: CharacterProfile,
         systemPrompt: String,
+        stateContext: String,
         working: List<Message>,
         memories: List<MemoryEntry>,
-        turnText: String,
-        assoc: Float,
-        autoMem: Boolean
+        autoMem: Boolean,
+        userId: String,
+        ledgerNote: String
     ): String = runCatching {
         val msgs = mutableListOf<Map<String, Any?>>()
         // 用同一份人设：这一趟要「以角色的身份」想，不给它人设就只是在做阅读理解
         if (systemPrompt.isNotEmpty()) msgs.add(mapOf("role" to "system", "content" to systemPrompt))
-        // 记忆给全（高质量档）：这一趟的目的之一就是找出「相关的往事」
-        if (autoMem) {
-            MemoryLogic.buildMemoryContext(memories, turnText, highQuality = true, associationLevel = assoc)
-                .takeIf { it.isNotBlank() }?.let { msgs.add(mapOf("role" to "system", "content" to it)) }
-        }
         var prepPrevTs = 0L
         msgs.addAll(CompanionHistory.pickHistory(working, CompanionHistory.historyBudgetTokens(enhanced = true)).map { m ->
             val prefix = CompanionPrompts.historyTimePrefix(prepPrevTs, m.timestamp, character.isNarrativeMode())
@@ -446,24 +507,25 @@ class CompanionBrain(
                 "content" to prefix + m.content
             )
         })
+        // 状态块/记忆后置（2026-10-22 缓存刀）：与正式那趟同次序，稳定前缀共享缓存
+        if (stateContext.isNotBlank()) msgs.add(mapOf("role" to "system", "content" to stateContext))
+        // 记忆给全（高质量档）：这一趟的目的之一就是找出「相关的往事」
+        if (autoMem) {
+            MemoryLogic.buildModelManagedContext(memories, highQuality = true)
+                .takeIf { it.isNotBlank() }?.let { msgs.add(mapOf("role" to "system", "content" to it)) }
+        }
         msgs.add(mapOf("role" to "system", "content" to CompanionPrompts.deepPrepRequest()))
 
-        val note = completer.complete(msgs, CompanionPrompts.companionTemperature(character.aiCreativity)).trim()
+        val prepRes = completer.complete(msgs, CompanionPrompts.companionTemperature(character.aiCreativity))
+        store.recordAiUsage(userId, ledgerNote, prepRes)
+        val note = prepRes.text.trim()
         if (note.isBlank()) return@runCatching ""
 
-        // 第 4 行是它自己报的检索词 —— 拿它再检索一次记忆。
-        // 这是整件事里最值钱的一步：第一遍检索是按用户这句话做的，而「该想起什么」
-        // 往往不在这句话的字面里（对方说「随便」，真正相关的是三天前那句「我周三有空」）。
-        val query = note.lines()
-            .firstOrNull { it.trimStart().startsWith("4.") }
-            ?.removePrefix("4.")?.trim().orEmpty()
-            .takeIf { it.isNotBlank() && it != "无" }
-        val second = query?.let {
-            runCatching { MemoryLogic.buildMemoryContext(memories, it, highQuality = false, associationLevel = assoc) }.getOrNull()
-        }.orEmpty()
-
-        CompanionPrompts.deepPrepNote(note, second)
-    }.getOrDefault("")
+        CompanionPrompts.deepPrepNote(note, "")
+    }.getOrElse { e ->
+        if (e is CancellationException) throw e
+        ""
+    }
 
     /**
      * 记忆摘录 + 氛围快照写回。模型调用在锁外（1.0.99.4：不许挡下一轮回复/打断重等），
@@ -472,16 +534,21 @@ class CompanionBrain(
     private suspend fun extractAndRemember(
         convId: String, gate: RoundGate, turnText: String, replyText: String,
         userMsgIds: List<String>, replyIds: List<String>,
-        narrative: Boolean, hq: Boolean, assoc: Float, autoMem: Boolean
+        narrative: Boolean, hq: Boolean, assoc: Float, autoMem: Boolean,
+        userId: String, ledgerNote: String, acceptedAtMs: Long
     ) {
+        val initial = store.load(convId) ?: return
+        if (!autoMem || gate.isCancelled() || !initial.autoMemoryEnabled() ||
+            (userMsgIds + replyIds).any { it in initial.conv.deletedMessageIds } ||
+            replyIds.any { id -> initial.messages.none { it.id == id } }) return
         val draft = try {
-            MemoryExtractor.parseDraft(
-                completer.complete(
-                    MemoryExtractor.buildMessages(turnText, replyText, hq, plotMode = narrative, assocLevel = assoc),
-                    0.1, CompanionPrompts.deepThinkExtras(false)
-                ),
-                plotMode = narrative
+            val memRes = completer.complete(
+                MemoryExtractor.buildMessages(turnText, replyText, hq, plotMode = narrative, assocLevel = assoc,
+                    modelManagedAssociation = true, characterName = store.load(convId)?.conv?.characterProfile?.name.orEmpty()),
+                0.1, CompanionPrompts.deepThinkExtras(false) + mapOf("max_tokens" to 1000)
             )
+            store.recordAiUsage(userId, ledgerNote, memRes)
+            MemoryExtractor.parseDraft(memRes.text, plotMode = narrative, highQuality = hq, userText = turnText)
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -492,27 +559,37 @@ class CompanionBrain(
         val lock = locks.computeIfAbsent(convId) { Mutex() }
         lock.withLock {
             try {
-                if (draft.summary.isNotEmpty()) {
+                fun valid(objs: CompanionStore.ConvObjects): Boolean {
+                    val enabled = objs.autoMemoryEnabled()
+                    val deleted = objs.conv.deletedMessageIds.toSet()
+                    return enabled && !gate.isCancelled() && (userMsgIds + replyIds).none { it in deleted } &&
+                        replyIds.all { id -> objs.messages.any { it.id == id } }
+                }
+                if (listOf(draft.summary, draft.storyState, draft.roleKnowledge, draft.openLoops).any { it.isNotBlank() }) {
                     val keywords = draft.keywords.filter { it.isNotBlank() }.ifEmpty { MemoryLogic.extractKeywords(turnText) }
                     val entry = MemoryEntry(
-                        summary = draft.summary, keywords = keywords, kind = draft.kind,
+                        summary = draft.summary, keywords = keywords, kind = draft.kind, timestamp = acceptedAtMs,
                         eventDate = draft.date,
-                        sourceMessageIds = userMsgIds + replyIds
+                        sourceMessageIds = userMsgIds + replyIds,
+                        storyState = draft.storyState, roleKnowledge = draft.roleKnowledge, openLoops = draft.openLoops
                     )
                     // 重读最新箱再 upsert（rev 冲突自愈）：摘录是异步进来的，
                     // 不能用生成时那份旧快照，更不能盖掉 App 并发推上来的记忆
                     writeBoxRetrying(convId, "mems") { objs ->
+                        if (!valid(objs)) return@writeBoxRetrying null
                         AppJson.gson.toJson(MemoryLogic.trim(MemoryLogic.upsert(objs.memories, entry), hq))
                     }
                 }
                 if (draft.mood.isNotBlank() || draft.atmosphere.isNotBlank()) {
                     writeBoxRetrying(convId, "pcset") { objs ->
+                        if (!valid(objs)) return@writeBoxRetrying null
+                        if ((objs.pcset.get(K_MOOD_AT)?.let { runCatching { it.asLong }.getOrNull() } ?: 0L) > acceptedAtMs) return@writeBoxRetrying null
                         val o = objs.pcset.deepCopy()
                         if (draft.mood.isNotBlank()) o.addProperty(K_MOOD, draft.mood)
-                        o.addProperty(K_MOOD_AT, System.currentTimeMillis())
+                        o.addProperty(K_MOOD_AT, acceptedAtMs)
                         if (draft.atmosphere.isNotBlank()) o.addProperty(K_ATMOSPHERE, draft.atmosphere)
                         if (draft.warmth != 0) o.addProperty(K_WARMTH, draft.warmth)
-                        o.add(K_ATMO_SOURCES, JsonArray().apply { userMsgIds.forEach { add(it) } })
+                        o.add(K_ATMO_SOURCES, JsonArray().apply { (userMsgIds + replyIds).forEach { add(it) } })
                         o.toString()
                     }
                 }
@@ -536,37 +613,39 @@ class CompanionBrain(
      * 发送失败不补发不重放：下轮 decide 的近况里看得见自己刚落的这条，自然不会重复。
      */
     suspend fun persistProactiveMessages(convId: String, contents: List<String>): List<String> {
+        // mode/modelName 与正常回复同款（2026-10-22 修：缺 mode 落成 STANDARD，App 端渲染成
+        // 标准模式文字流而不是消息气泡 ——「他主动发的不是气泡」那单）
         val msgs = contents.mapIndexed { i, text ->
-            Message(role = com.freechat.model.Role.ASSISTANT, content = text,
-                timestamp = System.currentTimeMillis() + i)
+            Message(id = CompanionStore.newMessageId(), role = com.freechat.model.Role.ASSISTANT, content = text,
+                timestamp = System.currentTimeMillis() + i, modelName = BRAIN_MODEL.displayName, mode = ChatMode.COMPANION)
         }
         persistMessages(convId, msgs)
         return msgs.map { it.id }
     }
 
-    private suspend fun persistMessages(convId: String, additions: List<Message>, wechatBinding: WechatBinding? = null) {
+    private suspend fun persistMessages(convId: String, additions: List<Message>, wechatBinding: WechatBinding? = null,
+        snapshotGuard: ((CompanionStore.ConvObjects) -> Unit)? = null) {
         repeat(5) { attempt ->
-            val fresh = store.load(convId) ?: return
+            val fresh = store.load(convId) ?: throw CancellationException("conversation deleted during persistence")
+            snapshotGuard?.invoke(fresh)
             if (wechatBinding != null && !store.hasActiveWechatBinding(fresh.userId, convId, wechatBinding)) {
                 throw CancellationException("wechat binding changed during persistence retry")
             }
             try {
                 val known = fresh.messages.mapTo(HashSet()) { it.id }
-                val merged = (fresh.messages + additions.filterNot { it.id in known }).sortedBy { it.timestamp }
+                val deleted = fresh.conv.deletedMessageIds.toSet()
+                val merged = (fresh.messages + additions.filterNot { it.id in known || it.id in deleted }).sortedBy { it.timestamp }
                 store.writeBox(fresh.userId, "msgs", convId, fresh.revs["msgs"] ?: 0L,
-                    store.messagesToWire(merged), System.currentTimeMillis(), requiredWechatBinding = wechatBinding)
+                    store.messagesToWire(merged), System.currentTimeMillis(), requiredWechatBinding = wechatBinding,
+                    expectedConvRev = fresh.revs["conv"],
+                    expectedSettingsRev = if (snapshotGuard != null) fresh.revs["settings"] ?: 0L else null)
                 return
             } catch (_: CompanionStore.RevConflict) {
                 kotlinx.coroutines.delay(30L * (attempt + 1))
             }
         }
+        throw CompanionStore.RevConflict()
     }
-
-    private fun perFrom(pcset: JsonObject): com.freechat.model.PerConvSettings =
-        com.freechat.model.PerConvSettings(
-            lastMood = pcset.get(K_MOOD)?.takeIf { it.isJsonPrimitive }?.asString.orEmpty(),
-            moodAtMs = pcset.get(K_MOOD_AT)?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L
-        )
 
     /** 当前是否在 AI 的睡觉窗口内（与 CVM.isSleepingNow 同语义：叙事档无作息；判定 = timePerception || sleepSimulation） */
     private fun isSleepingNow(convId: String, character: CharacterProfile?): Boolean {

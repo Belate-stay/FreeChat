@@ -128,6 +128,15 @@ object RemoteNotices {
     }
 
     /**
+     * 内置弹窗（builtin-*）云控判定：云单里有这条 = 「启用 && 版本在区间」才算生效；
+     * 云单里没有这条 = null（调用方回落本地默认）。
+     * 「版本不在区间」必须判成 false——早先把这种条目从表里丢掉、调用方拿缺位当启用，
+     * 版本区间写反成「筛掉=照弹」（builtin-feature 踩过）。
+     */
+    fun reservedActive(n: Notice?, versionName: String): Boolean? =
+        n?.let { it.enabled && targets(it, versionName) }
+
+    /**
      * 弹出资格：过了版本筛选 + 没超 maxImpressions + 过了 cooldown。
      * 只看数据说话，排序（priority 降序）也在这里给。
      */

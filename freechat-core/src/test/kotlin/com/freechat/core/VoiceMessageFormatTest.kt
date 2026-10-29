@@ -44,7 +44,7 @@ class VoiceMessageFormatTest {
         val longVoice = "<voice>" + "长".repeat(150) + "</voice>"
         assertFalse("纯语音回复永不违规", CompanionPrompts.isFormatViolation(longVoice, DialogueMode.WECHAT))
         assertFalse("长语音行不参与超长行判定", CompanionPrompts.isFormatViolation("短句。\n$longVoice", DialogueMode.WECHAT))
-        assertTrue("纯文字超长行照旧判违规（剧情补足写法混入微信档要抓）",
+        assertFalse("正式文字或长语音都不能仅凭长度判为串档",
             CompanionPrompts.isFormatViolation("长".repeat(120), DialogueMode.WECHAT))
     }
 }

@@ -34,11 +34,14 @@ class CompanionGoldenTest {
     // ============ 提示词组装 ============
 
     @Test
-    fun promptStartsWithPersonaAndEndsWithTimeContext() {
+    fun promptStartsWithPersonaAndTimeContextLivesInStateBlocks() {
         val p = CompanionPrompts.buildCompanionSystemPrompt(char(), listOf(msg(Role.USER, "你好")))
-        assertTrue(p.startsWith("你是一个在微信上跟朋友聊天的人"))
-        assertTrue(p.contains("现在是 "))                       // 时间上下文钉在尾部
-        assertTrue(p.indexOf("现在是 ") > p.indexOf("【你的人设"))
+        assertTrue(p.startsWith("【微信聊天任务】"))
+        // 2026-10-22 缓存刀：时间上下文/气氛移出系统提示词（每轮必变，夹在前面会打穿前缀缓存）
+        assertFalse(p.contains("现在是 "))
+        assertFalse(p.contains("【你们最近的气氛】"))
+        val state = CompanionPrompts.buildStateBlocks(listOf(msg(Role.USER, "你好")), char())
+        assertTrue(state.contains("现在是 "))
     }
 
     @Test
@@ -58,20 +61,22 @@ class CompanionGoldenTest {
     fun depollutionBlockOnlyWhenHistoryHasAssistantRows() {
         val without = CompanionPrompts.buildCompanionSystemPrompt(char(), listOf(msg(Role.USER, "你好")))
         val with = CompanionPrompts.buildCompanionSystemPrompt(char(), listOf(msg(Role.ASSISTANT, "在"), msg(Role.USER, "你好")))
-        assertFalse(without.contains("只取内容，不取写法"))
-        assertTrue(with.contains("只取内容，不取写法"))
+        assertFalse(without.contains("【历史衔接与格式切换】"))
+        assertTrue(with.contains("【历史衔接与格式切换】"))
     }
 
 
     @Test
     fun atmosphereAndConvRulesBlocksAppearWhenProvided() {
         val p = CompanionPrompts.buildCompanionSystemPrompt(
-            char(), emptyList(), convRules = "全程说文言文", timeState = TimeState(atmosphere = "等船")
+            char(), emptyList(), convRules = "全程说文言文"
         )
-        assertTrue(p.contains("【你们最近的气氛】等船"))
         assertTrue(p.contains("全程说文言文"))
-        // 对话规则在时间上下文之前
-        assertTrue(p.indexOf("全程说文言文") < p.indexOf("现在是 "))
+        assertFalse(p.contains("【你们最近的气氛】"))          // 气氛挪进动态尾巴
+        val state = CompanionPrompts.buildStateBlocks(emptyList(), char(), TimeState(atmosphere = "等船"))
+        assertTrue(state.contains("【你们最近的气氛】等船"))
+        // 尾块内部保持原相对次序：气氛在前、时间在后
+        assertTrue(state.indexOf("【你们最近的气氛】") < state.indexOf("现在是 "))
     }
 
     @Test

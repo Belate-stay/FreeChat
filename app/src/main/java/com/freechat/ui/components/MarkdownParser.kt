@@ -8,6 +8,8 @@ internal sealed class MdBlock {
     data class Quote(val text: String) : MdBlock()
     data class CodeBlock(val code: String, val lang: String) : MdBlock()
     data class Table(val headers: List<String>, val rows: List<List<String>>) : MdBlock()
+    /** 数学公式块（2026-10-28）：$$…$$ / \\[…\\] 独占段落，走 MathFormula 真排版。 */
+    data class Math(val source: String) : MdBlock()
     object Divider : MdBlock()
 }
 
@@ -45,7 +47,10 @@ internal fun parseMarkdown(text: String): List<MdBlock> {
         }
     }
 
-    for (line in lines) {
+    var lineNo = 0
+    while (lineNo < lines.size) {
+        val line = lines[lineNo]
+        lineNo++
         val trimmed = line.trim()
 
         // CommonMark fences: a closing fence has the same character and at least the opening length.
@@ -83,6 +88,74 @@ internal fun parseMarkdown(text: String): List<MdBlock> {
         if (trimmed.isBlank()) {
             flushTable()
             flushParagraph()
+            continue
+        }
+
+        // 数学公式块（2026-10-28）：$$…$$（可多行）独占段落 = 块级公式。
+        // 10-28 返修：同行闭合后带文字（$$E=mc^2$$ 其中…）必须把尾巴还给段落；未闭合整段回吐段落，绝不吞下文。
+        if (trimmed.startsWith("$$")) {
+            flushTable()
+            flushParagraph()
+            val first = trimmed.removePrefix("$$")
+            val inlineClose = first.indexOf("$$")
+            if (inlineClose >= 0) {
+                blocks.add(MdBlock.Math(first.substring(0, inlineClose).trim()))
+                val tail = first.substring(inlineClose + 2).trim()
+                if (tail.isNotEmpty()) pendingParagraphLines.add(tail)
+                continue
+            }
+            val src = StringBuilder()
+            if (first.isNotBlank()) src.append(first)
+            var closed = false
+            while (lineNo < lines.size) {
+                val t = lines[lineNo].trim()
+                lineNo++
+                val closeAt = t.indexOf("$$")
+                if (closeAt >= 0) {
+                    if (closeAt > 0) { if (src.isNotEmpty()) src.append('\n'); src.append(t, 0, closeAt) }
+                    val tail = t.substring(closeAt + 2).trim()
+                    if (tail.isNotEmpty()) pendingParagraphLines.add(tail)
+                    closed = true
+                    break
+                }
+                if (src.isNotEmpty()) src.append('\n')
+                src.append(t)
+            }
+            if (closed) blocks.add(MdBlock.Math(src.toString().trim()))
+            else pendingParagraphLines.add(src.toString())
+            continue
+        }
+        // \\[…\\] 同款
+        if (trimmed == "\\[" || trimmed.startsWith("\\[")) {
+            flushTable()
+            flushParagraph()
+            val first = trimmed.removePrefix("\\[").trim()
+            val inlineClose = first.indexOf("\\]")
+            if (inlineClose >= 0) {
+                blocks.add(MdBlock.Math(first.substring(0, inlineClose).trim()))
+                val tail = first.substring(inlineClose + 2).trim()
+                if (tail.isNotEmpty()) pendingParagraphLines.add(tail)
+                continue
+            }
+            val src = StringBuilder()
+            if (first.isNotBlank()) src.append(first)
+            var closed = false
+            while (lineNo < lines.size) {
+                val t = lines[lineNo].trim()
+                lineNo++
+                val closeAt = t.indexOf("\\]")
+                if (closeAt >= 0) {
+                    if (closeAt > 0) { if (src.isNotEmpty()) src.append('\n'); src.append(t, 0, closeAt) }
+                    val tail = t.substring(closeAt + 2).trim()
+                    if (tail.isNotEmpty()) pendingParagraphLines.add(tail)
+                    closed = true
+                    break
+                }
+                if (src.isNotEmpty()) src.append('\n')
+                src.append(t)
+            }
+            if (closed) blocks.add(MdBlock.Math(src.toString().trim()))
+            else pendingParagraphLines.add(src.toString())
             continue
         }
 

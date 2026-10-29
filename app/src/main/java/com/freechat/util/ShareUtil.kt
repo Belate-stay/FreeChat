@@ -485,6 +485,14 @@ object ShareImageGenerator {
                 codeBg
             )
         }
+        is MdBlock.Math -> {
+            // 分享长图没有公式排版引擎：按 Unicode 公式纯文本绘制（数学符号照常可读）
+            val p = TextPaint().apply { color = TEXT_COLOR; textSize = BODY; typeface = bodyFont; isAntiAlias = true }
+            LaidBlock.Text(
+                buildLayout(buildSpannable(com.freechat.ui.components.mathToPlainText(block.source), bodyFont, monoFont), p, contentW, RATIO_BODY),
+                bottomPad = PARA_GAP
+            )
+        }
         is MdBlock.Divider -> LaidBlock.Divider(DIVIDER_COLOR)
         is MdBlock.Table -> {
             val p = TextPaint().apply { color = TEXT_COLOR; textSize = TABLE_SIZE; typeface = monoFont; isAntiAlias = true }

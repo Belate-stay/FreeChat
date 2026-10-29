@@ -14,6 +14,9 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
 
 /**
  * 前台服务：退到后台后 AI 仍在思考回复时保活进程 + 保持 CPU/Wi-Fi 唤醒。
@@ -36,6 +39,7 @@ class ReplyService : Service() {
         private const val REPLY_NOTIF_ID = 1002
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_TEXT = "text"
+        const val EXTRA_CONVERSATION_ID = "freechat_reply_conversation_id"
         private const val LOCK_TAG = "FreeChat:generating"
 
         /** 单次唤醒锁最长持有时间（兜底，防止异常路径把锁漏在系统里耗电） */
@@ -81,16 +85,24 @@ class ReplyService : Service() {
         }
 
         /** 发一条「新消息」式悬浮通知（悬浮 + 通知中心，对标微信），点击回到对应对话 */
-        fun showReply(context: Context, title: String, text: String) {
-            ensureChannels(context)
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(REPLY_NOTIF_ID, buildReplyNotification(context, title, text))
+        fun showReply(context: Context, conversationId: String, title: String, text: String) {
+            if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+            // Notification delivery must never turn a persisted model reply into a generation failure.
+            runCatching {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if (!nm.areNotificationsEnabled()) return
+                ensureChannels(context)
+                nm.notify(conversationId, REPLY_NOTIF_ID, buildReplyNotification(context, conversationId, title, text))
+            }
         }
 
         /** 只清「新消息回复」这一条通知，不动 App 的其它通知 */
         fun clearReply(context: Context) {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.cancel(REPLY_NOTIF_ID)
+            runCatching {
+                nm.activeNotifications.filter { it.id == REPLY_NOTIF_ID }.forEach { nm.cancel(it.tag, it.id) }
+                nm.cancel(REPLY_NOTIF_ID)
+            }
         }
 
         /** 停止前台服务（其保活通知随之消失） */
@@ -135,13 +147,14 @@ class ReplyService : Service() {
                 .build()
         }
 
-        private fun buildReplyNotification(context: Context, title: String, text: String): Notification {
+        private fun buildReplyNotification(context: Context, conversationId: String, title: String, text: String): Notification {
             return Notification.Builder(context, CHANNEL_REPLY)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
                 .setContentTitle(title)
                 .setContentText(text.take(80))
                 .setStyle(Notification.BigTextStyle().bigText(text))
-                .setContentIntent(contentIntent(context))
+                .setContentIntent(contentIntent(context, conversationId))
+                .setOnlyAlertOnce(true)
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
                 .setPriority(Notification.PRIORITY_HIGH)
@@ -149,9 +162,13 @@ class ReplyService : Service() {
                 .build()
         }
 
-        private fun contentIntent(context: Context): PendingIntent {
+        private fun contentIntent(context: Context, conversationId: String? = null): PendingIntent {
             val intent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                if (conversationId != null) {
+                    data = Uri.Builder().scheme("freechat").authority("reply").appendPath(conversationId).build()
+                    putExtra(EXTRA_CONVERSATION_ID, conversationId)
+                }
             }
             return PendingIntent.getActivity(
                 context, 0, intent,

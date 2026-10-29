@@ -1,0 +1,52 @@
+package com.freechat.i18n
+
+private fun AppStrings.libraryText(zh: String, tw: String, en: String): String = when (localeCode) {
+    "en" -> en
+    "zh-TW" -> tw
+    else -> zh
+}
+
+internal val AppStrings.myCharacters get() = libraryText("我的角色", "我的角色", "My characters")
+internal val AppStrings.characterLibrary get() = libraryText("角色库", "角色庫", "Character library")
+internal val AppStrings.characterLibrarySummary get() = libraryText("管理角色卡与文件夹", "管理角色卡與資料夾", "Manage character cards and folders")
+internal val AppStrings.builtInCharacterPool get() = libraryText("内置角色池", "內建角色池", "Built-in characters")
+internal val AppStrings.builtInCharacterPoolComingSoon get() = libraryText("暂未开放，敬请期待...", "暫未開放，敬請期待...", "Not available yet. Stay tuned...")
+internal val AppStrings.libraryAdd get() = libraryText("添加", "加入", "Add")
+internal val AppStrings.libraryCreatedSource get() = libraryText("来源：创建时存入角色池", "來源：建立時存入角色池", "Source: saved directly to the library")
+internal val AppStrings.libraryImportedSource get() = libraryText("来源：从已有对话导入", "來源：從已有對話匯入", "Source: imported from an existing conversation")
+internal val AppStrings.createCharacterCard get() = libraryText("创建角色卡", "建立角色卡", "Create character card")
+internal val AppStrings.addExistingCharacter get() = libraryText("添加已有角色", "加入已有角色", "Add an existing character")
+internal val AppStrings.unclassifiedCharacters get() = libraryText("未分类", "未分類", "Unclassified")
+internal val AppStrings.characterFolders get() = libraryText("文件夹", "資料夾", "Folders")
+internal val AppStrings.characterLibraryEmpty get() = libraryText("还没有角色卡", "還沒有角色卡", "No character cards yet")
+internal val AppStrings.characterFolderEmpty get() = libraryText("此文件夹还没有角色", "此資料夾還沒有角色", "This folder is empty")
+internal val AppStrings.unclassifiedCharactersEmpty get() = libraryText("还没有未分类角色", "還沒有未分類角色", "No unclassified characters")
+internal val AppStrings.newCharacterFolder get() = libraryText("新建文件夹", "新增資料夾", "New folder")
+internal val AppStrings.characterFolderName get() = libraryText("文件夹名称", "資料夾名稱", "Folder name")
+internal val AppStrings.renameCharacterFolder get() = libraryText("重命名文件夹", "重新命名資料夾", "Rename folder")
+internal val AppStrings.deleteCharacterFolder get() = libraryText("删除文件夹", "刪除資料夾", "Delete folder")
+internal val AppStrings.deleteCharacterFolderMessage get() = libraryText("文件夹内的角色会移到未分类，不会删除角色。", "資料夾內的角色會移到未分類，不會刪除角色。", "Characters in this folder will move to Unclassified. The characters will be kept.")
+internal val AppStrings.moveCharacterCard get() = libraryText("移动到文件夹", "移動到資料夾", "Move to folder")
+internal val AppStrings.deleteCharacterCard get() = libraryText("删除角色卡", "刪除角色卡", "Delete character card")
+internal val AppStrings.deleteCharacterCardMessage get() = libraryText("只删除角色池中的卡片，已经建立的对话和群聊会保留。", "只刪除角色池中的卡片，已經建立的對話和群聊會保留。", "This deletes the library card. Existing conversations and groups will be kept.")
+internal val AppStrings.startCharacterChat get() = libraryText("开始对话", "開始對話", "Start chat")
+internal val AppStrings.storeInCharacterLibrary get() = libraryText("存入角色池", "存入角色池", "Store in library")
+internal val AppStrings.characterPersonaOnlyNote get() = libraryText("角色卡只保存人设。每段新对话会独立保存设置与记忆。", "角色卡只儲存人設。每段新對話會獨立儲存設定與記憶。", "Cards save the persona. Each new conversation keeps its own settings and memory.")
+internal val AppStrings.characterMemoryHint get() = libraryText("补充该角色的经历、背景与记忆（可选）", "補充該角色的經歷、背景與記憶（選填）", "This character's experiences, background and memories (optional)")
+internal val AppStrings.multiCharacterGroup get() = libraryText("多角色群聊", "多角色群聊", "Multi-character group")
+internal val AppStrings.multiCharacterGroupDesc get() = libraryText("从角色池选择 1–4 位角色，一起微信聊天", "從角色池選擇 1–4 位角色，一起微信聊天", "Choose 1–4 characters from your library for a group chat")
+internal val AppStrings.chooseGroupCharacters get() = libraryText("选择群聊角色", "選擇群聊角色", "Choose group characters")
+internal val AppStrings.selectCharacterFolder get() = libraryText("选择整个文件夹", "選擇整個資料夾", "Select the whole folder")
+internal val AppStrings.noExistingCharacters get() = libraryText("还没有可添加的已有角色", "還沒有可加入的已有角色", "No existing characters to add")
+internal val AppStrings.existingCharacterNote get() = libraryText("仅提取角色人设，不复制聊天记录、动态记忆或对话设置。", "僅擷取角色人設，不複製聊天記錄、動態記憶或對話設定。", "Only the persona is copied, without chat history, dynamic memory or conversation settings.")
+internal val AppStrings.characterAddedToLibrary get() = libraryText("已添加到角色池", "已加入角色池", "Added to the character library")
+internal val AppStrings.selectCharacterCards get() = libraryText("选择角色卡", "選擇角色卡", "Select character cards")
+internal val AppStrings.librarySelectionDone get() = libraryText("完成", "完成", "Done")
+internal val AppStrings.libraryClearSelection get() = libraryText("清空选择", "清空選取", "Clear selection")
+internal val AppStrings.deleteCharacterCards get() = libraryText("删除所选角色卡", "刪除所選角色卡", "Delete selected cards")
+
+internal fun AppStrings.characterCount(count: Int) = libraryText("$count 位角色", "$count 位角色", "$count characters")
+internal fun AppStrings.characterBatchSelectionCount(count: Int) = libraryText("已选 $count 位角色", "已選 $count 位角色", "$count characters selected")
+internal fun AppStrings.deleteCharacterCardsMessage(count: Int) = libraryText("确定删除所选的 $count 张角色卡？只删除角色池中的卡片，已经建立的对话和群聊会保留。", "確定刪除所選的 $count 張角色卡？只刪除角色池中的卡片，已經建立的對話和群聊會保留。", "Delete the $count selected library cards? Existing conversations and groups will be kept.")
+internal fun AppStrings.characterSelectionCount(count: Int, limit: Int) = libraryText("已选 $count / $limit 位角色", "已選 $count / $limit 位角色", "$count / $limit characters selected")
+internal fun AppStrings.characterSelectionLimit(limit: Int) = libraryText("最多选择 $limit 位角色。已保留原选择，请进入文件夹逐个选择。", "最多選擇 $limit 位角色。已保留原選擇，請進入資料夾逐個選擇。", "Choose up to $limit characters. Your selection was kept; open the folder to choose characters individually.")

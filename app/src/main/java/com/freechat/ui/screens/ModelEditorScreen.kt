@@ -45,6 +45,7 @@ import com.freechat.model.Provider
 import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.components.NeumorphicSwitch
 import com.freechat.ui.theme.FreeChatColors
+import com.freechat.ui.theme.FreeChatInputShape
 import com.freechat.ui.theme.HazeSpec
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
@@ -231,7 +232,8 @@ fun ModelEditorScreen(
                     .verticalScroll(com.freechat.ui.animation.rememberTopOnEntryScrollState())
                     // 2026-10-19 返修三进（图4→图5）：顶留白必须挪进滚动内容（关于页 A 同款病根）——
                     // 挂外层=滚动视口缩在标题栏下，上滑内容被视口顶缘硬裁、进不了模糊带（顶部糊不出残影）。
-                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp), bottom = 40.dp),
+                    .padding(top = if (isAdd) HazeSpec.topContentPaddingDp(statusBarHeightDp, 16.dp)
+                        else HazeSpec.newPageContentPaddingDp(statusBarHeightDp, 16.dp), bottom = 40.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
             // 2026-10-19 返修二进：头部占位必须在**滚动区内部**——挂在滚动区外时，表单被压到
@@ -679,8 +681,8 @@ private fun EditorField(
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = keyboardType),
             visualTransformation = if (isPassword) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
             modifier = Modifier.fillMaxWidth().then(if (advanced)
-                Modifier.editorSurface(colors, RoundedCornerShape(14.dp), recessed = true) else Modifier),
-            shape = RoundedCornerShape(14.dp),
+                Modifier.editorSurface(colors, FreeChatInputShape, recessed = true) else Modifier),
+            shape = FreeChatInputShape,
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = colors.TextPrimary,
                 unfocusedTextColor = colors.TextPrimary,

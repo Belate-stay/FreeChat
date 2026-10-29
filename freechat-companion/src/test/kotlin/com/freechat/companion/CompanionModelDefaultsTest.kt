@@ -17,6 +17,6 @@ class CompanionModelDefaultsTest {
 
     @Test fun searchFailureOrEmptyYieldsNoBlockAndNeverThrows() {
         // 锦上添花语义：任何失败返回空串，回复生成不受影响
-        assertEquals("", BrainSearch.infoBlock(""))
+        assertEquals("", kotlinx.coroutines.runBlocking { BrainSearch.infoBlock(com.freechat.data.SearchIntent(emptyList())) })
     }
 }

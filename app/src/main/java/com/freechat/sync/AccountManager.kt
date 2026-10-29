@@ -76,6 +76,8 @@ object AccountManager {
 
         // 先记住上一次是谁 —— 登出期间本地改动攒在 [Adapter] 里，同一个账号要接上
         val prevUserId = Session.peekSyncState()?.userId
+        com.freechat.data.CharacterLibraryStore.switchAccount(auth.userId)
+        Adapter.primeLibrarySnapshot()
         val state = Session.loadSyncState(auth.userId)
 
         if (prevUserId == auth.userId) {

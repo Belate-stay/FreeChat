@@ -127,7 +127,7 @@ fun VoiceDebugScreen(
                 .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                 .jellyOverscroll()
                 .verticalScroll(com.freechat.ui.animation.rememberTopOnEntryScrollState())
-                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeight), bottom = 32.dp)
+                .padding(top = HazeSpec.newPageContentPaddingDp(statusBarHeight), bottom = 32.dp)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {

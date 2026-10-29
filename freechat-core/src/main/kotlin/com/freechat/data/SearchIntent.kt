@@ -3,7 +3,7 @@ package com.freechat.data
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 
-/** 模型提供检索意图，而不是客户端把每一句话强制当搜索词。 */
+/** Shared optional search intent; private chat is not a search query by default. */
 data class SearchIntent(
     val queries: List<String>,
     val requiredGroups: List<List<String>> = emptyList(),

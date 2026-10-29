@@ -48,8 +48,21 @@ data class Message(
     /** The executed image prompt, so model changes and image follow-ups keep the same requirements. */
     val imagePrompt: String? = null,
     /** The retained source message actually used for an image edit; never retain deleted image bytes. */
-    val imageReferenceMessageId: String? = null
+    val imageReferenceMessageId: String? = null,
+    val groupMemberId: String? = null,
+    val groupSenderName: String? = null,
+    val groupSenderAvatar: String? = null,
+    val groupTurnId: String? = null,
+    val groupStepId: String? = null,
+    val groupTriggerMessageIds: List<String> = emptyList(),
+    val mentionedMemberIds: List<String> = emptyList(),
+    val groupMentions: List<GroupMention> = emptyList(),
+    val groupEventType: String? = null,
+    val groupTargetMemberId: String? = null
 )
+
+/** Persist the selected label as well as identity; historical highlights survive member renames. */
+data class GroupMention(val memberId: String, val label: String, val start: Int, val end: Int)
 
 data class SearchCitation(val title: String = "", val url: String = "")
 

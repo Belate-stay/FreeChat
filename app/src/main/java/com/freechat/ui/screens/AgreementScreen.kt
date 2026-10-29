@@ -73,7 +73,6 @@ fun AgreementScreen(onBack: () -> Unit) {
             // 协议正文整段整段地跟着语言包走（`**…**` 之间加粗，`· ` 开头当条目），
             // 这样三种语言各写各的，不用在代码里拼句子——拼出来的语序一定有一门是别扭的。
             // 1.1.0：页内不再重复大标题 —— 顶栏的「免责声明」就是唯一标题，正文直接上顺。
-            Spacer(Modifier.height(24.dp))
             s.agreementSections.forEach { section ->
                 AgreementSection(section.title, colors) {
                     section.paragraphs.forEach { p ->

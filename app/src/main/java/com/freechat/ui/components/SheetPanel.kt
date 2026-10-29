@@ -44,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -115,12 +116,22 @@ fun BoxScope.SheetPanel(
     maxContentHeight: androidx.compose.ui.unit.Dp = 420.dp,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    // 返回键先关弹层（声明得比页面自己的 BackHandler 晚，所以由它先接）
-    BackHandler(enabled = visible && com.freechat.ui.animation.LocalPageActive.current) { onDismiss() }
+    // 任何关闭路径都清返回闸的幽灵补按（2026-10-28 返修：380ms 内「按返回→点按钮关层」的补按落地=误退）
+    val dismissSheet: () -> Unit = {
+        com.freechat.ui.animation.BackGate.cancelPending()
+        onDismiss()
+    }
+    // 返回键先关弹层。key(visible)：弹层每次亮起都重新注册返回钩子——OnBackPressedDispatcher
+    // 后注册者先接，而页面级 BackHandler 会在文件夹切换等重组里重新注册抢回优先级
+    // （2026-10-28 返修：我的角色开详情卡按返回、背景却退回上一级）。亮起即重挂=弹层恒为第一返回点。
+    key(visible) {
+        BackHandler(enabled = visible && com.freechat.ui.animation.LocalPageActive.current) { dismissSheet() }
+    }
 
     val tablet = com.freechat.ui.adaptive.LocalTabletUi.current
     val shape = if (tablet) RoundedCornerShape(28.dp) else RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     val progress = materialProgress()
+    val displayedTitle = rememberSheetContent(title.takeIf { visible }) ?: title
     val lastConfirmLabel = remember { mutableStateOf(confirmLabel.orEmpty()) }
     SideEffect { if (confirmLabel != null) lastConfirmLabel.value = confirmLabel }
 
@@ -135,6 +146,9 @@ fun BoxScope.SheetPanel(
                 .fillMaxSize()
                 .then(
                     if (advancedMaterial) Modifier
+                        // Haze only records registered sources. Fixed toolbars outside those
+                        // sources still need an occluding base, otherwise their crisp text leaks through.
+                        .background(colors.Background)
                         // 衬底：流动炫彩下补不透明底 —— 整屏遮罩同理，源是透明的那层样本就磨不出东西，
                         // 遮罩只剩一点点罩色，背后正文依旧清清楚楚（见 liquidOpaqueBackground）
                         .liquidOpaqueBackground(colors.Background, strength = progress)
@@ -149,7 +163,7 @@ fun BoxScope.SheetPanel(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
-                ) { onDismiss() }
+                ) { dismissSheet() }
         )
     }
 
@@ -168,7 +182,11 @@ fun BoxScope.SheetPanel(
                 // Keep the entire shadow inside AnimatedVisibility's composited layer.
                 .padding(top = 18.dp)
                 .then(
-                    if (advancedMaterial) Modifier.frostedGlass(hazeState, isDark, shape, blur = 30.dp, elevation = 10.dp)
+                    if (advancedMaterial) Modifier.background(colors.Surface, shape)
+                        .frostedGlass(hazeState, isDark, shape, blur = 30.dp, elevation = 10.dp)
+                        // A matte face keeps strongly coloured controls behind the sheet from
+                        // reading as a second selected row, while retaining soft glass colour.
+                        .background(colors.Surface.copy(alpha = 0.90f))
                     else Modifier.background(colors.Surface, shape)
                 )
                 // 底部安全区 = max(导航栏, 键盘)。**必须用 safeDrawing 而不是 navigationBarsPadding**：
@@ -190,7 +208,7 @@ fun BoxScope.SheetPanel(
             )
             Spacer(Modifier.height(14.dp))
             Text(
-                title,
+                displayedTitle,
                 color = colors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.titleMedium
@@ -199,6 +217,7 @@ fun BoxScope.SheetPanel(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .weight(1f, fill = false)
                     .heightIn(max = maxContentHeight)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -216,20 +235,21 @@ fun BoxScope.SheetPanel(
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .height(40.dp)
+                                .heightIn(min = 40.dp)
                                 .clip(RoundedCornerShape(13.dp))
                                 .background(colors.Surface)
                                 .border(1.dp, colors.InputBorder, RoundedCornerShape(13.dp))
-                                .clickable { onDismiss() },
+                                .clickable { dismissSheet() },
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(cancelLabel, style = MaterialTheme.typography.bodyMedium,
+                            Text(cancelLabel, modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = colors.TextPrimary, fontWeight = FontWeight.Medium)
                         }
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .height(40.dp)
+                                .heightIn(min = 40.dp)
                                 .clip(RoundedCornerShape(13.dp))
                                 .background(
                                     (if (confirmDanger) colors.ErrorRed else colors.Primary)
@@ -238,7 +258,9 @@ fun BoxScope.SheetPanel(
                                 .clickable(enabled = confirmEnabled) { onConfirm?.invoke() },
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(confirmLabel ?: lastConfirmLabel.value, style = MaterialTheme.typography.bodyMedium,
+                            Text(confirmLabel ?: lastConfirmLabel.value,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = if (confirmDanger) readableForeground(colors.ErrorRed) else colors.OnPrimary,
                                 fontWeight = FontWeight.SemiBold)
                         }

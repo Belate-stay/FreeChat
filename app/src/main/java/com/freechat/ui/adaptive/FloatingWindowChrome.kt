@@ -22,6 +22,8 @@ internal class FloatingWindowState {
 
 internal val LocalFloatingWindow = staticCompositionLocalOf<FloatingWindowState?> { null }
 internal val LocalFloatingWindowRoot = staticCompositionLocalOf { false }
+/** Embedded tablet categories can also leave an unsaved form without pressing Back. */
+internal val LocalFormNavigationGuard = staticCompositionLocalOf<FloatingWindowState?> { null }
 
 /** One close target belongs to the window, not to its current nested page. */
 @Composable
@@ -38,7 +40,7 @@ internal fun BoxScope.FloatingWindowChrome(window: FloatingWindowState) {
 /** Guard the active form only; an outgoing animated page must not own the X callback. */
 @Composable
 internal fun FloatingWindowCloseHandler(onClose: (() -> Unit) -> Unit) {
-    val window = LocalFloatingWindow.current
+    val window = LocalFloatingWindow.current ?: LocalFormNavigationGuard.current
     val active = LocalPageActive.current
     val latest = rememberUpdatedState(onClose)
     DisposableEffect(window, active) {

@@ -7,17 +7,17 @@ import java.io.File
 /**
  * Beta 1.1.32/1.1.33 契约：①AI 思考灵感球——五颗彩核光粒子（亮核+重光晕+拖尾+前后穿行）
  * 加色环绕，无球缘无圆框（**浅色方片回归钉**：画布级蒙版必须在直角边缘前收到零）；
- * ②球径 30dp 三处调用点一致；③build.gradle.kts 版本号必须随工单升版（1.1.31 交付包里
- * 版本号停在 1.1.30X 的事故钉）；④导览页演示 1.1.33 形态：元素等比缩小（文本不缩）、
- * 底部输入条删除、节奏放慢+对话↔生图长顿、生成槽真管线不裁切。
+ * ②球径 30dp 一致（新导览经 ChatBubble 复用）；③build.gradle.kts 版本号必须随工单升版（1.1.31 交付包里
+ * 版本号停在 1.1.30X 的事故钉）；④导览页保持小卡可读、真实消息动画和思考状态，
+ * 现推荐群聊与多角色故事，故事正文经 ChatBubble 复用真实逐字显现。
  */
 class Beta1132Test {
     private fun source(path: String) = File("src/main/java/com/freechat/$path").readText()
 
     @Test fun versionMatchesWorkOrder() {
         val gradle = File("build.gradle.kts").readText()
-        assertTrue("versionCode 必须随交付升版", gradle.contains("versionCode = 259"))
-        assertTrue("versionName 必须是工单版本号（不带前缀，显示层拼 Version——1.2.0 先例）", gradle.contains("versionName = \"1.2.1\""))
+        assertTrue("versionCode 必须随交付升版", gradle.contains("versionCode = 280"))
+        assertTrue("versionName 必须是工单版本号；正式版不带前缀、显示层拼 Version——1.2.0 金标准", gradle.contains("versionName = \"1.2.3\""))
     }
 
     @Test fun releaseChangelogIsUserAuthored() {
@@ -42,28 +42,41 @@ class Beta1132Test {
     @Test fun orbIsSizedForVisibleParticles() {
         for (path in listOf(
             "ui/components/TypingIndicator.kt",
-            "ui/components/ChatBubble.kt",
-            "ui/components/FeatureRecPage.kt"
+            "ui/components/ChatBubble.kt"
         )) {
             val src = source(path)
             assertTrue("$path 必须用 30dp 球", src.contains("SiriOrb(") && src.contains("size(30.dp)"))
         }
+        val rec = source("ui/components/FeatureRecPage.kt")
+        assertTrue("导览通过真实消息组件使用相同思考球，不另造一份",
+            rec.contains("ChatBubble(") && rec.contains("isStreaming = pending") &&
+                rec.contains("generationLabel = if (pending)"))
     }
 
     @Test fun featureRecSmallCardForm() {
         val rec = source("ui/components/FeatureRecPage.kt")
-        assertTrue("生成槽走真组件生成→变形管线", rec.contains("fromGeneration = true"))
-        assertTrue("AI 正文逐字显现真组件", rec.contains("TypewriterText("))
-        assertTrue("成图不裁切（GeneratedImage 内走 Fit，演示不得再 Crop）", !rec.contains("ContentScale.Crop"))
+        val bubble = source("ui/components/ChatBubble.kt")
+        assertTrue("群聊消息与故事正文走真实组件",
+            rec.contains("ChatBubble(") && rec.contains("groupChat = demoGroup") && rec.contains("textFlow = story"))
+        assertTrue("故事正文经真实 ChatBubble 逐字显现并强调台词",
+            rec.contains("emphasizeDialogue = story") && bubble.contains("TypewriterText(") &&
+                bubble.contains("enabled = emphasizeDialogue && !message.isStreaming") && bubble.contains("if (textFlow)"))
+        assertTrue("不使用裁切图片代替真实组件", !rec.contains("ContentScale.Crop") && !rec.contains("R.drawable.feature_rec_scene"))
         assertTrue("底部输入条已删除", !rec.contains("FeatureRecComposer"))
-        assertTrue("生成槽等比缩小（0.72 行宽）", rec.contains("fillMaxWidth(0.72f)"))
-        assertTrue("菜单拟物风卡片+宽度随内容（文字恒一行）",
-            rec.contains("width(IntrinsicSize.Max)") && rec.contains("maxLines = 1"))
-        assertTrue("菜单仍从左下枢轴长出", rec.contains("menuEnter(TransformOrigin(0f, 1f))"))
-        assertTrue("节奏放慢+对话↔生图长顿 2.6s", rec.contains("2600"))
+        assertTrue("演示小卡保持宽度上限与现有磨砂材质",
+            rec.contains("widthIn(max = 420.dp)") &&
+                rec.contains("frostedCard(null, colors, advancedMaterial = false, RoundedCornerShape(22.dp))"))
+        assertTrue("消息入场仍用共享动画，文本不随卡片缩小",
+            rec.contains("rememberMessageEntrance(") && rec.contains("Modifier.messageEntrance(") &&
+                rec.contains("typography.bodyLarge") && !rec.contains("scaleX ="))
+        assertTrue("原生横滑分页，按钮翻页用共享动效，减动效直接显示完整内容",
+            rec.contains("HorizontalPager(") && rec.contains("animationSpec = FreeChatAnimation.pageTween") &&
+                rec.contains("if (!motionOn)") && rec.contains("playback.stage = DEMO_LAST_STAGE") &&
+                rec.contains("else pagerState.scrollToPage(1)"))
         // 1.2.0 返修：思考球旁带真机思考状态（连接模型→理解内容→拟草回复）1:1 同构
         assertTrue("思考状态 1:1 真机（labels 表+contentReplacement 逐级切换）",
-            rec.contains("generationPhaseLabels") && rec.contains("contentReplacement()") &&
-                rec.contains("GenerationPhase.UNDERSTANDING") && rec.contains("GenerationPhase.DRAFTING"))
+            rec.contains("generationPhaseLabels") && bubble.contains("contentReplacement()") &&
+                rec.contains("GenerationPhase.UNDERSTANDING") && rec.contains("GenerationPhase.DRAFTING") &&
+                bubble.contains("AnimatedContent(generationLabel") && bubble.contains("SiriOrb(Modifier.size(30.dp)"))
     }
 }

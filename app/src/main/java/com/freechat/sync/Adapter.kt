@@ -4,9 +4,11 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.freechat.data.AppJson
+import com.freechat.data.CharacterLibraryStore
 import com.freechat.data.LocalStore
 import com.freechat.data.PerConvStore
 import com.freechat.model.Conversation
+import com.freechat.model.CharacterLibraryState
 import com.freechat.model.PerConvSettings
 
 /**
@@ -47,6 +49,7 @@ object Adapter {
 
     /** 上一版的对话数组，用来 diff */
     private var convSnapshot: List<Conversation>? = null
+    private var librarySnapshot: CharacterLibraryState? = null
 
     /** 上一版的每对话设置（convId → 覆盖项），用来 diff —— 只有参与同步的那半变了才推 */
     private var perConvSnapshot: Map<String, PerConvSettings>? = null
@@ -75,6 +78,7 @@ object Adapter {
      *  - 其余（`custom_models` 明文 Key、草稿、图片…）压根不落在这几个文件里。
      */
     fun objectOfKey(key: String): Pair<String, String>? {
+        if (key.startsWith("freechat:img:")) return SyncKind.IMG to key.removePrefix("freechat:img:")
         val msgsPrefix = "freechat:msgs:"
         val memPrefix = "freechat:memory:"
         if (key.startsWith(msgsPrefix)) {
@@ -185,6 +189,21 @@ object Adapter {
         for (gone in prevMap.keys) mark(objKey(SyncKind.CONV, gone))
     }
 
+    private fun diffLibrary(next: CharacterLibraryState) {
+        val previous = synchronized(this) { librarySnapshot.also { librarySnapshot = next } } ?: return
+        val cards = previous.cards.associateBy { it.id }
+        val folders = previous.folders.associateBy { it.id }
+        for (card in next.cards) if (cards[card.id] != card) mark(objKey(SyncKind.CARD, card.id))
+        for (folder in next.folders) if (folders[folder.id] != folder) mark(objKey(SyncKind.CARDFOLDER, folder.id))
+        for (id in next.deletedCardIds - previous.deletedCardIds) mark(objKey(SyncKind.CARD, id))
+        for (id in next.deletedFolderIds - previous.deletedFolderIds) mark(objKey(SyncKind.CARDFOLDER, id))
+    }
+
+    fun primeLibrarySnapshot() {
+        val current = CharacterLibraryStore.snapshot()
+        synchronized(this) { librarySnapshot = current }
+    }
+
     /**
      * 每对话设置变了 —— 逐条比出**哪条对话的「新规则」变了**。
      *
@@ -227,7 +246,13 @@ object Adapter {
             if (started) return
             started = true
         }
+        primeLibrarySnapshot()
         LocalStore.setWriteListener { key ->
+            if (key == LocalStore.CHARACTER_LIBRARY_KEY) {
+                diffLibrary(CharacterLibraryStore.snapshot())
+                persistQueue()
+                return@setWriteListener
+            }
             if (key == LocalStore.CONVERSATIONS_KEY) {
                 // 对话数组：读回来跟上一版比出具体哪几条变了。
                 // 这里重读一次盘而不是让 LocalStore 把内容也传过来 —— 监听只该做「记一笔」
@@ -301,6 +326,9 @@ object Adapter {
         // 只数缓存文件（文件名自带指纹）；没有缓存的引用不进清单 ——
         // 推送侧对「缓存没了但还引用着」另有护栏，绝不会拿去立墓碑。
         for (h in ImageSync.localCacheHashes()) keys.add(objKey(SyncKind.IMG, h))
+        val library = CharacterLibraryStore.snapshot()
+        for (id in library.cards.map { it.id } + library.deletedCardIds) keys.add(objKey(SyncKind.CARD, id))
+        for (id in library.folders.map { it.id } + library.deletedFolderIds) keys.add(objKey(SyncKind.CARDFOLDER, id))
         return keys
     }
 
@@ -312,10 +340,11 @@ object Adapter {
      */
     fun markLocalEverything(conversations: List<Conversation>) {
         val per = PerConvStore.load()
+        val keys = localAllKeys(conversations)
         synchronized(this) {
             convSnapshot = conversations
             perConvSnapshot = per
-            dirty.addAll(localAllKeys(conversations))
+            dirty.addAll(keys)
         }
         persistQueue()
         notifyDirty()

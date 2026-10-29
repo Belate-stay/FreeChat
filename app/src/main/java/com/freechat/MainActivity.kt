@@ -1,5 +1,7 @@
 package com.freechat
 
+import com.freechat.i18n.storyMemberNote
+
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -83,6 +85,10 @@ import com.freechat.i18n.AppLanguage
 import com.freechat.i18n.LocalStrings
 import com.freechat.i18n.LocaleManager
 import com.freechat.i18n.buildStrings
+import com.freechat.i18n.myCharacters
+import com.freechat.i18n.characterAddedToLibrary
+import com.freechat.i18n.groupMemberPersonaNote
+import com.freechat.i18n.groupSettingLockedDuringReply
 import com.freechat.model.ThemeMode
 import com.freechat.model.TabletDisplayMode
 import com.freechat.model.TabletFloatingSide
@@ -94,6 +100,8 @@ import com.freechat.ui.components.NoticeDialog
 import com.freechat.ui.components.RemoteAlertDialog
 import com.freechat.ui.components.RemoteFullscreenNotice
 import com.freechat.ui.components.SheetPanel
+import com.freechat.ui.components.rememberSheetContent
+import com.freechat.ui.theme.FreeChatInputShape
 import com.freechat.model.ColorTheme
 import com.freechat.ui.screens.ChangelogScreen
 import com.freechat.ui.screens.FavoritesDetailScreen
@@ -104,6 +112,21 @@ import com.freechat.ui.screens.NewChatModeScreen
 import com.freechat.ui.screens.CharacterSetupScreen
 import com.freechat.model.ChatMode
 import com.freechat.model.CharacterProfile
+import com.freechat.model.CharacterPersona
+import com.freechat.model.GroupMember
+import com.freechat.model.GroupChatProfile
+import com.freechat.model.PerConvSettings
+import com.freechat.model.StoryProfile
+import com.freechat.model.StoryPolicy
+import com.freechat.ui.screens.StorySettingsScreen
+import com.freechat.model.GroupChatPolicy
+import com.freechat.data.CharacterLibraryStore
+import com.freechat.data.ModelSelectionResolver
+import com.freechat.ui.screens.CharacterLibraryScreen
+import com.freechat.ui.screens.CharacterPickerScreen
+import com.freechat.ui.screens.GroupSettingsScreen
+import com.freechat.ui.screens.GroupConversationSearchScreen
+import com.freechat.ui.screens.CharacterFolderDestinationSheet
 import com.freechat.model.Conversation
 import com.freechat.model.ModelInfo
 import com.freechat.model.ModelType
@@ -152,14 +175,29 @@ import kotlinx.coroutines.withTimeoutOrNull
 private enum class Screen(val motionDepth: Int) {
     CHAT(0), SETTINGS(1), VOICE_DEBUG(2), CHANGELOG(2), NEW_RULES(1), NEW_CHAT_MODE(1),
     CHARACTER_SETUP(2), LEARNING(2), MODEL_EDITOR(2), AGREEMENT(2), FAVORITES(1), FAVORITE_DETAIL(2), ACCOUNT(1),
-    AUTHOR_WORDS(2)
+    AUTHOR_WORDS(2), CHARACTER_LIBRARY(2), CHARACTER_PICKER(3), GROUP_SETTINGS(1), GROUP_SEARCH(2), STORY_SETUP(2)
 }
 
 private enum class TabletDestination { SETTINGS, FAVORITES, ACCOUNT, RULES, CHARACTER, CREATION, CHAT_MODEL }
 
 class MainActivity : ComponentActivity() {
+    private val replyDestination = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
+    // ===== 返回键逐级闸（1.2.2.6 工单④；10-28 返修：补按可被弹层取消）：一次返回只走一级 =====
+    // 转场窗内的连按记成「落地后再走一级」；被吞返回的弹层吞键/关闭时清补按（防幽灵返回退桌面）。
+    override fun onBackPressed() {
+        com.freechat.ui.animation.BackGate.pass { onBackPressedDispatcher.onBackPressed() }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra(ReplyService.EXTRA_CONVERSATION_ID)?.let { replyDestination.value = it }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        replyDestination.value = intent?.getStringExtra(ReplyService.EXTRA_CONVERSATION_ID)
         enableEdgeToEdge()
         // 语音磁盘缓存（2026-10-19）：合成过的语音落盘复用，点按秒播、不重复烧额度
         com.freechat.data.TtsController.attach(applicationContext)
@@ -174,8 +212,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // App 启动上报（1.1.21.4）：进软件就报一次到（登录与否都报）。
-        // 后台跑、失败静默——统计不能打扰使用。实现见 DevHooks。
+        // App 启动上报（1.1.21.4）：后台静默。实现见 DevHooks。
         lifecycleScope.launch {
             com.freechat.dev.DevHooks.onAppLaunch(applicationContext)
         }
@@ -204,14 +241,9 @@ class MainActivity : ComponentActivity() {
             DisposableEffect(Unit) {
                 val observer = LifecycleEventObserver { _, event ->
                     when (event) {
-                        Lifecycle.Event.ON_START -> {
-                            chatViewModel.onAppForegroundChanged(true)
-                            SyncEngine.syncSoon(0)
-                        }
-                        Lifecycle.Event.ON_STOP -> {
-                            chatViewModel.onAppForegroundChanged(false)
-                            SyncEngine.syncSoon(0)
-                        }
+                        Lifecycle.Event.ON_RESUME -> chatViewModel.onAppForegroundChanged(true)
+                        Lifecycle.Event.ON_PAUSE -> chatViewModel.onAppForegroundChanged(false)
+                        Lifecycle.Event.ON_START, Lifecycle.Event.ON_STOP -> SyncEngine.syncSoon(0)
                         else -> {}
                     }
                 }
@@ -260,6 +292,7 @@ class MainActivity : ComponentActivity() {
             }
             val appEntered = hasAgreedTerms == true && !forceAgreementGate
             val conversations by chatViewModel.conversations.collectAsState()
+            val notificationConversationId by replyDestination.collectAsState()
             val currentConvId by chatViewModel.currentConversationId.collectAsState()
             val searchQuery by chatViewModel.searchQuery.collectAsState()
             val searchResults by chatViewModel.searchResults.collectAsState()
@@ -320,10 +353,25 @@ class MainActivity : ComponentActivity() {
             var currentScreen by remember { mutableStateOf(Screen.CHAT) }
             var tabletNavigationBack by remember { mutableStateOf(false) }
             var tabletWorkspaceArrival by remember { mutableIntStateOf(0) }
+            // 1.2.2.6 工单④：新功能页滚动记忆（key=页面名）——二级页往返「返回到点进二级页面的位置」；
+            // 进大页面（navigateTo）清 key=统一回顶部，返回（navigateBack）不清。
+            val newPageScrolls = remember { mutableMapOf<String, Int>() }
+            // 1.2.2.6 工单④：选人页文件夹层级同款提升（角色库的 characterLibraryFolderId 同款先例）——
+            // 确认进群设置/故事设置再返回，还在原来的文件夹里，不跳回根页。
+            var pickerFolderId by remember { mutableStateOf<String?>(null) }
             fun navigateTo(screen: Screen) {
                 if (screen == Screen.CHAT && currentScreen in setOf(Screen.SETTINGS, Screen.VOICE_DEBUG,
                         Screen.CHANGELOG, Screen.AGREEMENT, Screen.AUTHOR_WORDS, Screen.FAVORITES, Screen.FAVORITE_DETAIL)) {
                     tabletWorkspaceArrival++
+                }
+                // 工单④「退出大页面再进大页面一律回顶部」：前向进入清掉该页的滚动/文件夹记忆
+                //（角色库文件夹在 onOpenCharacterLibrary 入口清，同款口径）。
+                when (screen) {
+                    Screen.CHARACTER_LIBRARY -> newPageScrolls.remove("library")
+                    Screen.CHARACTER_PICKER -> { pickerFolderId = null; newPageScrolls.remove("picker") }
+                    Screen.GROUP_SETTINGS -> newPageScrolls.remove("groupSettings")
+                    Screen.STORY_SETUP -> newPageScrolls.remove("storySetup")
+                    else -> {}
                 }
                 tabletNavigationBack = false
                 currentScreen = screen
@@ -459,10 +507,57 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // ──── 新对话过渡动画 ────
-            var newChatRevealTrigger by remember { mutableIntStateOf(0) }
             var characterSetupInitial by remember { mutableStateOf<CharacterProfile?>(null) }
             var characterSetupConversationId by remember { mutableStateOf<String?>(null) }
+            var characterEditorKey by remember { mutableIntStateOf(0) }
+            var characterEditorCardId by remember { mutableStateOf<String?>(null) }
+            var characterEditorMemberId by remember { mutableStateOf<String?>(null) }
+            var characterEditorFolderId by remember { mutableStateOf<String?>(null) }
+            var characterLibraryFolderId by remember { mutableStateOf<String?>(null) }
+            val backFromCharacterLibrary: () -> Unit = {
+                if (characterLibraryFolderId != null) characterLibraryFolderId = null
+                else navigateBack(Screen.SETTINGS)
+            }
+            var characterPersonaOnly by remember { mutableStateOf(false) }
+            var characterCreatingNew by remember { mutableStateOf(false) }
+            var characterEditorBack by remember { mutableStateOf(Screen.NEW_CHAT_MODE) }
+            var groupSettingsId by remember { mutableStateOf<String?>(null) }
+            var groupDraft by remember { mutableStateOf(GroupChatProfile()) }
+            var groupDraftTitle by remember { mutableStateOf("") }
+            var groupDraftSettings by remember { mutableStateOf(PerConvSettings()) }
+            var groupPickerBack by remember { mutableStateOf(Screen.NEW_CHAT_MODE) }
+            var storyPicker by remember { mutableStateOf(false) }
+            var storySetupId by remember { mutableStateOf<String?>(null) }
+            var storyDraft by remember { mutableStateOf(StoryProfile()) }
+            var storyOriginal by remember { mutableStateOf(StoryProfile()) }
+            var storyTitle by remember { mutableStateOf("") }
+            var storyOriginalTitle by remember { mutableStateOf("") }
+            var groupPickerAddTo by remember { mutableStateOf<String?>(null) }
+            val backFromGroupSettings: () -> Unit = {
+                if (groupSettingsId == null) {
+                    groupPickerBack = Screen.NEW_CHAT_MODE
+                    navigateBack(Screen.CHARACTER_PICKER)
+                } else navigateBack(Screen.CHAT)
+            }
+            var poolSaveProfile by remember { mutableStateOf<CharacterProfile?>(null) }
+            var poolSaveEditorKey by remember { mutableIntStateOf(-1) }
+            val characterLibrary by CharacterLibraryStore.state.collectAsState()
+            fun openCharacterEditor(profile: CharacterProfile?, conversationId: String? = null,
+                cardId: String? = null, memberId: String? = null, folderId: String? = null,
+                personaOnly: Boolean = false, creatingNew: Boolean = false, back: Screen = Screen.CHAT) {
+                poolSaveProfile = null
+                poolSaveEditorKey = -1
+                characterSetupInitial = profile
+                characterSetupConversationId = conversationId
+                characterEditorCardId = cardId
+                characterEditorMemberId = memberId
+                characterEditorFolderId = folderId
+                characterPersonaOnly = personaOnly
+                characterCreatingNew = creatingNew
+                characterEditorBack = back
+                characterEditorKey++
+                navigateTo(Screen.CHARACTER_SETUP)
+            }
             var rulesConversationId by remember { mutableStateOf<String?>(null) }
             val busyConversationIds by chatViewModel.busyConversationIds.collectAsState()
             var learningUpdating by remember { mutableStateOf(false) }
@@ -473,13 +568,34 @@ class MainActivity : ComponentActivity() {
             var accountFromChat by remember { mutableStateOf(false) }
             var favoriteDetailItem by remember { mutableStateOf<FavoriteItem?>(null) }
             val floatingWindow = remember { FloatingWindowState() }
+            LaunchedEffect(currentScreen) {
+                if (currentScreen !in setOf(Screen.CHARACTER_SETUP, Screen.LEARNING)) {
+                    poolSaveProfile = null
+                    poolSaveEditorKey = -1
+                }
+            }
             fun floatingBaseTouchable() = isTablet && tabletUnderlyingTouch &&
                 tabletDisplayMode == TabletDisplayMode.FLOATING &&
                 currentScreen !in setOf(Screen.CHAT, Screen.NEW_CHAT_MODE, Screen.LEARNING) &&
-                (currentScreen != Screen.CHARACTER_SETUP || characterSetupInitial != null)
+                (currentScreen != Screen.CHARACTER_SETUP || characterPersonaOnly || !characterCreatingNew)
             fun requestBaseNavigation(action: () -> Unit) {
                 val guardedAction = { if (chatViewModel.editingPromptId.value == null) action() }
                 if (floatingBaseTouchable()) floatingWindow.requestNavigation(guardedAction) else guardedAction()
+            }
+
+            LaunchedEffect(notificationConversationId, conversations, currentScreen) {
+                val id = notificationConversationId ?: return@LaunchedEffect
+                // Finish editing/learning before applying an external navigation request.
+                if (currentScreen in setOf(Screen.LEARNING, Screen.CHARACTER_SETUP, Screen.MODEL_EDITOR, Screen.STORY_SETUP, Screen.GROUP_SETTINGS)) return@LaunchedEffect
+                if (com.freechat.data.ConversationDeletion.contains(id)) { replyDestination.value = null; return@LaunchedEffect }
+                val target = conversations.find { it.id == id } ?: return@LaunchedEffect
+                replyDestination.value = null
+                requestBaseNavigation {
+                    chatViewModel.switchToConversation(target)
+                    drawerOpen = false
+                    if (isTablet) tabletChatArrival++
+                    navigateTo(Screen.CHAT)
+                }
             }
 
             // ──── 侧滑页那三个对话弹层（重命名 / 删除 / 批量删除）────
@@ -533,12 +649,16 @@ class MainActivity : ComponentActivity() {
                 if (!appEntered) return@LaunchedEffect
                 // 先等云配一轮（拉失败也会上来=空图，届时按本地默认），防云里停用了还先弹
                 if (!remoteConfigLoaded) withTimeoutOrNull(3000) { chatViewModel.remoteConfigLoaded.first { it } }
-                if (reserved["builtin-feature"]?.enabled != false) {
+                // 云控启停+版本区间（2026-10-27 修）：云单里有 builtin-feature = 「启用 && 版本
+                // 在区间」才弹；false（停用/区间外）= 不弹；null（云单没这条/没拉到）= 回落本地默认。
+                if (com.freechat.data.RemoteNotices.reservedActive(reserved["builtin-feature"], com.freechat.BuildConfig.VERSION_NAME) != false) {
                     val prefs = getSharedPreferences("feature_rec", android.content.Context.MODE_PRIVATE)
                     if (com.freechat.dev.DevMode.testFeatureRec(this@MainActivity) ||
                         prefs.getInt("last_shown", 0) < com.freechat.BuildConfig.VERSION_CODE
                     ) {
                         kotlinx.coroutines.delay(700)
+                        // 2026-10-28 返修：一次只弹一个——启动提醒在场就让位（last_shown 没记账，下次进入再弹）
+                        if (noticePicked != null) return@LaunchedEffect
                         featureRecVisible = true
                     }
                 }
@@ -572,11 +692,13 @@ class MainActivity : ComponentActivity() {
             // alert=非强制可拒绝（NoticeDialog 同款）；fullscreen=强制全屏看完必选（导览同款）。
             val remoteNotices by chatViewModel.remoteNotices.collectAsState()
             var remoteShownIndex by remember { mutableStateOf(0) }
+            // 2026-10-28 返修：同一条 notice 只记一次账——被推荐页短暂让位再回来不重发 impression/重记 markShown
+            val remoteReported = remember { mutableSetOf<String>() }
             val remoteCurrent = if (appEntered && !featureRecVisible && noticePick == null &&
                 remoteShownIndex < remoteNotices.size
             ) remoteNotices[remoteShownIndex] else null
             LaunchedEffect(remoteCurrent?.id) {
-                remoteCurrent?.let { chatViewModel.onRemoteNoticeShown(it.id) }
+                remoteCurrent?.let { if (remoteReported.add(it.id)) chatViewModel.onRemoteNoticeShown(it.id) }
             }
             // 弹窗按钮动作执行器（2026-10-19）：关闭/打开链接/跳转页面（设置、模型选择、关于、
             // 更新日志、侧滑页等）。内置弹窗与自定义弹窗共用同一套动作语义。
@@ -630,8 +752,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            BackHandler(enabled = currentScreen == Screen.LEARNING ||
+                (currentScreen == Screen.CHAT && !drawerOpen && !multiSelect.active && chatViewModel.hasAnyActiveGeneration())) {
+                moveTaskToBack(true)
+            }
+
             // 返回键导航栈
-            BackHandler(enabled = currentScreen == Screen.SETTINGS || currentScreen == Screen.VOICE_DEBUG || currentScreen == Screen.CHANGELOG || currentScreen == Screen.NEW_RULES || currentScreen == Screen.NEW_CHAT_MODE || currentScreen == Screen.CHARACTER_SETUP || currentScreen == Screen.MODEL_EDITOR || currentScreen == Screen.AGREEMENT || currentScreen == Screen.AUTHOR_WORDS || currentScreen == Screen.FAVORITES || currentScreen == Screen.FAVORITE_DETAIL || currentScreen == Screen.ACCOUNT || drawerOpen || (currentScreen == Screen.CHAT && multiSelect.active)) {
+            BackHandler(enabled = (currentScreen != Screen.CHAT && currentScreen != Screen.LEARNING &&
+                currentScreen != Screen.CHARACTER_PICKER) || drawerOpen || (currentScreen == Screen.CHAT && multiSelect.active)) {
                 when {
                     currentScreen == Screen.VOICE_DEBUG -> {
                         navigateBack(Screen.SETTINGS)
@@ -647,8 +775,12 @@ class MainActivity : ComponentActivity() {
                     }
                     currentScreen == Screen.CHARACTER_SETUP -> {
                         chatViewModel.clearShareDraft() // 放弃创建：暂存的分享包内容不留到下个角色
-                        navigateBack(if (characterSetupInitial != null) Screen.CHAT else Screen.NEW_CHAT_MODE)
+                        navigateBack(characterEditorBack)
                     }
+                    currentScreen == Screen.CHARACTER_LIBRARY -> backFromCharacterLibrary()
+                    currentScreen == Screen.GROUP_SETTINGS -> backFromGroupSettings()
+                    currentScreen == Screen.STORY_SETUP -> navigateBack(if (storySetupId == null) Screen.CHARACTER_PICKER else Screen.CHAT)
+                    currentScreen == Screen.GROUP_SEARCH -> navigateBack(Screen.GROUP_SETTINGS)
                     currentScreen == Screen.NEW_CHAT_MODE -> {
                         navigateBack(Screen.CHAT)
                     }
@@ -681,7 +813,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             // Learning is an exclusive task, on phones and tablets. No Back-to-chat escape.
-            BackHandler(enabled = currentScreen == Screen.LEARNING) { }
+            BackHandler(enabled = currentScreen == Screen.LEARNING) { moveTaskToBack(true) }
 
             // 观察语言设置变化
             val appLanguage by chatViewModel.appLanguage.collectAsState()
@@ -696,8 +828,7 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(appEntered) {
                 if (!appEntered) return@LaunchedEffect
                 chatViewModel.onAppEntered()
-                // 非开源弹窗测试接线（1.1.26.2）：测试态强制弹，不论真实条件；
-                // 测试弹窗不写「永不提醒/3 天冷却」，正常检测与弹出一字不动。
+                // 非开源弹窗测试接线（1.1.26.2）：测试态专用，正常检测与弹出一字不动。
                 if (com.freechat.dev.DevMode.testUpdate(this@MainActivity)) chatViewModel.forceUpdateNotice()
                 if (com.freechat.dev.DevMode.testCopy(this@MainActivity)) chatViewModel.forceCopyNotice()
             }
@@ -746,6 +877,15 @@ class MainActivity : ComponentActivity() {
                         tabletNavigationOrigin = TabletPane.LIST
                         paneControls?.showDetail?.invoke()
                         drawerOpen = false; navigateTo(Screen.NEW_CHAT_MODE)
+                        }
+                    },
+                    onNewCharacter = {
+                        requestBaseNavigation {
+                            chatViewModel.clearShareDraft()
+                            tabletNavigationOrigin = TabletPane.LIST
+                            paneControls?.showDetail?.invoke()
+                            drawerOpen = false
+                            openCharacterEditor(null, personaOnly = true, creatingNew = true, back = Screen.CHAT)
                         }
                     },
                     onSelectConversation = selectConversation@{ conv ->
@@ -800,7 +940,8 @@ class MainActivity : ComponentActivity() {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("FreeChat", Modifier.weight(1f), color = colors.TextPrimary,
-                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+                        fontFamily = Aurora, fontSize = 27.sp, letterSpacing = 2.sp)
                     PaneExpandButton()
                 }
                 }
@@ -917,6 +1058,47 @@ class MainActivity : ComponentActivity() {
                             // 当 pendingRevealScreen != null 时，先播圆形展开动画，再真正切换 screen
                             val effectiveScreen = pendingRevealScreen ?: currentScreen
     
+    fun storePersona(profile: CharacterProfile, folderId: String?) {
+        val cardId = characterEditorCardId
+        val old = cardId?.let { id -> CharacterLibraryStore.state.value.cards.find { it.id == id } }
+        if (cardId != null && old == null) {
+            android.widget.Toast.makeText(this@MainActivity, "角色卡已被删除，请返回角色池查看。", android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
+        val persona = CharacterPersona.from(profile)
+        chatViewModel.clearShareDraft()
+        learningUpdating = old != null
+        navigateTo(Screen.LEARNING)
+        coroutineScope.launch {
+            val started = System.currentTimeMillis()
+            val learned = if (old != null) chatViewModel.regenerateLibraryPersona(old.persona, persona)
+                else if (persona.personaPrompt.isNotBlank()) persona else chatViewModel.generateLibraryPersona(persona)
+            delay((1500L - (System.currentTimeMillis() - started)).coerceAtLeast(0L))
+            if (learned.personaPrompt.isBlank()) {
+                android.widget.Toast.makeText(this@MainActivity, currentStrings.roleLearningRejected, android.widget.Toast.LENGTH_LONG).show()
+                navigateBack(Screen.CHARACTER_SETUP)
+            } else {
+                val saved = runCatching {
+                    com.freechat.data.LocalStore.locked {
+                        if (cardId != null) {
+                            val latest = CharacterLibraryStore.state.value.cards.find { it.id == cardId }
+                            check(latest != null) { "Character card was deleted" }
+                            check(CharacterLibraryStore.update(latest.copy(persona = learned)))
+                        } else CharacterLibraryStore.add(learned, folderId)
+                    }
+                }
+                if (saved.isSuccess) {
+                    android.widget.Toast.makeText(this@MainActivity, currentStrings.characterAddedToLibrary, android.widget.Toast.LENGTH_SHORT).show()
+                    characterLibraryFolderId = folderId
+                    navigateBack(Screen.CHARACTER_LIBRARY)
+                } else {
+                    android.widget.Toast.makeText(this@MainActivity, "保存失败，请重试", android.widget.Toast.LENGTH_LONG).show()
+                    navigateBack(Screen.CHARACTER_SETUP)
+                }
+            }
+        }
+    }
+
     lateinit var screenContent: @Composable (Screen) -> Unit
     screenContent = { screen ->
         val paneControls = LocalPaneControls.current
@@ -953,20 +1135,6 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 },
-                revealTrigger = newChatRevealTrigger,
-                onRevealComplete = { newChatRevealTrigger = 0 },
-                onNewChatReveal = { _ ->
-                    if (canNavigateFromChat()) newChatRevealTrigger++
-                },
-                onNewChat = {
-                    if (canNavigateFromChat()) {
-                        requestBaseNavigation {
-                        tabletNavigationOrigin = TabletPane.DETAIL
-                        paneControls?.showDetail?.invoke()
-                        newChatRevealTrigger = 0; navigateTo(Screen.NEW_CHAT_MODE)
-                        }
-                    }
-                },
                 onOpenCharacterSetup = {
                     if (canNavigateFromChat()) {
                         val requestedConversationId = currentConvId
@@ -976,10 +1144,8 @@ class MainActivity : ComponentActivity() {
                             it.id == requestedConversationId
                         }) return@requestBaseNavigation
                         tabletNavigationOrigin = TabletPane.DETAIL
-                        characterSetupInitial = requestedProfile
-                        characterSetupConversationId = requestedConversationId
                         paneControls?.showDetail?.invoke()
-                        navigateTo(Screen.CHARACTER_SETUP)
+                        openCharacterEditor(requestedProfile, conversationId = requestedConversationId)
                         }
                     }
                 },
@@ -989,8 +1155,8 @@ class MainActivity : ComponentActivity() {
                 canInteract = {
                     currentScreen != Screen.LEARNING && (currentScreen == Screen.CHAT || floatingBaseTouchable() ||
                         (isTablet && tabletDisplayMode == TabletDisplayMode.EMBEDDED &&
-                            (currentScreen == Screen.NEW_RULES ||
-                                (currentScreen == Screen.CHARACTER_SETUP && characterSetupInitial != null))))
+                            (currentScreen in setOf(Screen.NEW_RULES, Screen.GROUP_SETTINGS, Screen.GROUP_SEARCH, Screen.STORY_SETUP) ||
+                                (currentScreen == Screen.CHARACTER_SETUP && !characterCreatingNew && characterSetupInitial != null))))
                 },
                 onOpenAsrEditor = {
                     if (canNavigateFromChat()) {
@@ -1011,11 +1177,35 @@ class MainActivity : ComponentActivity() {
                     navigateTo(Screen.ACCOUNT)
                     }
                     }
-                }
+                },
+                onOpenStorySettings = {
+                    if (canNavigateFromChat()) requestBaseNavigation {
+                        conversations.find { it.id == currentConvId }?.let { conv -> conv.storyProfile?.let { story ->
+                            storySetupId = conv.id; storyDraft = story; storyOriginal = story
+                            storyTitle = conv.title; storyOriginalTitle = conv.title
+                            tabletNavigationOrigin = TabletPane.DETAIL
+                            navigateTo(Screen.STORY_SETUP)
+                        } }
+                    }
+                },
+                onOpenGroupSettings = {
+                    if (canNavigateFromChat()) {
+                        val requestedId = currentConvId
+                        requestBaseNavigation {
+                            if (conversations.any { it.id == requestedId && it.groupChat != null }) {
+                                groupSettingsId = requestedId
+                                tabletNavigationOrigin = TabletPane.DETAIL
+                                navigateTo(Screen.GROUP_SETTINGS)
+                            }
+                        }
+                    }
+                },
             )
             Screen.SETTINGS -> {
             val tabletDetail = if (LocalTabletUi.current) currentScreen.takeIf {
-                it in setOf(Screen.VOICE_DEBUG, Screen.CHANGELOG, Screen.AGREEMENT, Screen.AUTHOR_WORDS) ||
+                it in setOf(Screen.VOICE_DEBUG, Screen.CHANGELOG, Screen.AGREEMENT, Screen.AUTHOR_WORDS,
+                    Screen.CHARACTER_LIBRARY, Screen.CHARACTER_PICKER) ||
+                    (it == Screen.CHARACTER_SETUP && characterEditorBack == Screen.CHARACTER_LIBRARY) ||
                     (it == Screen.MODEL_EDITOR && !modelEditorFromChat)
             } else null
             SettingsScreen(
@@ -1060,6 +1250,12 @@ class MainActivity : ComponentActivity() {
                 tabletDetailBack = tabletNavigationBack,
                 tabletDetailContent = tabletDetail?.let { detail -> { screenContent(detail) } },
                 onTabletCategorySelected = { navigateTo(Screen.SETTINGS) },
+                onOpenCharacterLibrary = {
+                    characterLibraryFolderId = null
+                    tabletNavigationOrigin = TabletPane.LIST
+                    navigateTo(Screen.CHARACTER_LIBRARY)
+                },
+                onRequestTabletNavigation = { action -> floatingWindow.requestNavigation(action) },
             )
             }
             // 返回回侧栏（跟收藏一致）—— 账号入口在抽屉里，不在了设置页；
@@ -1124,6 +1320,7 @@ class MainActivity : ComponentActivity() {
             ) }
             Screen.NEW_CHAT_MODE -> NewChatModeScreen(
                 isDark = isDark,
+                enlargedDisplay = fontSize.scale > 1f,
                 onBack = { navigateBack(Screen.CHAT) },
                 onSelectStandard = {
                     chatViewModel.newConversation(ChatMode.STANDARD, null)
@@ -1131,21 +1328,35 @@ class MainActivity : ComponentActivity() {
                     navigateTo(Screen.CHAT)
                 },
                 onSelectCompanion = {
-                    characterSetupInitial = null
-                    characterSetupConversationId = null
-                    navigateTo(Screen.CHARACTER_SETUP)
+                    openCharacterEditor(null, creatingNew = true, back = Screen.NEW_CHAT_MODE)
+                },
+                onSelectGroup = {
+                    groupDraft = GroupChatProfile(); groupDraftTitle = ""; groupDraftSettings = PerConvSettings()
+                    groupSettingsId = null
+                    storyPicker = false; groupPickerAddTo = null; groupPickerBack = Screen.NEW_CHAT_MODE
+                    navigateTo(Screen.CHARACTER_PICKER)
+                },
+                onSelectStory = {
+                    storyPicker = true; groupPickerAddTo = null; groupPickerBack = Screen.NEW_CHAT_MODE
+                    navigateTo(Screen.CHARACTER_PICKER)
                 }
             )
-            Screen.CHARACTER_SETUP -> key(characterSetupConversationId) { CharacterSetupScreen(
+            Screen.CHARACTER_SETUP -> key(characterEditorKey) {
+                val characterSetupHaze = dev.chrisbanes.haze.rememberHazeState()
+                CharacterSetupScreen(
                 viewModel = chatViewModel,
+                hazeState = characterSetupHaze,
                 isDark = isDark,
                 conversationId = characterSetupConversationId,
                 onBack = {
                     chatViewModel.clearShareDraft() // 放弃创建：暂存的分享包内容不留到下个角色
-                    navigateBack(if (characterSetupInitial != null) Screen.CHAT else Screen.NEW_CHAT_MODE)
+                    navigateBack(characterEditorBack)
                 },
                 onCreate = { profile ->
-                    if (characterSetupInitial != null) {
+                    if (characterPersonaOnly) {
+                        openCharacterEditor(CharacterPersona.from(profile).toProfile(), creatingNew = true,
+                            back = Screen.CHARACTER_LIBRARY)
+                    } else if (characterSetupInitial != null && !characterCreatingNew) {
                         val targetId = characterSetupConversationId
                         if (targetId == null || chatViewModel.isConversationBusy(targetId)) return@CharacterSetupScreen
                         val oldProfile = characterSetupInitial!!
@@ -1178,7 +1389,10 @@ class MainActivity : ComponentActivity() {
                         navigateTo(Screen.LEARNING)
                         coroutineScope.launch {
                             val start = System.currentTimeMillis()
-                            val enriched = if (profile.personaPrompt.isNotBlank()) {
+                            val original = characterSetupInitial
+                            val enriched = if (original != null && com.freechat.data.CharacterSavePolicy.hasPersonaChanges(original, profile)) {
+                                chatViewModel.regeneratePersona(original, profile)
+                            } else if (profile.personaPrompt.isNotBlank()) {
                                 // 导入的角色已带完整人设提示词：原样使用，不重新学习生成
                                 profile
                             } else {
@@ -1214,7 +1428,192 @@ class MainActivity : ComponentActivity() {
                 },
                 isSavingBlocked = characterSetupConversationId in busyConversationIds,
                 canSubmit = { !chatViewModel.isConversationBusy(characterSetupConversationId) },
-            ) }
+                personaOnly = characterPersonaOnly,
+                personaOnlyNote = (if (characterEditorBack == Screen.STORY_SETUP) currentStrings.storyMemberNote else currentStrings.groupMemberPersonaNote).takeIf { characterEditorMemberId != null },
+                creatingNew = characterCreatingNew,
+                startInEditMode = characterEditorCardId != null,
+                onStoreInPool = { profile ->
+                    val memberId = characterEditorMemberId
+                    val targetId = characterSetupConversationId
+                    if (memberId != null && (targetId != null || characterEditorBack == Screen.STORY_SETUP ||
+                            characterEditorBack == Screen.GROUP_SETTINGS && groupSettingsId == null)) {
+                        if (!chatViewModel.isConversationBusy(targetId)) {
+                            val old = characterSetupInitial?.let(CharacterPersona::from)
+                            if (old != null) {
+                                learningUpdating = true
+                                navigateTo(Screen.LEARNING)
+                                coroutineScope.launch {
+                                    val learned = chatViewModel.regenerateLibraryPersona(old, CharacterPersona.from(profile), targetId)
+                                    val saved = if (characterEditorBack == Screen.STORY_SETUP) {
+                                        if (learned.personaPrompt.isBlank() || chatViewModel.isConversationBusy(storySetupId)) false
+                                        else { storyDraft = storyDraft.copy(members = storyDraft.members.map {
+                                            if (it.id == memberId) it.copy(persona = learned) else it }); true }
+                                    } else if (characterEditorBack == Screen.GROUP_SETTINGS && targetId == null) {
+                                        if (learned.personaPrompt.isBlank()) false
+                                        else { groupDraft = groupDraft.copy(members = groupDraft.members.map {
+                                            if (it.id == memberId) it.copy(persona = learned) else it }); true }
+                                    } else targetId != null && learned.personaPrompt.isNotBlank() && chatViewModel.updateGroupMember(targetId, memberId, learned)
+                                    if (saved) navigateBack(characterEditorBack)
+                                    else {
+                                        android.widget.Toast.makeText(this@MainActivity, currentStrings.roleLearningRejected, android.widget.Toast.LENGTH_LONG).show()
+                                        navigateBack(Screen.CHARACTER_SETUP)
+                                    }
+                                }
+                            }
+                        }
+                    } else if (characterEditorCardId != null) storePersona(profile, characterEditorFolderId)
+                    else { poolSaveEditorKey = characterEditorKey; poolSaveProfile = profile }
+                },
+
+            )
+                CharacterFolderDestinationSheet(visible = poolSaveProfile != null && poolSaveEditorKey == characterEditorKey,
+                    initialFolderId = characterEditorFolderId, isDark = isDark, hazeState = characterSetupHaze,
+                    onDismiss = { poolSaveProfile = null }, onConfirm = { folder ->
+                        poolSaveProfile?.takeIf { poolSaveEditorKey == characterEditorKey }?.let { profile ->
+                            poolSaveProfile = null; poolSaveEditorKey = -1; storePersona(profile, folder) }
+                    })
+            }
+            Screen.CHARACTER_LIBRARY -> CharacterLibraryScreen(isDark, conversations,
+                selectedFolderId = characterLibraryFolderId,
+                onSelectFolder = { characterLibraryFolderId = it },
+                scrollMemory = newPageScrolls,
+                onEditCard = { id ->
+                    CharacterLibraryStore.state.value.cards.find { it.id == id }?.let { card ->
+                        openCharacterEditor(card.persona.toProfile(), cardId = card.id, folderId = card.folderId,
+                            personaOnly = true, back = Screen.CHARACTER_LIBRARY)
+                    }
+                },
+                onStartChat = { card ->
+                    if (card.canStartConversation) openCharacterEditor(card.persona.toProfile(), creatingNew = true,
+                        back = Screen.CHARACTER_LIBRARY)
+                },
+                onBack = backFromCharacterLibrary)
+            Screen.CHARACTER_PICKER -> {
+                val targetId = groupPickerAddTo
+                val existingGroup = conversations.find { it.id == targetId }?.groupChat
+                CharacterPickerScreen(isDark,
+                    initialSelectedIds = if (!storyPicker && targetId == null) groupDraft.members.map { it.sourceCardId }.toSet() else emptySet(),
+                    selectionLimit = if (storyPicker) StoryPolicy.MAX_MEMBERS else GroupChatPolicy.MAX_MEMBERS - (existingGroup?.members?.size ?: 0),
+                    forStory = storyPicker,
+                    excludedCardIds = existingGroup?.members?.map { it.sourceCardId }?.toSet().orEmpty(),
+                    selectedFolderId = pickerFolderId,
+                    onSelectFolder = { pickerFolderId = it },
+                    scrollMemory = newPageScrolls,
+                    onConfirm = { cards ->
+                        if (storyPicker) {
+                            storySetupId = null
+                            storyDraft = StoryPolicy.fromCards(cards)
+                            storyOriginal = storyDraft
+                            storyTitle = ""; storyOriginalTitle = ""
+                            navigateTo(Screen.STORY_SETUP)
+                        } else if (targetId != null) {
+                            val currentGroup = chatViewModel.conversations.value.find { it.id == targetId }?.groupChat
+                            if (currentGroup != null && !chatViewModel.isConversationBusy(targetId)) {
+                                val additions = cards.filter { card -> currentGroup.members.none { it.sourceCardId == card.id } }
+                                val next = currentGroup.copy(members = currentGroup.members + additions.map {
+                                    GroupMember(java.util.UUID.randomUUID().toString(), it.persona.copy(), it.id) })
+                                if (GroupChatPolicy.isValid(next) && chatViewModel.updateGroup(targetId, next)) navigateBack(Screen.GROUP_SETTINGS)
+                            }
+                        } else {
+                            val selectedGroup = GroupChatPolicy.fromCards(cards)
+                            groupDraft = groupDraft.copy(members = selectedGroup.members.map { member ->
+                                groupDraft.members.firstOrNull { it.sourceCardId == member.sourceCardId } ?: member })
+                            groupSettingsId = null
+                            navigateTo(Screen.GROUP_SETTINGS)
+                        }
+                    }, onBack = { navigateBack(groupPickerBack) })
+            }
+            Screen.STORY_SETUP -> {
+                val languages by chatViewModel.languageModels.collectAsState()
+                val visuals by chatViewModel.visualModels.collectAsState()
+                val language by chatViewModel.selectedModel.collectAsState()
+                val visual by chatViewModel.selectedVisualModel.collectAsState()
+                val search by chatViewModel.enableWebSearch.collectAsState()
+                StorySettingsScreen(storyTitle, storyDraft,
+                    storyDraft != storyOriginal || storyTitle != storyOriginalTitle, storySetupId == null,
+                    storySetupId in busyConversationIds, isDark,
+                    onTitle = { storyTitle = it }, onDraft = { storyDraft = it },
+                    onEditMember = { id -> storyDraft.members.find { it.id == id }?.let {
+                        openCharacterEditor(it.persona.toProfile(com.freechat.model.DialogueMode.PLOT),
+                            conversationId = storySetupId, memberId = it.id, personaOnly = true, back = Screen.STORY_SETUP)
+                    } },
+                    onSave = {
+                        if (storySetupId == null) chatViewModel.startStoryConversation(storyTitle, storyDraft)
+                        else if (!chatViewModel.updateStory(storySetupId!!, storyTitle, storyDraft)) return@StorySettingsScreen
+                        if (isTablet) tabletChatArrival++
+                        navigateBack(Screen.CHAT)
+                    },
+                    onBack = { navigateBack(if (storySetupId == null) Screen.CHARACTER_PICKER else Screen.CHAT) },
+                    languageModels = languages, visualModels = visuals, globalLanguage = language,
+                    globalVisual = visual, globalSearch = search, scrollMemory = newPageScrolls)
+            }
+            Screen.GROUP_SETTINGS -> {
+                val targetId = groupSettingsId
+                val target = conversations.find { it.id == targetId }
+                val creatingGroup = targetId == null
+                val group = target?.groupChat ?: groupDraft.takeIf { creatingGroup && GroupChatPolicy.isValid(it) }
+                if (group != null) {
+                    val id = targetId.orEmpty()
+                    val languages by chatViewModel.languageModels.collectAsState()
+                    val visions by chatViewModel.visionModels.collectAsState()
+                    val globalLanguage by chatViewModel.selectedModel.collectAsState()
+                    val globalVision by chatViewModel.selectedVisionModel.collectAsState()
+                    val perMap by chatViewModel.perConvSettings.collectAsState()
+                    val globalSearch by chatViewModel.enableWebSearch.collectAsState()
+                    val model = ModelSelectionResolver.find(group.languageModelId, ModelType.LANGUAGE, languages) ?: globalLanguage
+                    val per = if (creatingGroup) groupDraftSettings else perMap[id]
+                    GroupSettingsScreen(id, if (creatingGroup) groupDraftTitle else target!!.title, group,
+                        id in busyConversationIds, isDark,
+                        creating = creatingGroup,
+                        onStart = {
+                            if (groupSettingsId == null && GroupChatPolicy.canStart(groupDraftTitle, groupDraft)) {
+                                chatViewModel.clearShareDraft()
+                                groupSettingsId = chatViewModel.startGroupConversation(groupDraftTitle, groupDraft, groupDraftSettings)
+                                groupDraft = GroupChatProfile(); groupDraftTitle = ""; groupDraftSettings = PerConvSettings()
+                                if (isTablet) tabletChatArrival++
+                                navigateBack(Screen.CHAT)
+                            }
+                        },
+                        onSaveGroup = { conversationId, updated ->
+                            if (creatingGroup) groupDraft = updated
+                            else if (!chatViewModel.updateGroup(conversationId, updated) && chatViewModel.isConversationBusy(conversationId))
+                                android.widget.Toast.makeText(this@MainActivity, currentStrings.groupSettingLockedDuringReply,
+                                    android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        onRename = { conversationId, name ->
+                            if (creatingGroup) groupDraftTitle = name
+                            else chatViewModel.conversations.value.find { it.id == conversationId }?.let { chatViewModel.renameConversation(it, name) }
+                        },
+                        onEditMember = { id -> group.members.find { it.id == id }?.let {
+                            openCharacterEditor(it.persona.toProfile(), conversationId = targetId, memberId = it.id,
+                                personaOnly = true, back = Screen.GROUP_SETTINGS) } },
+                        onChooseMembers = {
+                            storyPicker = false; groupPickerAddTo = targetId; groupPickerBack = Screen.GROUP_SETTINGS
+                            navigateTo(Screen.CHARACTER_PICKER)
+                        }, onSearch = { navigateTo(Screen.GROUP_SEARCH) },
+                        onBack = backFromGroupSettings,
+                        languageModels = languages, visionModels = visions,
+                        globalLanguageModel = globalLanguage, globalVisionModel = globalVision,
+                        deepThinkingEnabled = model.supportsDeepThinking && chatViewModel.deepThinkFor(per, model),
+                        onSetDeepThinking = { on ->
+                            if (creatingGroup) groupDraftSettings = groupDraftSettings.copy(deepThinkByModel = groupDraftSettings.deepThinkByModel + (ModelSelectionResolver.selectionKey(model) to on))
+                            else if (!chatViewModel.isConversationBusy(id)) chatViewModel.setDeepThinkOverride(
+                                id, ModelSelectionResolver.selectionKey(model), on)
+                        },
+                        webSearchEnabled = per?.enableWebSearch ?: globalSearch,
+                        onSetWebSearch = { on ->
+                            if (creatingGroup) groupDraftSettings = groupDraftSettings.copy(enableWebSearch = on)
+                            else if (!chatViewModel.isConversationBusy(id)) chatViewModel.updatePerConvSettings(
+                                id, chatViewModel.getPerConvSettings(id).copy(enableWebSearch = on)) },
+                        scrollMemory = newPageScrolls)
+                }
+            }
+            Screen.GROUP_SEARCH -> groupSettingsId?.let { id -> GroupConversationSearchScreen(id,
+                onSelect = { messageId ->
+                    chatViewModel.conversations.value.find { it.id == id }?.let(chatViewModel::switchToConversation)
+                    chatViewModel.requestScrollToMessage(messageId)
+                    navigateBack(Screen.CHAT)
+                }, onBack = { navigateBack(Screen.GROUP_SETTINGS) }) }
             Screen.LEARNING -> PersonaLearningScreen(updating = learningUpdating)
         }
     }
@@ -1224,13 +1623,23 @@ class MainActivity : ComponentActivity() {
     val persistentSettings = remember { movableContentOf { latestScreenContent.value(Screen.SETTINGS) } }
     // Retain the form under the exclusive learning overlay, including its unsaved draft on failure.
     val presentedScreen = if (effectiveScreen == Screen.LEARNING) Screen.CHARACTER_SETUP else effectiveScreen
-    CompositionLocalProvider(com.freechat.ui.animation.LocalPageActive provides (currentScreen != Screen.LEARNING)) {
+    CompositionLocalProvider(com.freechat.ui.animation.LocalPageActive provides (currentScreen != Screen.LEARNING),
+        LocalFormNavigationGuard provides if (isTablet) floatingWindow else null) {
     Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (currentScreen == Screen.LEARNING) 0f else 1f }
         .paneInteraction(currentScreen != Screen.LEARNING)) {
     if (isTablet) {
-        val supporting = presentedScreen == Screen.NEW_RULES ||
-            (presentedScreen == Screen.CHARACTER_SETUP && characterSetupInitial != null)
-        val creating = presentedScreen == Screen.CHARACTER_SETUP && characterSetupInitial == null
+        val supporting = presentedScreen in setOf(Screen.NEW_RULES, Screen.GROUP_SEARCH) ||
+            (presentedScreen == Screen.GROUP_SETTINGS && groupSettingsId != null) ||
+            (presentedScreen == Screen.STORY_SETUP && storySetupId != null) ||
+            (presentedScreen == Screen.CHARACTER_PICKER && groupPickerAddTo != null) ||
+            (presentedScreen == Screen.CHARACTER_SETUP && !characterCreatingNew &&
+                (characterEditorMemberId != null || !characterPersonaOnly))
+        val creating = (presentedScreen == Screen.CHARACTER_SETUP && !characterPersonaOnly && characterCreatingNew) ||
+            (presentedScreen == Screen.CHARACTER_PICKER && groupPickerAddTo == null) ||
+            (presentedScreen == Screen.STORY_SETUP && storySetupId == null) ||
+            (presentedScreen == Screen.GROUP_SETTINGS && groupSettingsId == null)
+        val libraryRoute = presentedScreen == Screen.CHARACTER_LIBRARY ||
+            (presentedScreen == Screen.CHARACTER_SETUP && characterEditorBack == Screen.CHARACTER_LIBRARY && characterPersonaOnly)
         // New conversations always use the embedded workflow, regardless of overlay preference.
         val floating = tabletDisplayMode == TabletDisplayMode.FLOATING && !creating &&
             presentedScreen != Screen.NEW_CHAT_MODE
@@ -1244,6 +1653,9 @@ class MainActivity : ComponentActivity() {
             presentedScreen == Screen.CHAT || presentedScreen == Screen.NEW_CHAT_MODE || embeddedSupport ||
                 embeddedAccount || embeddedChatModel -> null
             creating -> TabletDestination.CREATION
+            libraryRoute -> TabletDestination.SETTINGS
+            presentedScreen in setOf(Screen.GROUP_SETTINGS, Screen.GROUP_SEARCH, Screen.CHARACTER_PICKER, Screen.STORY_SETUP) -> TabletDestination.RULES
+            presentedScreen == Screen.CHARACTER_SETUP && characterEditorMemberId != null -> TabletDestination.RULES
             presentedScreen == Screen.NEW_RULES -> TabletDestination.RULES
             presentedScreen == Screen.CHARACTER_SETUP -> TabletDestination.CHARACTER
             presentedScreen == Screen.FAVORITES || presentedScreen == Screen.FAVORITE_DETAIL -> TabletDestination.FAVORITES
@@ -1302,7 +1714,8 @@ class MainActivity : ComponentActivity() {
         val page = if (group == destination) presentedScreen else lastDestinations[group] ?: presentedScreen
         val destinationContent: @Composable (Screen) -> Unit = { shown ->
         CompositionLocalProvider(LocalFloatingWindowRoot provides (shown in setOf(Screen.SETTINGS,
-            Screen.FAVORITES, Screen.ACCOUNT, Screen.NEW_RULES, Screen.CHARACTER_SETUP) ||
+            Screen.FAVORITES, Screen.ACCOUNT, Screen.NEW_RULES, Screen.GROUP_SETTINGS, Screen.STORY_SETUP) ||
+            (shown == Screen.CHARACTER_SETUP && !characterPersonaOnly) ||
             group == TabletDestination.CHAT_MODEL)) {
         if (group == TabletDestination.SETTINGS && (LocalTabletUi.current || shown == Screen.SETTINGS)) {
             persistentSettings()
@@ -1515,9 +1928,11 @@ class MainActivity : ComponentActivity() {
                             drawerWidthPx = drawerWidthPx,
                             density = density,
                             colors = colors,
+                            rightActionsDp = if (conversations.any { it.id == currentConvId && it.groupChat != null }) 96f else 144f,
                             titleText = when {
                                 // 多选：标题让位给「已选择 x 项」，复用共享标题的字号/字距/位置/抽屉跟随
                                 multiSelect.active -> currentStrings.selectedCount(multiSelect.selectedIds.size)
+                                conversations.any { it.id == currentConvId && (it.groupChat != null || it.storyProfile != null) } -> conversations.find { it.id == currentConvId }?.title.orEmpty()
                                 currentMode == ChatMode.COMPANION -> currentCharacter?.name?.takeIf { it.isNotBlank() } ?: "FreeChat"
                                 else -> "FreeChat"
                             }
@@ -1531,8 +1946,7 @@ class MainActivity : ComponentActivity() {
                     // （null = 还没从 DataStore 读出来）。老用户冷启动时它是 null 那几十毫秒，
                     // 用 `!` 会把这当成「没同意」先闪一下协议浮层再消失（1.0.53 修）。
                     //
-                    // 非开源弹窗测试接线（1.1.26.2）：勾了「用户协议弹窗测试」
-                    // 就每次启动都弹（不再局限于首次），真实首次判定照旧，互不干扰。
+                    // 非开源弹窗测试接线（1.1.26.2）：测试态专用，真实首次判定照旧互不干扰。
                     // =============================================
                     when {
                         // null：DataStore 还没读出结果。只铺一层不透明底色挡着 ——
@@ -1577,7 +1991,7 @@ class MainActivity : ComponentActivity() {
                     // =============================================
 
                     // 6.5 新功能推荐导览（1.1.31）：全屏一页、真实组件自动演示；播放期锁定交互，
-                    //     结束才亮「立即体验」。与启动提醒互斥（noticeCandidate 已让位）。
+                        //     两页分别实播群聊／故事；各自播放结束后才允许前进。与启动提醒互斥。
                     androidx.compose.animation.AnimatedVisibility(
                         visible = featureRecVisible,
                         enter = FreeChatAnimation.dialogEnter(),
@@ -1588,7 +2002,8 @@ class MainActivity : ComponentActivity() {
                             getSharedPreferences("feature_rec", android.content.Context.MODE_PRIVATE)
                                 .edit().putInt("last_shown", com.freechat.BuildConfig.VERSION_CODE).apply()
                             featureRecVisible = false
-                        })
+                        }, onPageShown = { noticeId -> chatViewModel.onRemoteNoticeShown(noticeId) },
+                            onPageChoice = { noticeId, choice -> chatViewModel.onRemoteNoticeChoice(noticeId, choice) })
                     }
 
                     // =============================================
@@ -1598,6 +2013,12 @@ class MainActivity : ComponentActivity() {
                     //    模糊源用 overlayHazeState（整屏那一块），不是侧滑页自己的
                     //    drawerHazeState —— 后者只盖 90% 屏宽，卡片会在侧滑页右边缘裂成两半。
                     // =============================================
+                    val displayedDrawerDeleteTarget = rememberSheetContent(drawerDeleteTarget)
+                    val displayedDrawerBatchTargets = rememberSheetContent(drawerBatchDeleteTargets)
+                    val displayedDeleteFavoriteWarning = rememberSheetContent(
+                        drawerDeleteTarget?.let { favoriteConvIds.contains(it.id) }) == true
+                    val displayedBatchFavoriteWarning = rememberSheetContent(
+                        drawerBatchDeleteTargets?.let { targets -> targets.any { favoriteConvIds.contains(it.id) } }) == true
                     SheetPanel(
                         visible = drawerDeleteTarget != null,
                         onDismiss = { drawerDeleteTarget = null },
@@ -1613,10 +2034,10 @@ class MainActivity : ComponentActivity() {
                             drawerDeleteTarget = null
                         }
                     ) {
-                        val conv = drawerDeleteTarget
+                        val conv = displayedDrawerDeleteTarget
                         if (conv != null) {
                             Text(currentStrings.confirmDeleteConv(conv.title), color = colors.TextSecondary)
-                            if (favoriteConvIds.contains(conv.id)) {
+                            if (displayedDeleteFavoriteWarning) {
                                 Spacer(Modifier.height(8.dp))
                                 Text(
                                     currentStrings.deleteFavoritesWarning,
@@ -1648,11 +2069,11 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     ) {
-                        val targets = drawerBatchDeleteTargets
+                        val targets = displayedDrawerBatchTargets
                         if (targets != null) {
                             Text(currentStrings.confirmDeleteConvs(targets.size), color = colors.TextSecondary)
                             // 选中的对话里有收藏内容时，跟单条删除一样给出额外警告
-                            if (targets.any { favoriteConvIds.contains(it.id) }) {
+                            if (displayedBatchFavoriteWarning) {
                                 Spacer(Modifier.height(8.dp))
                                 Text(
                                     currentStrings.deleteFavoritesWarning,
@@ -1683,6 +2104,7 @@ class MainActivity : ComponentActivity() {
                         OutlinedTextField(
                             value = drawerRenameText,
                             onValueChange = { drawerRenameText = it },
+                            shape = FreeChatInputShape,
                             singleLine = true,
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedTextColor = colors.TextPrimary,
@@ -1700,8 +2122,11 @@ class MainActivity : ComponentActivity() {
                     //    「去更新」= 进设置-关于FreeChat，下载安装走那页已有的「检查更新」按钮。
                     // =============================================
                     // 云控文案（builtin-copy）：外壳/动画/勾选项与原版完全一致，只换文字与按钮
+                    // （云控生效=启用&&版本在区间，否则回落原文——同 builtin-feature 一条判据）
                     run {
-                        val cloud = reserved["builtin-copy"]
+                        val cloud = reserved["builtin-copy"]?.takeIf {
+                            com.freechat.data.RemoteNotices.reservedActive(it, com.freechat.BuildConfig.VERSION_NAME) == true
+                        }
                         val primary = cloud?.buttons?.firstOrNull { it.action != "dismiss" }
                         NoticeDialog(
                             visible = copyNoticeVisible,
@@ -1727,7 +2152,9 @@ class MainActivity : ComponentActivity() {
                     }
                     // 云控文案（builtin-update）：{version} 占位新版号；其余同上
                     run {
-                        val cloud = reserved["builtin-update"]
+                        val cloud = reserved["builtin-update"]?.takeIf {
+                            com.freechat.data.RemoteNotices.reservedActive(it, com.freechat.BuildConfig.VERSION_NAME) == true
+                        }
                         val primary = cloud?.buttons?.firstOrNull { it.action != "dismiss" }
                         NoticeDialog(
                             visible = updateNoticeVisible,
@@ -1802,7 +2229,8 @@ private fun ChatDrawerTitle(
     drawerWidthPx: Float,
     density: Density,
     colors: com.freechat.ui.theme.FreeChatColors,
-    titleText: String
+    titleText: String,
+    rightActionsDp: Float = 144f,
 ) {
     val titleProgress = (drawerOffset.value / drawerWidthPx).coerceIn(0f, 1f)
 
@@ -1826,7 +2254,7 @@ private fun ChatDrawerTitle(
             transitionSpec = { FreeChatAnimation.contentReplacement() },
             label = "chatDrawerTitle",
             modifier = Modifier
-                .widthIn(max = (LocalConfiguration.current.screenWidthDp - titleXDp - 144f * (1f - titleProgress) - 8f).coerceAtLeast(64f).dp)
+                .widthIn(max = (LocalConfiguration.current.screenWidthDp - titleXDp - rightActionsDp * (1f - titleProgress) - 8f).coerceAtLeast(64f).dp)
                 .graphicsLayer {
                     translationX = with(density) { titleXDp.dp.toPx() }
                     translationY = with(density) { 18.dp.toPx() }

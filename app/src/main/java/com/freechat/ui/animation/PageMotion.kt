@@ -11,6 +11,7 @@ import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -34,6 +35,16 @@ fun rememberPersistentScrollState(key: String, saved: MutableMap<String, Int>): 
     val state = remember(key) { ScrollState(saved[key] ?: 0) }
     LaunchedEffect(state) {
         snapshotFlow { state.value }.collect { saved[key] = it }
+    }
+    return state
+}
+
+/** Lazy 列表版滚动位置持久记忆（1.2.2.6 工单④）：与 [rememberPersistentScrollState] 同一口径，行级原位。 */
+@Composable
+fun rememberPersistentLazyListState(key: String, saved: MutableMap<String, Int>): LazyListState {
+    val state = remember(key) { LazyListState(saved[key] ?: 0, 0) }
+    LaunchedEffect(state) {
+        snapshotFlow { state.firstVisibleItemIndex }.collect { saved[key] = it }
     }
     return state
 }

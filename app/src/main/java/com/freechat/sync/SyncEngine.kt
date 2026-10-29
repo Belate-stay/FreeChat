@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.freechat.data.LocalStore
 import com.freechat.data.ConversationDeletion
+import com.freechat.data.CharacterLibraryStore
+import com.freechat.data.AppJson
 import com.freechat.data.SettingsRepository
 import com.freechat.i18n.LocaleManager
 import com.freechat.model.Conversation
@@ -86,6 +88,8 @@ object SyncEngine {
     private val revs = mutableMapOf<String, Long>()
 
     private var cursor = 0L
+    private var serverCapabilities = SyncCapabilities()
+    private var syncingUserId = ""
 
     /**
      * 本轮拉取里出现过的对话 id（只属于一轮同步，见 [pull]）。
@@ -186,6 +190,7 @@ object SyncEngine {
             return@withLock false
         }
         val userId = auth.userId
+        syncingUserId = userId
 
         val saved = Session.loadSyncState(userId)
         synchronized(revs) {
@@ -197,6 +202,8 @@ object SyncEngine {
         _status.value = _status.value.copy(phase = Phase.SYNCING, error = null)
 
         val ok = try {
+            serverCapabilities = ApiClient.capabilities(auth.token)
+            if (accountChanged(userId)) return@withLock false
             pull(auth, userId)
             if (accountChanged(userId)) return@withLock false
             push(auth, userId)
@@ -337,6 +344,13 @@ object SyncEngine {
 
     private suspend fun applyChange(meta: ObjectMeta, obj: SyncObject?) {
         val key = Adapter.objKey(meta.kind, meta.id)
+        val libraryKind = meta.kind == SyncKind.CARD || meta.kind == SyncKind.CARDFOLDER
+        if (libraryKind && !serverCapabilities.allows(meta.kind)) return
+        if (libraryKind && !meta.deleted && obj?.deleted != true && libraryDeleted(meta.kind, meta.id)) {
+            synchronized(revs) { revs[key] = obj?.rev ?: meta.rev }
+            Adapter.markDirty(key)
+            return
+        }
 
         val conversationKind = meta.kind in setOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET)
         if (conversationKind && ConversationDeletion.contains(meta.id) && !meta.deleted && obj?.deleted != true) {
@@ -346,11 +360,12 @@ object SyncEngine {
         }
         if (meta.deleted || obj?.deleted == true) {
             // A conversation tombstone always wins, including over pending local edits.
-            if (meta.kind != SyncKind.CONV && !ConversationDeletion.contains(meta.id) && Adapter.dirtyKeys().contains(key)) {
+            if (!libraryKind && meta.kind != SyncKind.CONV && !ConversationDeletion.contains(meta.id) && Adapter.dirtyKeys().contains(key)) {
                 synchronized(revs) { revs[key] = meta.rev }
                 return
             }
             when (meta.kind) {
+                SyncKind.CARD, SyncKind.CARDFOLDER -> removeLibrary(meta.kind, meta.id)
                 SyncKind.CONV -> Relay.applyConversations(listOf(Relay.ConvOp.Remove(meta.id)))
                 SyncKind.MSGS -> Relay.dropMessages(meta.id)
                 SyncKind.MEMS -> Relay.removeMemoryFile(meta.id)
@@ -385,6 +400,7 @@ object SyncEngine {
         }
 
         when (meta.kind) {
+            SyncKind.CARD, SyncKind.CARDFOLDER -> applyLibrary(meta.kind, meta.id, data)
             SyncKind.CONV -> applyConv(meta.id, data)
             SyncKind.MSGS -> {
                 /**
@@ -426,6 +442,38 @@ object SyncEngine {
             }
         }
         synchronized(revs) { revs[key] = meta.rev }
+    }
+
+    private fun libraryDeleted(kind: String, id: String): Boolean = CharacterLibraryStore.snapshot().let {
+        if (kind == SyncKind.CARD) id in it.deletedCardIds else id in it.deletedFolderIds
+    }
+
+    private fun removeLibrary(kind: String, id: String) = LocalStore.suspendApply {
+        if (accountChanged(syncingUserId)) return@suspendApply
+        val moved = if (kind == SyncKind.CARD) {
+            CharacterLibraryStore.applyRemoteCardDeletion(id)
+            emptySet()
+        } else CharacterLibraryStore.applyRemoteFolderDeletion(id)
+        Adapter.primeLibrarySnapshot()
+        moved.forEach { Adapter.markDirty(Adapter.objKey(SyncKind.CARD, it)) }
+    }
+
+    private fun applyLibrary(kind: String, id: String, data: JsonElement) = LocalStore.suspendApply {
+        if (accountChanged(syncingUserId)) return@suspendApply
+        val key = Adapter.objKey(kind, id)
+        val localDirty = key in Adapter.dirtyKeys()
+        if (kind == SyncKind.CARD) {
+            val incoming = Wire.cardFromWire(data) ?: error("Invalid character card $id")
+            require(incoming.id == id)
+            CharacterLibraryStore.applyRemoteCard(incoming, localDirty).forEach {
+                Adapter.markDirty(Adapter.objKey(SyncKind.CARD, it))
+            }
+        } else {
+            val folder = AppJson.gson.fromJson(data, com.freechat.model.CharacterFolder::class.java)
+            require(folder.id == id && folder.name.isNotBlank())
+            if (CharacterLibraryStore.applyRemoteFolder(folder, localDirty)) Adapter.markDirty(key)
+        }
+        Adapter.primeLibrarySnapshot()
     }
 
     private suspend fun applyConv(id: String, data: JsonElement) {
@@ -505,6 +553,13 @@ object SyncEngine {
 
     /** 返回 true 表示"有进展"（推上去了 / 合并过了），false 表示这一条这轮没得救 */
     private suspend fun pushOne(auth: Session.Auth, kind: String, id: String, key: String): Boolean {
+        val groupConversation = kind in setOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET) &&
+            Relay.conversations().any { it.id == id && it.groupChat != null }
+        val protectedImage = kind == SyncKind.IMG && serverCapabilities.characterLibrary < 1 && ImageSync.requiresLibraryCapability(id)
+        val storyConversation = kind in setOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET) &&
+            Relay.conversations().any { it.id == id && it.storyProfile != null }
+        val storyImage = kind == SyncKind.IMG && serverCapabilities.story < 1 && ImageSync.requiresStoryCapability(id)
+        if (storyImage || !serverCapabilities.allows(kind, groupConversation, protectedImage, storyConversation)) return false
         pushingVersions[key] = Adapter.dirtyVersion(key)
         val rev = synchronized(revs) { revs[key] } ?: 0L
         return try {
@@ -512,6 +567,20 @@ object SyncEngine {
                 return deleteRemote(auth, kind, id, rev, key)
             }
             when (kind) {
+                SyncKind.CARD -> {
+                    val card = CharacterLibraryStore.snapshot().cards.firstOrNull { it.id == id }
+                    if (card == null) deleteRemote(auth, kind, id, rev, key)
+                    else {
+                        val wire = Wire.cardToWire(card)
+                        ensureImagesPushed(wire)
+                        putRemote(auth, kind, id, rev, wire, card.updatedAt, key)
+                    }
+                }
+                SyncKind.CARDFOLDER -> {
+                    val folder = CharacterLibraryStore.snapshot().folders.firstOrNull { it.id == id }
+                    if (folder == null) deleteRemote(auth, kind, id, rev, key)
+                    else putRemote(auth, kind, id, rev, AppJson.gson.toJsonTree(folder), folder.updatedAt, key)
+                }
                 SyncKind.CONV -> {
                     val conv = Relay.conversations().find { it.id == id }
                     if (conv == null) deleteRemote(auth, kind, id, rev, key)
@@ -535,7 +604,7 @@ object SyncEngine {
                 // 1.0.99.3 图片对象：缓存还在就推载荷；缓存没了分两种（1.2.3+ 护栏）
                 SyncKind.IMG -> {
                     val cache = ImageSync.cacheFile(id)
-                    if (!ImageSync.isReferencedLocally(id)) {
+                    if (!ImageSync.isReferencedLocally(id, includeArchived = false)) {
                         deleteRemote(auth, kind, id, rev, key)
                     } else if (cache.isFile && cache.length() > 0) {
                         val payload = runCatching {
@@ -543,7 +612,7 @@ object SyncEngine {
                         }.getOrNull()
                         if (payload == null) { Adapter.unmarkDirty(key); false }
                         else putRemote(auth, kind, id, rev, com.google.gson.JsonPrimitive(payload), cache.lastModified(), key)
-                    } else if (ImageSync.isReferencedLocally(id)) {
+                    } else if (ImageSync.isReferencedLocally(id, includeArchived = false)) {
                         // 缓存没了但本机还引用着：**绝不推墓碑** —— 内容寻址的图可能
                         // 在云端/别的设备还活着，推墓碑=把别人手里的同图一起删了。
                         // 字节等收端拉回（云端有这份就一定能补上），本轮无进展放着。
@@ -660,6 +729,7 @@ object SyncEngine {
         key: String
     ): Boolean {
         val r = ApiClient.putObject(auth.token, kind, id, rev, updatedAt, payload)
+        if (accountChanged(auth.userId)) return false
         synchronized(revs) { revs[key] = r.rev }
         // 推成功了才算数。内容没变的话服务端原样返回、不顶版本号，一样是成功
         if (!r.deleted) Adapter.unmarkDirty(key, pushingVersions[key])
@@ -675,11 +745,13 @@ object SyncEngine {
             // 不能让它冒出去：一轮同步里任何一个对象抛错都会让整轮变成「同步错误」，
             // 而这里其实什么都没出错（可能只是之前那一列的墓碑被清过、或者本地那份从没上传成功过）
             if (e.status == 404 && e.code == "not_found") {
+                if (accountChanged(auth.userId)) return false
                 Adapter.unmarkDirty(key, pushingVersions[key])
                 return true
             }
             throw e
         }
+        if (accountChanged(auth.userId)) return false
         synchronized(revs) { revs[key] = r.rev }
         Adapter.unmarkDirty(key, pushingVersions[key])
         return true
@@ -701,6 +773,19 @@ object SyncEngine {
     ): Boolean {
         val remoteRev = e.current?.rev
         val deleted = e.current?.deleted == true
+        val libraryKind = kind == SyncKind.CARD || kind == SyncKind.CARDFOLDER
+        if (accountChanged(auth.userId)) return false
+        if (libraryKind && libraryDeleted(kind, id)) {
+            synchronized(revs) { revs[key] = remoteRev ?: 0L }
+            if (deleted) Adapter.unmarkDirty(key, pushingVersions[key])
+            return true
+        }
+        if (libraryKind && deleted) {
+            removeLibrary(kind, id)
+            synchronized(revs) { revs[key] = remoteRev ?: 0L }
+            Adapter.unmarkDirty(key, pushingVersions[key])
+            return true
+        }
 
         val conversationKind = kind in setOf(SyncKind.CONV, SyncKind.MSGS, SyncKind.MEMS, SyncKind.PCSET)
         if (conversationKind && ConversationDeletion.contains(id)) {
@@ -724,7 +809,12 @@ object SyncEngine {
             Adapter.unmarkDirty(key)
             return false
         }
+        if (accountChanged(auth.userId)) return false
         if (remote.deleted) {
+            if (libraryKind) {
+                removeLibrary(kind, id)
+                Adapter.unmarkDirty(key, pushingVersions[key])
+            }
             // The object can be deleted after the original 409 but before this fetch.
             if (conversationKind) {
                 val parentDeleted = kind == SyncKind.CONV || fetchOne(auth, SyncKind.CONV, id)?.deleted == true
@@ -737,6 +827,7 @@ object SyncEngine {
 
         val data = remote.data
         when (kind) {
+            SyncKind.CARD, SyncKind.CARDFOLDER -> if (data != null) applyLibrary(kind, id, data)
             SyncKind.CONV -> if (data != null) applyConv(id, data)
             SyncKind.MSGS -> if (data != null) {
                 Relay.applyMessages(id, Wire.msgsFromWire(data, Relay.messages(id)))

@@ -13,6 +13,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.*
@@ -22,10 +24,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.freechat.i18n.LocalStrings
+import com.freechat.i18n.*
 import com.freechat.ui.theme.HazeSpec
+import com.freechat.ui.theme.AppBoxWithConstraints
+import com.freechat.ui.adaptive.tabletReadingGutter
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.frostedCard
@@ -39,8 +47,7 @@ import com.freechat.ui.components.TopBarBackdrop
 import com.freechat.ui.components.TopBarBackdropSource
 
 /**
- * 新对话模式选择页：标准问答 vs 拟人陪伴。
- * 高级材质下标题栏渐进高斯模糊、卡片磨砂哑光玻璃。
+ * 四个全宽设置卡片式入口；仅放大显示时允许滚动，不截断可读内容。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,7 +55,10 @@ fun NewChatModeScreen(
     isDark: Boolean,
     onBack: () -> Unit,
     onSelectStandard: () -> Unit,
-    onSelectCompanion: () -> Unit
+    onSelectCompanion: () -> Unit,
+    onSelectGroup: () -> Unit,
+    onSelectStory: () -> Unit,
+    enlargedDisplay: Boolean = false,
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
@@ -59,30 +69,27 @@ fun NewChatModeScreen(
 
     Box(Modifier.fillMaxSize().pageBackground(colors.Background)) {
         TopBarBackdropSource(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
-                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp, 24.dp), bottom = 40.dp)
-                .padding(horizontal = 40.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            ModeCard(
-                icon = Icons.Filled.SmartToy,
-                title = s.standardMode,
-                desc = s.chatModeDesc,
-                hazeState = hazeState,
-                onClick = onSelectStandard
-            )
-            Spacer(Modifier.height(24.dp))
-            ModeCard(
-                icon = Icons.Filled.Favorite,
-                title = s.companionMode,
-                desc = s.companionModeDesc,
-                hazeState = hazeState,
-                onClick = onSelectCompanion
-            )
+        AppBoxWithConstraints(Modifier.fillMaxSize().navigationBarsPadding()
+            .padding(top = HazeSpec.newPageContentPaddingDp(statusBarHeightDp, 24.dp))) {
+            val verticalGap = if (maxHeight < 400.dp) 8.dp else 24.dp
+            val rowGap = if (maxHeight < 400.dp) 8.dp else 16.dp
+            val rowHeight = ((maxHeight - verticalGap * 2 - rowGap * 3) / 4).coerceIn(0.dp, 128.dp)
+            Column(Modifier.fillMaxSize()
+                .then(if (enlargedDisplay) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+                .padding(horizontal = 16.dp + tabletReadingGutter(), vertical = verticalGap),
+                verticalArrangement = Arrangement.spacedBy(rowGap)) {
+                    val modes = listOf(
+                        Triple(Icons.Filled.SmartToy, s.standardMode to s.standardConversationDesc, onSelectStandard),
+                        Triple(Icons.Filled.Favorite, s.companionMode to s.companionModeDesc, onSelectCompanion),
+                        Triple(Icons.Filled.Groups, s.multiCharacterGroup to s.multiCharacterGroupDesc, onSelectGroup),
+                        Triple(Icons.Filled.AutoStories, s.multiCharacterStory to s.multiCharacterStoryDesc, onSelectStory))
+                    modes.forEach { (icon, text, action) ->
+                        ModeCard(icon, text.first, text.second, hazeState, action,
+                            modifier = if (enlargedDisplay) Modifier.heightIn(min = 128.dp) else Modifier.height(rowHeight),
+                            compact = !enlargedDisplay && rowHeight < 112.dp,
+                            showDescription = enlargedDisplay || rowHeight >= 72.dp)
+                    }
+            }
         }
 
         TopBarBackdrop(hazeState, colors.Background, HazeSpec.topBandHeightDp(statusBarHeightDp))
@@ -100,7 +107,7 @@ fun NewChatModeScreen(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, s.back, tint = colors.TextPrimary)
             }
             Text(
-                s.chooseChatMode,
+                s.createConversation,
                 color = colors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.titleLarge
@@ -109,40 +116,54 @@ fun NewChatModeScreen(
     }
 }
 
-/** 模式卡片：正方形圆角卡（等大居中），高级材质下磨砂哑光玻璃 */
+/** 与设置页同款底材、圆角和整行触控，图标与标题说明左右排布。 */
 @Composable
 private fun ModeCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     desc: String,
     hazeState: dev.chrisbanes.haze.HazeState,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    showDescription: Boolean = true,
 ) {
     val colors = LocalFreeChatColors.current
     val advancedMaterial = LocalAdvancedMaterial.current
 
     Box(
-        modifier = Modifier
-            .size(200.dp)
-            .frostedCard(hazeState, colors, advancedMaterial, RoundedCornerShape(28.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 20.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .frostedCard(hazeState, colors, advancedMaterial, RoundedCornerShape(14.dp))
+            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .then(if (showDescription) Modifier else Modifier.semantics { contentDescription = desc })
+            .padding(horizontal = if (compact) 16.dp else 20.dp, vertical = if (compact) 8.dp else 20.dp),
         contentAlignment = Alignment.Center
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 16.dp)) {
             Box(
                 modifier = Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(16.dp))
+                    .size(if (compact) 28.dp else 48.dp)
+                    .clip(RoundedCornerShape(if (compact) 8.dp else 12.dp))
                     .background(colors.Primary.copy(alpha = 0.14f)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(icon, null, tint = colors.Primary, modifier = Modifier.size(26.dp))
+                Icon(icon, null, tint = colors.Primary, modifier = Modifier.size(if (compact) 18.dp else 24.dp))
             }
-            Spacer(Modifier.height(14.dp))
-            Text(title, style = MaterialTheme.typography.titleMedium, color = colors.TextPrimary, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp))
-            Text(desc, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp), color = colors.TextSecondary, textAlign = TextAlign.Center)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, style = (if (compact) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleMedium)
+                    .copy(lineBreak = LineBreak.Heading),
+                    color = colors.TextPrimary, fontWeight = FontWeight.SemiBold,
+                    maxLines = if (compact) 1 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
+                if (showDescription) {
+                    Text(desc, style = MaterialTheme.typography.bodySmall.copy(
+                        lineBreak = LineBreak.Paragraph.copy(strategy = LineBreak.Strategy.Balanced)),
+                        color = colors.TextSecondary, textAlign = TextAlign.Start,
+                        maxLines = if (compact) 2 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
         }
     }
 }

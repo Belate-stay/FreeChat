@@ -14,7 +14,6 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import com.freechat.ui.animation.jellyOverscroll
 import com.freechat.ui.adaptive.rememberPaneScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -44,6 +43,7 @@ import com.freechat.ui.components.SheetOption
 import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.theme.LocalMonoFontFamily
 import com.freechat.ui.theme.HazeSpec
+import com.freechat.ui.theme.FreeChatInputShape
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.viewmodel.ChatViewModel
@@ -184,7 +184,7 @@ fun NewRulesScreen(
                 // 果冻边界冗余（1.1.26.6）：顶/底继续拖跟手位移带阻尼，松手回弹
                 .jellyOverscroll()
                 .verticalScroll(rememberPaneScrollState())
-                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
+                .padding(top = HazeSpec.newPageContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
                 .padding(horizontal = 16.dp + com.freechat.ui.adaptive.tabletReadingGutter()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -377,7 +377,7 @@ fun NewRulesScreen(
                             modifier = Modifier.fillMaxWidth().onFocusChanged { rulesFocused = it.isFocused },
                             minLines = 3,
                             maxLines = 10,
-                            shape = RoundedCornerShape(12.dp),
+                            shape = FreeChatInputShape,
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = colors.Primary,
                                 unfocusedBorderColor = colors.InputBorder,

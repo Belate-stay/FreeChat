@@ -14,9 +14,10 @@ import android.util.Base64
 import android.util.Log
 import com.freechat.data.MiMoAsr
 import com.freechat.ui.animation.AnimationReplay
-import com.freechat.core.CompanionMood
 import com.freechat.core.CompanionPrompts
 import com.freechat.data.CompanionApiReply as CompanionReply
+import com.freechat.data.ChatToolCalls
+import com.freechat.data.awaitCompanionResponse
 import com.freechat.core.CompanionRhythm
 import com.freechat.core.MemoryDraft
 import com.freechat.util.DocumentParser
@@ -31,6 +32,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.freechat.BuildConfig
 import com.freechat.ReplyService
+import com.freechat.i18n.imageReadyNotification
 import com.freechat.data.AppJson
 import com.freechat.data.ImageAspect
 import com.freechat.data.LocalStore
@@ -75,6 +77,7 @@ import com.google.gson.InstanceCreator
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
@@ -115,7 +118,6 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -277,15 +279,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _liveContent = MutableStateFlow("")
     val liveContent: StateFlow<String> = _liveContent.asStateFlow()
 
+    private data class LiveReply(val content: String = "", val reasoning: String = "")
+    private val liveReplies = java.util.concurrent.ConcurrentHashMap<String, LiveReply>()
+    private fun liveReasoningFor(convId: String): String = liveReplies[convId]?.reasoning.orEmpty()
+    private fun updateLive(convId: String, content: String? = null, reasoning: String? = null) {
+        val value = liveReplies.compute(convId) { _, old ->
+            LiveReply(content ?: old?.content.orEmpty(), reasoning ?: old?.reasoning.orEmpty())
+        }!!
+        if (_currentConversationId.value == convId) {
+            _liveContent.value = value.content
+            _liveReasoning.value = value.reasoning
+        }
+    }
+
     // 图片生成中
     private val _isGeneratingImage = MutableStateFlow(false)
     val isGeneratingImage: StateFlow<Boolean> = _isGeneratingImage.asStateFlow()
 
     // 当前 API 调用引用，用于取消
-    private val currentCall = AtomicReference<okhttp3.Call?>(null)
-    private var streamJob: Job? = null
-    private var standardGenerationConvId: String? = null
-    private var standardGenerationId = 0
+    private val generationCalls = java.util.concurrent.ConcurrentHashMap<String, okhttp3.Call>()
+    private val standardJobs = mutableMapOf<String, Job>()
+    private val requestConversation = ThreadLocal<String?>()
+    private val requestPreferences = ThreadLocal<SettingsSnapshot?>()
     private val favoritesRevision = java.util.concurrent.atomic.AtomicLong()
 
     // 拟人模式缓冲管线：按对话隔离（每个 convId 独立一条），切对话不打断原对话的思考回复；
@@ -297,6 +312,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         var jobId = 0        // 代次：旧 job 的 finally 不干扰新一轮
     }
     private val companionPipelines = mutableMapOf<String, CompanionPipeline>()
+    private class GroupPipeline {
+        var job: Job? = null
+        var serial = 0L
+        val pending = linkedSetOf<String>()
+    }
+    private val groupPipelines = mutableMapOf<String, GroupPipeline>()
+    private val groupMentionDrafts = mutableMapOf<String, com.freechat.core.GroupMentionDraft>()
     private val userSaidGoodnightAt = mutableMapOf<String, Long>()   // convId -> 用户上次道晚安时间戳
     // 模拟作息状态（当天有效，跨天重新生成）
     private val sleepDateKey = mutableMapOf<String, String>()        // convId -> 作息所属日期
@@ -324,14 +346,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // 主动找你一次，却静悄悄地什么都没发生。
 
     // 本轮发送的起始索引（停止时据此截断「用户消息 + AI 回复」；-1 表示无进行中的普通发送轮）
-    private var activeRoundStartIndex = -1
-    private var activeRoundConvId: String? = null
-    private var standardSettingsSnapshot: SettingsSnapshot? = null
+    private val activeRoundStarts = mutableMapOf<String, Int>()
 
     // ===== 前后台状态 + 系统通知 =====
     private var appInForeground = true
     // 发消息到全部回复结束期间为 true（含拟人模式的缓冲等待期），期间前台服务保活
     private var generationPending = false
+    private var keepAliveHeartbeat: Job? = null
+    private var backgroundWorkCount = 0
     // 前台服务是否在跑（避免重复 startForegroundService 导致通知闪烁）
     private var foregroundServiceRunning = false
     // 上次发起启动的时刻。startForegroundService 是异步的，实例要过一小会儿才建好，
@@ -354,9 +376,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         syncForegroundService()
     }
 
+    private fun beginBackgroundWork() { backgroundWorkCount++; syncForegroundService() }
+    private fun endBackgroundWork() { backgroundWorkCount--; syncForegroundService() }
+
+    private suspend fun <T> withBackgroundWork(block: suspend () -> T): T = withContext(Dispatchers.Main.immediate) {
+        beginBackgroundWork()
+        try { block() } finally { endBackgroundWork() }
+    }
+
+    private fun launchBackgroundWork(models: RequestModels, block: suspend CoroutineScope.() -> Unit): Job =
+        viewModelScope.launch(models, start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            beginBackgroundWork()
+            try { block() } finally { endBackgroundWork() }
+        }
+
     /** 有生成在跑/待回复 → 前台服务保活；全部结束 → 停止。 */
     private fun syncForegroundService() {
-        val should = generationPending || convLoading.values.any { it } || convTyping.values.any { it }
+        val should = hasAnyActiveGeneration()
         val now = System.currentTimeMillis()
         // 标志位要跟现实对账：进程被系统回收过的话服务已经没了，仍记着 true 就再也不会重新拉起来，
         // 后面每一轮都会「以为保活还在」——这正是「切后台后 AI 迟迟不回复」最隐蔽的一种。
@@ -380,6 +416,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ReplyService.stop(getApplication())
         }
         renewKeepAliveLock()
+        if (should && keepAliveHeartbeat?.isActive != true) {
+            keepAliveHeartbeat = viewModelScope.launch {
+                while (isActive) {
+                    delay(15_000)
+                    syncForegroundService()
+                }
+            }
+        } else if (!should) {
+            keepAliveHeartbeat?.cancel()
+            keepAliveHeartbeat = null
+        }
     }
 
     /**
@@ -395,11 +442,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 回复完成且处于后台时，发系统通知（悬浮 + 通知中心，对标微信新消息） */
-    private fun notifyReplyIfBackground(title: String, content: String) {
-        if (content.isBlank()) return
+    private fun notifyReplyIfBackground(convId: String, title: String, content: String, imageCompleted: Boolean = false) {
         // 主动消息是「闹钟把 App 从死里叫醒」这条路径，前台标记不可信，一律照发
         if (appInForeground) return
-        ReplyService.showReply(getApplication(), title, content)
+        val text = content.ifBlank { if (imageCompleted) com.freechat.i18n.LocaleManager.strings().imageReadyNotification else "" }
+        if (text.isBlank()) return
+        ReplyService.showReply(getApplication(), convId, title, text)
     }
 
     // 待发送的图片（已拷贝到内部存储：path 用于显示 + 持久化，mime 用于 API）
@@ -793,8 +841,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 { com.freechat.data.RemoteNotices.lastShownAt(getApplication(), it) },
                 now
             )
+            // 内置条目整表保留、不按版本筛——「有这条但版本不命中」必须和「云单没这条」
+            // 区分开（丢表=调用方当没配=回落默认照弹）。是否生效由用的地方走
+            // RemoteNotices.reservedActive 判（builtin-feature 启停+版本区间都在那）。
             _reservedNotices.value = list
-                .filter { it.trigger != "manual" && com.freechat.data.RemoteNotices.targets(it, com.freechat.BuildConfig.VERSION_NAME) }
+                .filter { it.trigger != "manual" }
                 .associateBy { it.id }
             _remoteConfigLoaded.value = true
         }
@@ -1383,10 +1434,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun globalModels() = RequestModels(_selectedModel.value, _selectedVisualModel.value, _selectedVisionModel.value)
 
     private fun resolveModels(convId: String?, character: CharacterProfile? =
-        convId?.let { id -> _conversations.value.find { it.id == id }?.characterProfile }): RequestModels =
-        ModelSelectionResolver.resolve(globalModels(),
+        convId?.let { id -> _conversations.value.find { it.id == id }?.characterProfile }): RequestModels {
+        val conversation = _conversations.value.find { it.id == convId }
+        val group = conversation?.groupChat
+        val story = conversation?.storyProfile
+        return ModelSelectionResolver.resolve(globalModels(),
             modelsOfType(ModelType.LANGUAGE) + modelsOfType(ModelType.VISUAL) + modelsOfType(ModelType.VISION),
-            convId?.let { _perConvSettings.value[it] }, character)
+            if (group != null) PerConvSettings(languageModelId = group.languageModelId, visionModelId = group.visionModelId)
+            else if (story != null) PerConvSettings(languageModelId = story.languageModelId, visualModelId = story.visualModelId)
+            else convId?.let { _perConvSettings.value[it] }, if (group == null && story == null) character else null)
+    }
 
     private suspend fun requestModels(): RequestModels = coroutineContext[RequestModels] ?: globalModels()
 
@@ -1397,26 +1454,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val length: LengthMode, val autoMem: Boolean
     )
 
-    private fun applyPerConvSettings(convId: String?): SettingsSnapshot {
-        val snap = SettingsSnapshot(
-            _enableWebSearch.value, _showThinking.value, _tempMode.value,
-            _lengthMode.value, _autoSummarizeMemory.value
-        )
-        val over = convId?.let { _perConvSettings.value[it] } ?: return snap
-        over.enableWebSearch?.let { _enableWebSearch.value = it }
-        over.showThinking?.let { _showThinking.value = it }
-        over.autoSummarizeMemory?.let { _autoSummarizeMemory.value = it }
-        over.tempModeOrdinal?.let { _tempMode.value = TempMode.entries.getOrElse(it) { TempMode.AUTO } }
-        over.lengthModeOrdinal?.let { _lengthMode.value = LengthMode.entries.getOrElse(it) { LengthMode.AUTO } }
-        return snap
-    }
+    private fun globalRequestSettings() = SettingsSnapshot(_enableWebSearch.value, _showThinking.value,
+        _tempMode.value, _lengthMode.value, _autoSummarizeMemory.value)
 
-    private fun restoreSettings(snap: SettingsSnapshot) {
-        _enableWebSearch.value = snap.search
-        _showThinking.value = snap.showThinking
-        _tempMode.value = snap.temp
-        _lengthMode.value = snap.length
-        _autoSummarizeMemory.value = snap.autoMem
+    private fun requestSettings(): SettingsSnapshot = requestPreferences.get() ?: globalRequestSettings()
+
+    private fun applyPerConvSettings(convId: String?): SettingsSnapshot {
+        val global = globalRequestSettings()
+        val over = convId?.let { _perConvSettings.value[it] } ?: return global
+        return SettingsSnapshot(over.enableWebSearch ?: global.search, over.showThinking ?: global.showThinking,
+            over.tempModeOrdinal?.let { TempMode.entries.getOrElse(it) { TempMode.AUTO } } ?: global.temp,
+            over.lengthModeOrdinal?.let { LengthMode.entries.getOrElse(it) { LengthMode.AUTO } } ?: global.length,
+            over.autoSummarizeMemory ?: global.autoMem)
     }
 
     // ========== 问候语 ==========
@@ -1885,6 +1934,275 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         syncDisplayGenerationState(null)
     }
 
+    /** Persist only after the user has named and explicitly started the group settings draft. */
+    fun startGroupConversation(title: String, group: GroupChatProfile, settings: PerConvSettings = PerConvSettings()): String {
+        require(GroupChatPolicy.canStart(title, group))
+        saveCurrentConversation()
+        val now = System.currentTimeMillis()
+        val conv = Conversation(id = UUID.randomUUID().toString(),
+            title = title.trim(), createdAt = now, updatedAt = now,
+            messageCount = 0, mode = ChatMode.COMPANION, groupChat = group)
+        _conversations.value = sortConversations(_conversations.value + conv)
+        saveConversations()
+        if (settings != PerConvSettings()) updatePerConvSettings(conv.id, settings)
+        _currentConversationId.value = conv.id
+        _currentMode.value = ChatMode.COMPANION
+        _currentCharacter.value = null
+        _messages.value = emptyList()
+        _liveContent.value = ""
+        _liveReasoning.value = ""
+        syncDisplayGenerationState(conv.id)
+        return conv.id
+    }
+
+    fun startStoryConversation(title: String, story: StoryProfile) {
+        require(title.isNotBlank() && StoryPolicy.isValid(story))
+        saveCurrentConversation()
+        val now = System.currentTimeMillis()
+        val conv = Conversation(title = title.trim(), createdAt = now, updatedAt = now,
+            mode = ChatMode.COMPANION, storyProfile = story.copy(updatedAt = now))
+        _conversations.value = sortConversations(_conversations.value + conv)
+        saveConversations()
+        switchToConversation(conv)
+    }
+
+    fun updateStory(convId: String, title: String, story: StoryProfile): Boolean {
+        val old = _conversations.value.find { it.id == convId }?.storyProfile ?: return false
+        if (title.isBlank() || !StoryPolicy.isValid(story) || isConversationBusy(convId)) return false
+        val next = story.copy(updatedAt = maxOf(System.currentTimeMillis(), old.updatedAt + 1))
+        _conversations.value = _conversations.value.map { if (it.id == convId) it.copy(title = title.trim(), storyProfile = next) else it }
+        saveConversations()
+        com.freechat.sync.ImageSync.releaseUnreferenced(old.members.flatMap {
+            listOf(it.persona.avatarPath, it.persona.appearanceImagePath) + it.persona.appearanceImagePaths })
+        return true
+    }
+
+    fun updateGroup(convId: String, group: GroupChatProfile): Boolean {
+        val old = _conversations.value.find { it.id == convId }?.groupChat ?: return false
+        if (!GroupChatPolicy.canApplyUpdate(old, group, isConversationBusy(convId))) return false
+        val published = group.announcement != old.announcement
+        val next = group.copy(announcementAt = if (published) System.currentTimeMillis() else old.announcementAt,
+            updatedAt = maxOf(System.currentTimeMillis(), old.updatedAt + 1))
+        _conversations.value = _conversations.value.map { if (it.id == convId) it.copy(groupChat = next) else it }
+        saveConversations()
+        if (published) persistConversationMessages(convId, loadMessages(convId) + Message(role = Role.SYSTEM,
+            content = if (next.announcement.isBlank()) "群公告已清空" else "群公告：${next.announcement}",
+            mode = ChatMode.COMPANION, groupEventType = "announcement"))
+        com.freechat.sync.ImageSync.releaseUnreferenced(listOf(old.avatarPath) + old.members.flatMap {
+            listOf(it.persona.avatarPath, it.persona.appearanceImagePath) + it.persona.appearanceImagePaths })
+        return true
+    }
+
+    fun updateGroupMember(convId: String, memberId: String, persona: CharacterPersona): Boolean {
+        val group = _conversations.value.find { it.id == convId }?.groupChat ?: return false
+        if (group.members.none { it.id == memberId }) return false
+        return updateGroup(convId, group.copy(members = group.members.map {
+            if (it.id == memberId) it.copy(persona = persona) else it }))
+    }
+
+    fun mentionGroupMember(memberId: String) {
+        val convId = _currentConversationId.value ?: return
+        val member = _conversations.value.find { it.id == convId }?.groupChat?.members?.find { it.id == memberId } ?: return
+        val draft = (groupMentionDrafts[convId] ?: com.freechat.core.GroupMentionDraft(getDraft(convId)))
+            .edit(getDraft(convId)).mention(member.id, member.persona.name)
+        groupMentionDrafts[convId] = draft
+        _inputDrafts.value = _inputDrafts.value + (convId to draft.text)
+    }
+
+    fun getGroupMentionDraft(convId: String?): com.freechat.core.GroupMentionDraft? = convId?.takeIf { id ->
+        _conversations.value.any { it.id == id && it.groupChat != null }
+    }?.let { id -> (groupMentionDrafts[id] ?: com.freechat.core.GroupMentionDraft()).edit(getDraft(id)) }
+
+    fun mentionGroupMemberAt(memberId: String, start: Int, end: Int): com.freechat.core.GroupMentionDraft? {
+        val convId = _currentConversationId.value ?: return null
+        val member = _conversations.value.find { it.id == convId }?.groupChat?.members?.find { it.id == memberId } ?: return null
+        val draft = getGroupMentionDraft(convId)?.mentionAt(member.id, member.persona.name, start, end) ?: return null
+        groupMentionDrafts[convId] = draft
+        _inputDrafts.value = _inputDrafts.value + (convId to draft.text)
+        return draft
+    }
+
+    fun nudgeGroupMember(memberId: String) {
+        val convId = _currentConversationId.value ?: return
+        val group = _conversations.value.find { it.id == convId }?.groupChat ?: return
+        val member = group.members.find { it.id == memberId } ?: return
+        sendGroupMessage(convId, Message(role = Role.SYSTEM,
+            content = "${group.userNickname}拍了拍${member.persona.name}", mode = ChatMode.COMPANION,
+            groupEventType = "nudge", groupTargetMemberId = member.id))
+    }
+
+    private fun sendGroupMessage(convId: String, message: Message) {
+        if (_conversations.value.none { it.id == convId && it.groupChat != null }) return
+        pendingQuoteText = null
+        persistConversationMessages(convId, loadMessages(convId) + message)
+        val pipeline = groupPipelines.getOrPut(convId) { GroupPipeline() }
+        pipeline.pending.add(message.id)
+        pipeline.serial++
+        pipeline.job?.cancel()
+        val serial = pipeline.serial
+        markGenerationStarted()
+        setConvLoading(convId, true)
+        pipeline.job = viewModelScope.launch {
+            val group = _conversations.value.find { it.id == convId }?.groupChat ?: return@launch
+            try {
+                if (group.replyBufferEnabled) delay(group.replyBufferSeconds.coerceIn(1, 6) * 1000L)
+                val triggers = pipeline.pending.toList()
+                runGroupTurn(convId, UUID.randomUUID().toString(), group, triggers, pipeline, serial)
+                pipeline.pending.removeAll(triggers.toSet())
+            } finally {
+                if (serial == pipeline.serial) { setConvLoading(convId, false); setConvTyping(convId, false) }
+            }
+        }
+    }
+
+    /** Retry only the failed step. Accepted speech from other members is never replayed. */
+    fun retryGroupMessage(messageId: String) {
+        val convId = _currentConversationId.value ?: return
+        if (isConversationBusy(convId)) return
+        val group = _conversations.value.find { it.id == convId }?.groupChat ?: return
+        val message = loadMessages(convId).find { it.id == messageId && it.failed } ?: return
+        val turnId = message.groupTurnId ?: return
+        val stepId = message.groupStepId ?: return
+        val memberId = message.groupMemberId
+        if (memberId != null && group.members.none { it.id == memberId }) return
+        val surviving = loadMessages(convId).mapTo(HashSet()) { it.id }
+        if (message.groupTriggerMessageIds.isEmpty() || message.groupTriggerMessageIds.any { it !in surviving }) return
+        deleteMessageIds(convId, setOf(message.id), cancelGeneration = false)
+        val pipeline = groupPipelines.getOrPut(convId) { GroupPipeline() }
+        val serial = ++pipeline.serial
+        markGenerationStarted()
+        setConvLoading(convId, true)
+        pipeline.job = viewModelScope.launch {
+            try { runGroupTurn(convId, turnId, group, message.groupTriggerMessageIds, pipeline, serial,
+                memberId?.let { listOf(com.freechat.core.GroupReplyStep(stepId, it)) }) }
+            finally { if (serial == pipeline.serial) { setConvLoading(convId, false); setConvTyping(convId, false) } }
+        }
+    }
+
+    private suspend fun runGroupTurn(convId: String, turnId: String, group: GroupChatProfile,
+        triggerIds: List<String>, pipeline: GroupPipeline, serial: Long,
+        retry: List<com.freechat.core.GroupReplyStep>? = null) = withContext(resolveModels(convId)) {
+        val turnJob = coroutineContext[Job]
+        fun valid(): Boolean = turnJob?.isActive != false && pipeline.serial == serial &&
+            _conversations.value.any { it.id == convId && it.groupChat != null } &&
+            !com.freechat.data.ConversationDeletion.contains(convId) &&
+            triggerIds.none { it in MessageDeletion.deletedIds(convId) }
+        if (!valid()) return@withContext
+        val models = requestModels()
+        val deep = models.language.supportsDeepThinking && deepThinkFor(getPerConvSettings(convId), models.language)
+        val recallOn = settingsRepo.autoSummarizeMemory.first()
+        val nowText = if (group.timePerception) SimpleDateFormat("yyyy-MM-dd HH:mm EEEE", Locale.getDefault()).format(Date()) else ""
+        var history = pickHistory(loadMessages(convId), historyBudgetTokens(group.highQualityMemory))
+        try {
+            // Shared observation contains public chat only; no member's private profile or memory.
+            history.filter { it.id in triggerIds && it.imagePaths.isNotEmpty() && it.imageContext.isNullOrBlank() }.forEach { row ->
+                val vision = models.vision ?: error("请先在群聊设置或全局设置中配置识图模型。")
+                val encoded = encodeImagesForApi(row.imagePaths.map { PendingImage(it, detectMime(it)) })
+                check(encoded.isNotEmpty()) { "图片读取失败，请重新上传。" }
+                val public = com.freechat.core.GroupChatPrompts.publicMessages(group, history)
+                val prompt = com.freechat.data.VisionConversationContext.attach(public, encoded, CompanionPrompts.visionObservationRequest())
+                val observation = groupModelReply(vision, prompt,
+                    vision.supportsDeepThinking && (deepThinkOverride(getPerConvSettings(convId), models.language) ?: vision.deepThinkingDefault),
+                    0.3, "group_vision")
+                check(observation.isNotBlank()) { "识图模型返回为空。" }
+                if (!valid()) return@withContext
+                persistConversationMessages(convId, loadMessages(convId).map { if (it.id == row.id) it.copy(imageContext = observation) else it })
+            }
+            history = pickHistory(loadMessages(convId), historyBudgetTokens(group.highQualityMemory))
+            var evidence = ""
+            var citations = emptyList<SearchCitation>()
+            val searchOn = getPerConvSettings(convId).enableWebSearch ?: settingsRepo.enableWebSearch.first()
+            val triggerText = history.filter { it.id in triggerIds }.joinToString("\n") { it.content }
+            if (searchOn) {
+                val intent = planSearchWithModel(triggerText, history)
+                if (intent != null) {
+                    val result = retrieveSearch(triggerText, deep, intent, convId)
+                    evidence = result.text
+                    citations = SearchPresentation.normalize(result.entries.map { it.title to it.link })
+                }
+            }
+            val conversationRules = _conversations.value.find { it.id == convId }?.rules.orEmpty()
+            val rules = conversationRules + if (evidence.isNotBlank()) "\n【本轮公开检索资料，仅按需使用】\n$evidence" else ""
+            val turn = com.freechat.core.GroupTurn(convId, turnId, group, history, triggerIds, rules, nowText = nowText)
+            val engine = com.freechat.core.GroupChatEngine(
+                plan = { context ->
+                    val raw = groupModelReply(models.language, com.freechat.core.GroupChatPrompts.plannerMessages(
+                        group, context.history, rules, nowText), deep, 0.3, "group_plan")
+                    com.freechat.core.GroupChatPrompts.parsePlan(raw, group)
+                },
+                generate = { context, member, publicHistory ->
+                    setConvTyping(convId, true)
+                    val memory = if (recallOn) memoryManager.buildMemberMemoryContext(convId, member.id, group.highQualityMemory) else ""
+                    val prompts = com.freechat.core.GroupChatPrompts.actorMessages(group, member, publicHistory, memory, rules, nowText)
+                    val materials = if (group.highQualityMemory && group.deepThinking) {
+                        val prep = groupModelReply(models.language, prompts.dropLast(1) + mapOf("role" to "system",
+                            "content" to CompanionPrompts.deepPrepRequest()), deep, companionTemperature(group.aiCreativity), "group_prep")
+                        prompts.dropLast(1) + mapOf("role" to "system", "content" to "【仅供你内部参考，不向群内复述】\n$prep") + prompts.last()
+                    } else prompts
+                    com.freechat.core.GroupGeneratedReply(groupModelReply(models.language, materials, deep,
+                        companionTemperature(group.aiCreativity), "group_reply"), models.language.displayName, citations)
+                },
+                deliver = { row ->
+                    if (!valid()) false else {
+                        persistConversationMessages(convId, loadMessages(convId) + separateCitationLinks(row, triggerText))
+                        if (!row.failed) notifyReplyIfBackground(convId,
+                            _conversations.value.find { it.id == convId }?.title ?: "FreeChat",
+                            "${row.groupSenderName.orEmpty()}：${row.voiceText ?: row.content}")
+                        true
+                    }
+                },
+                isValid = ::valid, pause = { delay(it) }, failureText = { briefApiError(it as? Exception ?: IOException(it.message)) },
+                onStepFinished = { member, accepted ->
+                    if (recallOn && valid()) {
+                        val memoryHistory = pickHistory(loadMessages(convId), historyBudgetTokens(group.highQualityMemory))
+                        summarizeGroupMember(convId, member, group,
+                            com.freechat.core.GroupChatPrompts.publicMessages(group, memoryHistory).joinToString("\n") { it["content"].toString() },
+                            accepted, memoryHistory.map { it.id } + accepted.map { it.id }, models)
+                    }
+                })
+            engine.run(turn, retry)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) {
+            if (valid()) persistConversationMessages(convId, loadMessages(convId) + Message(id = "$turnId:plan:failed:${UUID.randomUUID()}",
+                role = Role.SYSTEM, content = briefApiError(error), mode = ChatMode.COMPANION, failed = true,
+                groupEventType = "error", groupTurnId = turnId, groupStepId = "plan", groupTriggerMessageIds = triggerIds))
+        }
+    }
+
+    private suspend fun groupModelReply(model: ModelInfo, messages: List<Map<String, Any?>>,
+        deep: Boolean, temperature: Double, stage: String): String = withContext(Dispatchers.IO) {
+        val (url, key) = routeModelEndpoint(model)
+        val body = gson.toJson(mapOf("model" to model.id, "messages" to messages, "stream" to false,
+            "temperature" to temperature) + deepThinkExtras(deep, model)).toRequestBody(JSON_MEDIA)
+        val (code, raw) = executeCompanionCall(Request.Builder().url(url).header("Authorization", "Bearer $key")
+            .post(body).build(), stage)
+        if (code !in 200..299) throw IOException("API error $code: ${raw.take(250)}")
+        JsonParser.parseString(raw).asJsonObject.getAsJsonArray("choices")?.firstOrNull()?.asJsonObject
+            ?.getAsJsonObject("message")?.optString("content")?.trim().orEmpty()
+    }
+
+    private fun summarizeGroupMember(convId: String, member: GroupMember, group: GroupChatProfile,
+        publicText: String, replies: List<Message>, sources: List<String>, models: RequestModels) {
+        launchBackgroundWork(models) {
+            try {
+                if (!settingsRepo.autoSummarizeMemory.first()) return@launchBackgroundWork
+                val draft = withContext(Dispatchers.IO) { summarizeExchange(publicText,
+                    replies.joinToString("\n") { it.content }, group.highQualityMemory, false, member.persona.toProfile()) }
+                ensureActive()
+                val current = _conversations.value.find { it.id == convId }?.groupChat ?: return@launchBackgroundWork
+                val ids = loadMessages(convId).mapTo(HashSet()) { it.id }
+                if (current.members.none { it.id == member.id } || sources.any { it !in ids } ||
+                    !settingsRepo.autoSummarizeMemory.first()) return@launchBackgroundWork
+                if (listOf(draft.summary, draft.roleKnowledge, draft.openLoops).any { it.isNotBlank() })
+                    memoryManager.appendMember(convId, member.id, MemoryEntry(summary = draft.summary,
+                        keywords = draft.keywords, kind = draft.kind, timestamp = replies.last().timestamp,
+                        eventDate = draft.date, sourceMessageIds = sources.distinct(), roleKnowledge = draft.roleKnowledge,
+                        openLoops = draft.openLoops), group.highQualityMemory)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { Log.w("FreeChat", "Group memory extraction failed", error) }
+        }
+    }
+
     /** 创建拟人角色后立即建立对话（0 消息也落侧滑栏），并可选地以「对方正在输入」延迟发出开场白 */
     fun startCompanionConversation(character: CharacterProfile) {
         saveCurrentConversation()
@@ -1944,7 +2262,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Explicit form commit, bound to the opened character rather than the selected chat. */
     fun updateCharacter(conversationId: String, profile: CharacterProfile): Boolean {
-        if (isConversationBusy(conversationId) || _conversations.value.none { it.id == conversationId }) return false
+        if (isConversationBusy(conversationId) || _conversations.value.none { it.id == conversationId && it.groupChat == null && it.storyProfile == null }) return false
         val convId = conversationId
         if (_currentConversationId.value == convId) _currentCharacter.value = profile
         _conversations.value = _conversations.value.map {
@@ -2052,14 +2370,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val forced = copyNoticeForced
         copyNoticeForced = false
         _conflictCopyNotice.value = 0
-        // 开发者测试弹窗勾「永不提醒」不落盘——不能让测试把真实提醒永久关掉
+        // 测试态的勾选不落盘——真实提醒记账一字不动
         if (never && !forced) viewModelScope.launch { settingsRepo.saveCopyNoticeNever(true) }
     }
 
-    // 非开源弹窗测试态（1.1.26.2）：被强制弹过的提醒不写「永不提醒/冷却」
+    // 非开源弹窗测试态（1.1.26.2）：测试态专用记账口径
     private var copyNoticeForced = false
 
-    /** 强制弹冲突副本提醒（不论是否真有副本），用于开发者测试渲染效果。 */
+    /** 开发者测试接线（触发端在非开源区）。 */
     fun forceCopyNotice() {
         copyNoticeForced = true
         _conflictCopyNotice.value = 1
@@ -2089,14 +2407,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val forced = updateNoticeForced
         updateNoticeForced = false
         _updateNotice.value = null
-        // 开发者测试弹窗勾「近期不再提醒」不落盘——不能让测试把真实提醒冷却 3 天
+        // 测试态的勾选不落盘——真实提醒记账一字不动
         if (snooze && !forced) viewModelScope.launch { settingsRepo.saveUpdateSnoozeAt(System.currentTimeMillis()) }
     }
 
-    // 非开源弹窗测试态（1.1.26.2）：被强制弹过的提醒不写「永不提醒/冷却」
+    // 非开源弹窗测试态（1.1.26.2）：测试态专用记账口径
     private var updateNoticeForced = false
 
-    /** 强制弹更新提醒（不论是否真有新版本），用于开发者测试渲染效果。 */
+    /** 开发者测试接线（触发端在非开源区）。 */
     fun forceUpdateNotice() {
         updateNoticeForced = true
         _updateNotice.value = com.freechat.data.AppLatest(
@@ -2432,7 +2750,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun renameConversation(conversation: Conversation, newTitle: String) {
         _conversations.value = sortConversations(
             _conversations.value.map {
-                if (it.id == conversation.id) it.copy(title = newTitle)
+                if (it.id == conversation.id) it.copy(title = newTitle, storyProfile = it.storyProfile?.let { story ->
+                    story.copy(updatedAt = maxOf(System.currentTimeMillis(), story.updatedAt + 1)) })
                 else it
             }
         )
@@ -2549,7 +2868,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val model = effectiveLangModel()
         if (!model.supportsDeepThinking) return false
         val convId = _currentConversationId.value
-        val ch = convId?.let { id -> _conversations.value.find { it.id == id }?.characterProfile }
+        val conversation = _conversations.value.find { it.id == convId }
+        conversation?.storyProfile?.let { return it.deepThinkingMode }
+        val ch = conversation?.characterProfile
         if (ch != null) return ch.deepThinkingMode
         val per = if (convId != null) _perConvSettings.value[convId] else _pendingNewConvSettings.value
         return deepThinkFor(per, model)
@@ -2569,6 +2890,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (convId == null) {
             val draft = _pendingNewConvSettings.value
             _pendingNewConvSettings.value = draft.copy(deepThinkByModel = draft.deepThinkByModel + (modelId to on))
+            return
+        }
+        val story = _conversations.value.find { it.id == convId }?.storyProfile
+        if (story != null) {
+            updateStory(convId, _conversations.value.first { it.id == convId }.title, story.copy(deepThinkingMode = on))
             return
         }
         val ch = _conversations.value.find { it.id == convId }?.characterProfile
@@ -2821,6 +3147,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (_isAddingImages.value) return  // 图片还在处理中，稍后再发
         if (_isAddingFiles.value) return   // 文件还在拷贝中，稍后再发
 
+        val storyConversation = _conversations.value.find { it.id == _currentConversationId.value }?.storyProfile
+        if (storyConversation != null && (_isLoading.value || _isTyping.value)) return
         // 用户确实要发消息了：立即启动前台服务保活，锁屏/切后台不冻网、不中断回复。
         // 拟人模式的「缓冲等待期」也一并覆盖，避免锁屏后缓冲结束才从后台启动前台服务被系统限制。
         markGenerationStarted()
@@ -2829,6 +3157,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (_currentMode.value == ChatMode.COMPANION) {
             val imageSnapshot = _pendingImages.value.map { it.path }
             if (hasImage) _pendingImages.value = emptyList()
+            val groupId = _currentConversationId.value?.takeIf { id -> _conversations.value.any { it.id == id && it.groupChat != null } }
+            if (groupId != null) {
+                val mentionDraft = groupMentionDrafts.remove(groupId)?.edit(trimmedText)
+                sendGroupMessage(groupId, Message(role = Role.USER, content = trimmedText,
+                    imagePaths = imageSnapshot, mode = ChatMode.COMPANION, quotedText = quotedText,
+                    quotedImagePath = quotedImagePath, voicePath = voicePath,
+                    mentionedMemberIds = mentionDraft?.memberIds().orEmpty(), groupMentions = mentionDraft?.validBindings().orEmpty()))
+                return
+            }
             sendCompanionMessage(trimmedText, imageSnapshot, quotedText, quotedImagePath, voicePath)
             return
         }
@@ -2887,8 +3224,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         } else if (trimmedText.isNotBlank()) {
             newUserMessages.add(Message(role = Role.USER, content = trimmedText, quotedText = quotedText, quotedImagePath = quotedImagePath, voicePath = voicePath))
         }
-        activeRoundStartIndex = _messages.value.size  // ★ 停止即删除本轮：记录用户消息起点
-        activeRoundConvId = convId
+        activeRoundStarts[convId] = _messages.value.size
         _messages.value = _messages.value + com.freechat.data.MessageBatchOrder.after(_messages.value, newUserMessages)
         touchCurrentConversation()
         persistConversationMessages(convId, _messages.value)
@@ -2902,17 +3238,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         setConvLoading(convId, true)
         val replyId = convGenerationReplyIds.getValue(convId)
-        _liveReasoning.value = ""
-        _liveContent.value = ""
+        updateLive(convId, reasoning = "")
+        updateLive(convId, content = "")
         _thinkingTimeMs.value = 0L
 
-        standardGenerationConvId = convId
-        val generationId = ++standardGenerationId
-        streamJob = viewModelScope.launch(resolveModels(convId)) {
+        val generationId = convGenerationSerials.getValue(convId)
+        standardJobs[convId] = viewModelScope.launch(resolveModels(convId) + requestConversation.asContextElement(convId) +
+            requestPreferences.asContextElement(applyPerConvSettings(convId))) {
             val startTime = System.currentTimeMillis()
             val generationTimer = com.freechat.data.GenerationTimer()
-            val snapshot = applyPerConvSettings(convId)
-            standardSettingsSnapshot = snapshot
             val langModelName = requestModels().language.displayName
             val visualModelName = requestModels().visual.displayName
             setGenerationModel(convId, langModelName)
@@ -2947,9 +3281,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     listOf(assistantMessage.copy(id = replyId)), maxOf(System.currentTimeMillis(), assistantMessage.timestamp)).single()
                 working.add(completed)
                 persistConversationMessages(convId, working)
-                _liveReasoning.value = ""
-                _liveContent.value = ""
-                notifyReplyIfBackground("FreeChat", assistantMessage.content)
+                updateLive(convId, reasoning = "")
+                updateLive(convId, content = "")
+                if (!assistantMessage.failed) notifyReplyIfBackground(convId,
+                    _conversations.value.find { it.id == convId }?.title ?: "FreeChat", assistantMessage.content,
+                    imageCompleted = assistantMessage.imageUrls.isNotEmpty())
                 summarizeAndRemember(convId, summaryUserText, completed)
                 if (isNewConversation) maybeAutoTitle(convId, summaryUserText)
             } catch (e: CancellationException) {
@@ -2967,17 +3303,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 working.add(errMsg)
                 persistConversationMessages(convId, working)
-                _liveReasoning.value = ""
-                _liveContent.value = ""
+                updateLive(convId, reasoning = "")
+                updateLive(convId, content = "")
             } finally {
-                if (generationId == standardGenerationId) {
-                    restoreSettings(snapshot)
+                if (generationId == convGenerationSerials[convId]) {
                     setConvLoading(convId, false)
                     setConvTyping(convId, false)
-                    activeRoundStartIndex = -1
-                    activeRoundConvId = null
-                    standardSettingsSnapshot = null
-                    standardGenerationConvId = null
+                    activeRoundStarts.remove(convId)
+                    standardJobs.remove(convId)
                 }
             }
         }
@@ -2995,7 +3328,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // 而且两边同时写同一个对话文件会互相覆盖（主动那条会被这次回复的旧快照抹掉）。
 
         // 记录「晚安/睡了」短期状态（按对话）：短时间内用户再发消息，AI 有时间概念（「不是说睡了吗」）
-        if (detectGoodnight(trimmedText)) {
+        if (_conversations.value.find { it.id == convId }?.storyProfile == null && detectGoodnight(trimmedText)) {
             userSaidGoodnightAt[convId] = System.currentTimeMillis()
         }
 
@@ -3035,7 +3368,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         try {
             // 回复缓冲只属于「微信聊天」档：动作演绎/剧情补足是整段演绎，不需要先攒消息再一起回
             // （旧版只在 UI 上隐藏了这一节，运行时仍会照等 3 秒 —— 这次一并修掉）
-            val wechatMode = (character?.dialogueMode ?: DialogueMode.WECHAT) == DialogueMode.WECHAT
+            val wechatMode = _conversations.value.find { it.id == convId }?.storyProfile == null &&
+                (character?.dialogueMode ?: DialogueMode.WECHAT) == DialogueMode.WECHAT
             val enabled = wechatMode && character?.replyBufferEnabled != false  // 默认开启
             val seconds = if (enabled) character?.replyBufferSeconds?.coerceIn(1, 6) ?: 3 else 0
             if (seconds > 0) delay(seconds * 1000L)  // 缓冲窗口：给用户连续发消息的时间；关闭则发送后立即开始思考
@@ -3058,7 +3392,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // ★ M4 收口（1.0.91）：接微信的对话生成全权在服务器（同一颗大脑、与 App 同码机制），
         //   App 只当瘦客户端窗口。用户消息照常本地落盘+同步（skipUserWrite，大脑不重复写）；
         //   图片消息不走收口（内置 mimo 纯文本代调，识图生图不带），仍走本地生成。
-        if (imagePaths.isEmpty() && isWeChatAttached(convId)) {
+        if (_conversations.value.find { it.id == convId }?.storyProfile == null && imagePaths.isEmpty() && isWeChatAttached(convId)) {
             try {
                 generateViaServer(convId, character, text, System.currentTimeMillis())
             } catch (e: CancellationException) {
@@ -3075,6 +3409,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         val working = loadMessages(convId).toMutableList()
         pipeline.replyStart = working.size
+        if (_conversations.value.find { it.id == convId }?.storyProfile != null || character?.isNarrativeMode() == true) {
+            activeRoundStarts[convId] = working.indexOfLast { it.role == Role.USER }
+        }
         try {
             generateCompanionReply(convId, character, working, text, imagePaths, startTime, batchSize = turns.size)
         } catch (e: CancellationException) {
@@ -3089,6 +3426,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 setConvLoading(convId, false)
                 setConvTyping(convId, false)
                 pipeline.replyStart = -1
+                activeRoundStarts.remove(convId)
             }
         }
     }
@@ -3157,14 +3495,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val segments = out.getAsJsonArray("segments")?.map { it.asString }.orEmpty()
         if (segments.isEmpty()) return                                     // 生气不回 / 空回复
         val ids = out.getAsJsonArray("messageIds")?.map { it.asString }.orEmpty()
-        val emotion = out.get("emotion")?.asString.orEmpty()
         val narrative = character?.isNarrativeMode() == true
-        val mood = if (narrative) CompanionMood.NEUTRAL else
-            (parseEmotionLabel(emotion) ?: moodWithResidue(text, getPerConvSettings(convId)))
+        val plan = out.get("delaysMs")?.takeIf { it.isJsonArray }?.asJsonArray?.map {
+            runCatching { it.asLong }.getOrDefault(-1L)
+        }
+        val delays = CompanionRhythm.validatedDelaysMs(plan, segments, narrative, System.currentTimeMillis() - startTime)
         for ((i, seg) in segments.withIndex()) {
-            if (i > 0) {
+            if (delays[i] > 0) {
                 setConvTyping(convId, true)
-                delay(CompanionRhythm.segmentIntervalMs(mood, narrative))
+                delay(delays[i])
                 setConvTyping(convId, false)
             }
             val msg = Message(
@@ -3194,16 +3533,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Saving an icon can interrupt any conversation, not just the one currently on screen. */
-    fun hasAnyActiveGeneration(): Boolean = com.freechat.data.IconRestartPolicy.requiresConfirmation(
+    fun hasAnyActiveGeneration(): Boolean = backgroundWorkCount > 0 || com.freechat.data.IconRestartPolicy.requiresConfirmation(
         generationPending, convLoading.values, convTyping.values)
 
     /** A restart is not the stop/delete action: keep all already persisted dialogue and user input. */
     fun prepareForIconRestart() {
         saveCurrentConversation()
-        val activeIds = (convLoading.keys + convTyping.keys + companionPipelines.keys +
-            listOfNotNull(standardGenerationConvId)).toSet()
+        val activeIds = (convLoading.keys + convTyping.keys + companionPipelines.keys + groupPipelines.keys +
+            standardJobs.keys).toSet()
         activeIds.forEach(::cancelConversationGeneration)
-        currentCall.getAndSet(null)?.cancel()
+        generationCalls.values.forEach { it.cancel() }
+        generationCalls.clear()
         generationPending = false
         TtsController.stop()
         syncForegroundService()
@@ -3212,9 +3552,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     /** 停止当前 AI 生成，并删除本轮（用户消息 + AI 回复） */
     fun stopGeneration() {
         val convId = _currentConversationId.value
-        val start = if (convId == activeRoundConvId) activeRoundStartIndex else -1
-        activeRoundStartIndex = -1
-        activeRoundConvId = null
+        val start = convId?.let { activeRoundStarts.remove(it) } ?: -1
         if (convId != null) {
             if (start >= 0 && start <= _messages.value.size)
                 deleteMessageIds(convId, _messages.value.drop(start).mapTo(HashSet()) { it.id })
@@ -3241,7 +3579,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * 删完再读就只能拿到空串。
      */
     fun retractCurrentRound() {
-        val start = if (_currentConversationId.value == activeRoundConvId) activeRoundStartIndex else -1
+        val start = _currentConversationId.value?.let { activeRoundStarts[it] } ?: -1
         val pending = if (start in 0 until _messages.value.size) {
             _messages.value.subList(start, _messages.value.size)
                 .filter { it.role == Role.USER }
@@ -3258,7 +3596,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun regenerate(aiIndex: Int) {
         if (_isLoading.value || _isTyping.value) return
         if (_currentMode.value == ChatMode.COMPANION &&
-            !com.freechat.data.CompanionFeaturePolicy.supportsNarrativeActions(_currentCharacter.value)) return
+            !com.freechat.data.CompanionFeaturePolicy.supportsNarrativeActions(_currentCharacter.value) &&
+            _conversations.value.none { it.id == _currentConversationId.value && it.storyProfile != null }) return
         val convId = _currentConversationId.value ?: return
         val msgs = _messages.value
         if (aiIndex < 0 || aiIndex >= msgs.size || msgs[aiIndex].role != Role.ASSISTANT) return
@@ -3319,17 +3658,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val replyId = convGenerationReplyIds.getValue(convId)
         // 重生成：时间戳复用旧回复（保序），旁路让入场/打字机仍演一次
         AnimationReplay.mark(replyId)
-        _liveReasoning.value = ""
-        _liveContent.value = ""
+        updateLive(convId, reasoning = "")
+        updateLive(convId, content = "")
         _thinkingTimeMs.value = 0L
 
-        standardGenerationConvId = convId
-        val generationId = ++standardGenerationId
-        streamJob = viewModelScope.launch(resolveModels(convId)) {
+        val generationId = convGenerationSerials.getValue(convId)
+        standardJobs[convId] = viewModelScope.launch(resolveModels(convId) + requestConversation.asContextElement(convId) +
+            requestPreferences.asContextElement(applyPerConvSettings(convId))) {
             val startTime = System.currentTimeMillis()
             val generationTimer = com.freechat.data.GenerationTimer()
-            val snapshot = applyPerConvSettings(convId)
-            standardSettingsSnapshot = snapshot
             val langModelName = requestModels().language.displayName
             val visualModelName = requestModels().visual.displayName
             setGenerationModel(convId, langModelName)
@@ -3359,8 +3696,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val fresh = assistantMessage.copy(id = replyId, timestamp = plan.removedReplies.first().timestamp)
                 working.add(fresh)
                 persistConversationMessages(convId, working)
-                _liveReasoning.value = ""
-                _liveContent.value = ""
+                if (!fresh.failed) notifyReplyIfBackground(convId,
+                    _conversations.value.find { it.id == convId }?.title ?: "FreeChat", fresh.content,
+                    imageCompleted = fresh.imageUrls.isNotEmpty())
+                updateLive(convId, reasoning = "")
+                updateLive(convId, content = "")
                 summarizeAndRemember(convId, summaryUserText, fresh)
             } catch (e: CancellationException) {
                 throw e
@@ -3370,14 +3710,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 working.add(Message(id = replyId, role = Role.ASSISTANT, content = "重新生成失败，请稍后尝试...", modelName = langModelName,
                     timestamp = plan.removedReplies.first().timestamp, failed = true))
                 persistConversationMessages(convId, working)
-                _liveReasoning.value = ""
-                _liveContent.value = ""
+                updateLive(convId, reasoning = "")
+                updateLive(convId, content = "")
             } finally {
-                if (generationId == standardGenerationId) {
-                    restoreSettings(snapshot)
+                if (generationId == convGenerationSerials[convId]) {
                     setConvLoading(convId, false)
-                    standardGenerationConvId = null
-                    standardSettingsSnapshot = null
+                    standardJobs.remove(convId)
                 }
             }
         }
@@ -3422,7 +3760,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun editCompanionLastMessage(newText: String) {
         if (_isLoading.value || _isTyping.value ||
-            !com.freechat.data.CompanionFeaturePolicy.supportsNarrativeActions(_currentCharacter.value)) return
+            !com.freechat.data.CompanionFeaturePolicy.supportsNarrativeActions(_currentCharacter.value) &&
+            _conversations.value.none { it.id == _currentConversationId.value && it.storyProfile != null }) return
         val convId = _currentConversationId.value ?: return
         val character = _currentCharacter.value
         val trimmed = newText.trim()
@@ -3498,13 +3837,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (hasFile && !isDocumentRequest(text)) {
             val reply = understandFile(text, files, convId, history)
             return Message(role = Role.ASSISTANT, content = reply.text, failed = reply.failed, modelName = langModelName,
-                thinkingTimeMs = System.currentTimeMillis() - startTime, reasoningContent = _liveReasoning.value)
+                thinkingTimeMs = System.currentTimeMillis() - startTime, reasoningContent = liveReasoningFor(convId))
         }
         val model = requestModels().language
 
         // ---- 按需联网：开关只开放能力，是否检索由模型决定 ----
         // 工具类技能不浪费搜索（日历/文档/生图/文件）
-        val searchEnabled = _enableWebSearch.value && !hasFile && !isCalendarRequest(text) && !isDocumentRequest(text)
+        val searchEnabled = requestSettings().search && !hasFile && !isCalendarRequest(text) && !isDocumentRequest(text)
         val needsSearch = searchEnabled && nativeSearchSupported(model)
         // 深度思考 ⊥ 联网搜索（用户点名两者完全独立）：wide 只看「双开」——
         // 单开深度思考=只推理不搜、单开搜索=一档搜索、双开才「更多轮更广」
@@ -3528,7 +3867,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // 最多两轮资料检索。普通问题不调工具，不多一次 API，也不访问搜索服务。
         for (round in 0..1) {
             if (!searchEnabled || result.toolCalls.none { it.name == SearchIntent.TOOL_NAME }) break
-            _liveContent.value = ""
+            updateLive(convId, content = "")
             val continuation = result.requestMessages.toMutableList()
             continuation.add(toolAssistantMessage(result))
             result.toolCalls.forEach { tool ->
@@ -3551,7 +3890,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         val elapsed = System.currentTimeMillis() - startTime
         return if (result.toolCalls.isNotEmpty()) {
-            _liveContent.value = ""
+            updateLive(convId, content = "")
             val toolMessage = executeToolCall(result.toolCalls.first(), text, images, files, langModelName, visualModelName, startTime, convId, history)
             toolMessage.copy(searchSources = SearchPresentation.normalize(
                 toolMessage.searchSources.orEmpty().map { it.title to it.url } +
@@ -3625,7 +3964,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         history: List<Message>
     ): Message = withContext(Dispatchers.IO) {
         val vision = task.kind == com.freechat.data.ImageTaskRouting.Kind.VISION
-        val imageReasoning = _liveReasoning.value
+        val imageReasoning = liveReasoningFor(convId)
         if (!vision) setGenerationModel(convId, visualModelName, image = true)
         else setGenerationModel(convId, requestModels().vision?.displayName.orEmpty())
         try {
@@ -3643,7 +3982,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     else callVisionChat(encoded, task.prompt.ifBlank { "请详细描述这张图片的内容" }, convId, history)
                 Message(role = Role.ASSISTANT, content = result.text, failed = result.failed,
                     modelName = requestModels().vision?.displayName.orEmpty(),
-                    thinkingTimeMs = System.currentTimeMillis() - startTime, reasoningContent = _liveReasoning.value)
+                    thinkingTimeMs = System.currentTimeMillis() - startTime, reasoningContent = liveReasoningFor(convId))
             } else {
                 val result = imageResult(task.prompt, references)
                 Message(role = Role.ASSISTANT, content = result.error, imageUrls = result.urls,
@@ -3656,7 +3995,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         catch (e: Exception) {
             Message(role = Role.ASSISTANT, content = sceneImageError(e), failed = true,
                 modelName = if (vision) requestModels().vision?.displayName.orEmpty() else visualModelName,
-                reasoningContent = if (vision) _liveReasoning.value else imageReasoning,
+                reasoningContent = if (vision) liveReasoningFor(convId) else imageReasoning,
                 thinkingTimeMs = System.currentTimeMillis() - startTime, imagePrompt = task.prompt.takeUnless { vision },
                 imageReferenceMessageId = task.referenceMessageId.takeUnless { vision })
         }
@@ -3715,24 +4054,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 应用每角色独立的语言模型/联网设置（临时覆盖，结束后恢复全局） */
-    private fun applyCharacterSettings(character: CharacterProfile?): SettingsSnapshot {
-        val snap = SettingsSnapshot(
-            _enableWebSearch.value, _showThinking.value, _tempMode.value,
-            _lengthMode.value, _autoSummarizeMemory.value
-        )
-        val ch = character ?: return snap
-        ch.enableWebSearch?.let { _enableWebSearch.value = it }
-        return snap
+    private fun applyCharacterSettings(character: CharacterProfile?): SettingsSnapshot = globalRequestSettings().let {
+        it.copy(search = character?.enableWebSearch ?: it.search)
     }
-
-    /** 拟人模式情绪：影响回复条数、间隔与是否回复（模型输出情绪标签映射 + 本地关键词兜底） */
-    // —— 情绪/作息判定已抽进 freechat-core（CompanionMood.kt），这里只留同名薄委托 ——
-    private fun detectCompanionMood(text: String): com.freechat.core.CompanionMood = com.freechat.core.detectCompanionMood(text)
-
-    private fun moodWithResidue(text: String, per: PerConvSettings?): com.freechat.core.CompanionMood =
-        com.freechat.core.moodWithResidue(text, per)
-
-    private fun parseEmotionLabel(label: String): com.freechat.core.CompanionMood? = com.freechat.core.parseEmotionLabel(label)
 
     private fun detectGoodnight(text: String): Boolean = com.freechat.core.detectGoodnight(text)
 
@@ -3799,8 +4123,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun runDeepPrepPass(
         convId: String,
         character: CharacterProfile?,
-        working: List<Message>,
-        text: String
+        working: List<Message>
     ): String = withContext(Dispatchers.IO) {
         runCatching {
             val model = requestModels().language
@@ -3808,42 +4131,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             val msgs = mutableListOf<Map<String, Any?>>()
             // 用同一份人设：这一趟要"以角色的身份"想，不给它人设就只是在做阅读理解
-            buildCompanionSystemPrompt(character, convId, working).takeIf { it.isNotEmpty() }
+            val story = _conversations.value.find { it.id == convId }?.storyProfile
+            (story?.let(com.freechat.core.StoryPrompts::system) ?: buildCompanionSystemPrompt(character, convId, working)).takeIf { it.isNotEmpty() }
                 ?.let { msgs.add(mapOf("role" to "system", "content" to it)) }
-            // 记忆给全：这一趟的目的之一就是找出"相关的往事"
-            if (_autoSummarizeMemory.value) {
-                memoryManager.buildMemoryContext(convId, highQuality = true).takeIf { it.isNotBlank() }
-                    ?.let { msgs.add(mapOf("role" to "system", "content" to it)) }
-            }
             var prepPrevTs = 0L
-            msgs.addAll(pickHistory(working, historyBudgetTokens(enhanced = true)).map { m ->
-                val prefix = historyTimePrefix(prepPrevTs, m.timestamp, character?.isNarrativeMode() == true)
+            msgs.addAll(pickHistory(working.filterNot { it.sceneVisualization || it.failed }, historyBudgetTokens(enhanced = true)).map { m ->
+                val prefix = historyTimePrefix(prepPrevTs, m.timestamp, story != null || character?.isNarrativeMode() == true)
                 prepPrevTs = m.timestamp
                 mapOf<String, Any?>(
                     "role" to when (m.role) { Role.USER -> "user"; Role.ASSISTANT -> "assistant"; else -> "system" },
                     "content" to prefix + m.content
                 )
             })
-            msgs.add(mapOf("role" to "system", "content" to """【现在先别回话，只做推演】
-开口之前，先把这一轮想清楚。按下面的顺序写，每条两三句，不要写成小作文，也不要写任何台词：
-1. 对方这句话真正在说什么——字面意思之外，他此刻是什么情绪、想要什么、有没有潜台词。
-   如果只是闲话，就写"只是闲话"。
-2. 此刻相关的往事：从上面的记忆和聊天记录里，**原文摘出**和这一轮有关的人、事、约定、时间、数字。
-   一条都没有就写"无"。这一条最重要，宁可多写也不要漏。
-3. 你自己此刻的状态：你现在什么心情、对对方什么态度、这一轮你打算怎么应对（接话/岔开/追问/拒绝/主动推进）。
-4. 一个检索词：把你觉得**还需要再回想一下**的主题写成几个关键词，用空格隔开（比如"生日 礼物 上周答应"）。
-   没有就写"无"。
-
-严格按这四行输出，每行以 `1.` `2.` `3.` `4.` 开头。"""))
+            // 状态块/记忆后置（2026-10-22 缓存刀）：与正式那趟同次序 —— [系统提示词+历史] 稳定前缀
+            // 两条调用共享缓存（文本历史逐字同渲染；带图历史的图注两边仍有差异，ponytail: 未统一）
+            (if (story == null) companionStateBlocks(character, convId, working) else "").takeIf { it.isNotBlank() }
+                ?.let { msgs.add(mapOf("role" to "system", "content" to it)) }
+            // 记忆给全：这一趟的目的之一就是找出"相关的往事"
+            if (requestSettings().autoMem) {
+                memoryManager.buildMemoryContext(convId, highQuality = true).takeIf { it.isNotBlank() }
+                    ?.let { msgs.add(mapOf("role" to "system", "content" to it)) }
+            }
+            msgs.add(mapOf("role" to "system", "content" to if (story != null) com.freechat.core.StoryPrompts.prep else CompanionPrompts.deepPrepRequest()))
 
             val body = gson.toJson(mapOf(
                 "model" to model.id, "messages" to msgs, "stream" to false,
-                "temperature" to companionTemperature(character?.aiCreativity)
-            )).toRequestBody(JSON_MEDIA)
+                "temperature" to companionTemperature(story?.aiCreativity ?: character?.aiCreativity)
+            ) + (if (story != null) deepThinkExtras(false, model) else emptyMap())).toRequestBody(JSON_MEDIA)
             val (code, rBody) = executeCompanionCall(
                 Request.Builder().url(url)
                     .addHeader("Authorization", "Bearer $key")
-                    .addHeader("Content-Type", "application/json").post(body).build()
+                    .addHeader("Content-Type", "application/json").post(body).build(),
+                stage = "deep_prep"
             )
             if (code !in 200..299) return@runCatching ""
             val note = JsonParser.parseString(rBody).asJsonObject
@@ -3851,27 +4170,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 ?.getAsJsonObject("message")?.get("content")?.asString?.trim().orEmpty()
             if (note.isBlank()) return@runCatching ""
 
-            // 第 4 行是它自己报的检索词 —— 拿它再检索一次记忆。
-            // 这是整件事里最值钱的一步：第一遍检索是按用户这句话做的，而"该想起什么"
-            // 往往不在这句话的字面里（对方说"随便"，真正相关的是三天前那句"我周三有空"）。
-            val query = note.lines()
-                .firstOrNull { it.trimStart().startsWith("4.") }
-                ?.removePrefix("4.")?.trim().orEmpty()
-                .takeIf { it.isNotBlank() && it != "无" }
-            val second = query?.let {
-                runCatching { memoryManager.buildMemoryContext(convId, highQuality = true) }.getOrNull()
-            }.orEmpty()
-
-            buildString {
-                append("【开口之前，你心里已经过了一遍 —— 这是你自己的盘算，不是别人对你说的话】\n")
-                append(note.trim())
-                if (second.isNotBlank()) {
-                    append("\n\n【顺着刚才的思路，你又想起的一些事】\n")
-                    append(second.trim())
-                }
-                append("\n\n要求：这些是你**已经知道**的东西，直接拿来用。" +
-                    "绝不要复述、不要总结、不要说「我刚刚想了想」——想完了就直接开口，像真人一样。")
-            }
+            // 完整档案已经在本轮材料中；不再以检索为名重复注入同一整库。
+            CompanionPrompts.deepPrepNote(note, "")
         }.getOrElse { e ->
             // 取消必须放行（戒律 7）：吞掉 CancellationException 会让被打断的这一趟
             // 假装「推演没做成」继续往下生成 —— 旧回复照样落库，串进新消息里
@@ -3883,23 +4183,27 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     /** 拟人模式非流式 API 调用：返回结构化结果（情绪标签 + 分条回复）；按对话隔离传入 convId/角色/历史 */
     private data class CompanionTurn(val text: String, val imagePaths: List<String> = emptyList())
 
-    /** 拟人陪伴：非流式生成 + 随机思考延迟 + 情绪化随机条数/间隔，逐条显示，模拟真人节奏（按对话隔离） */
-    private suspend fun generateCompanionReply(convId: String, character: CharacterProfile?, working: MutableList<Message>, text: String, imagePaths: List<String>, startTime: Long, batchSize: Int = 1, regenerating: Boolean = false, replyTimestamp: Long? = null): Unit = withContext(resolveModels(convId, character)) {
+    /** 拟人陪伴：保留完整语义，按内容和实际等待时长逐条呈现（按对话隔离）。 */
+    private suspend fun generateCompanionReply(convId: String, character: CharacterProfile?, working: MutableList<Message>, text: String, imagePaths: List<String>, startTime: Long, batchSize: Int = 1, regenerating: Boolean = false, replyTimestamp: Long? = null): Unit = withContext(resolveModels(convId, character) + requestConversation.asContextElement(convId) +
+        requestPreferences.asContextElement(applyCharacterSettings(character))) {
+        val story = _conversations.value.find { it.id == convId }?.storyProfile
+        val narrative = story != null || character?.isNarrativeMode() == true
         val langModelName = requestModels().language.displayName
+        setGenerationModel(convId, langModelName)
         val replyStart = working.size
         val replyId = convGenerationReplyIds[convId] ?: UUID.randomUUID().toString()
         if (regenerating) AnimationReplay.mark(replyId)
         val userSourceIds = working.filterNot { it.sceneVisualization }.takeLastWhile { it.role == Role.USER }.map { it.id }
-        val snapshot = applyCharacterSettings(character)
+        val turnMaterials = CompanionTurnMaterials()
         // ⚠️ 拟人模式**不叠**「新规则」（PerConvSettings），这一层只属于标准模式 ——
         // 「新规则」页在拟人对话里根本进不去（对话页那个调节按钮按模式分流：拟人 → 模拟设定 /
         // 角色档案，标准 → 新规则），两个模式各有一套「只管这条对话」的机制，别互相串。
         // 所以这里只叠角色档案那一层，用户拍板（2026-09-19）：新规则不该影响拟人模式。
         // 曾一度在这里补过 applyPerConvSettings(convId)：那在正常路径上是空操作
         // （拟人对话不会有新规则记录），但语义是错的，已撤。
-        // 返回值不接：外层 finally 的 restoreSettings(snapshot) 会把它还原成全局。
+        // 请求偏好随协程传递，不临时写入全局；并行对话不会互相覆盖。
         // 主动智能：这次不是「回用户」，而是「闹钟把 TA 叫醒了，现在决定要不要主动开口」
-        val elapsedJob = if (character?.isNarrativeMode() == true) CoroutineScope(coroutineContext).launch {
+        val elapsedJob = if (narrative) CoroutineScope(coroutineContext).launch {
             while (isActive) {
                 if (_currentConversationId.value == convId) _thinkingTimeMs.value = System.currentTimeMillis() - startTime
                 delay(200)
@@ -3911,8 +4215,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 sleepingMissedMessages[convId] = (sleepingMissedMessages[convId] ?: 0) + 1
                 return@withContext
             }
-            // 模拟真人：先随机等待，不刚发就显示「正在输入」
-            delay(com.freechat.core.CompanionRhythm.initialTypingDelayMs())
             setConvTyping(convId, true)
 
             // 图片：先识图分析，把识图结果作为上下文喂给回复（拟人结合人设评论图片）
@@ -3921,7 +4223,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val encoded = encodeImagesForApi(imagePaths.map { PendingImage(it, detectMime(it)) })
                 if (encoded.isNotEmpty()) {
                     imageContext = callVisionChat(encoded,
-                        "结合对话中用户关心的内容分析图片，描述画面事实和相关细节；不要猜测看不见的信息，也不要代替角色回复。",
+                        CompanionPrompts.visionObservationRequest(),
                         convId, working, character).text
                     // 回填到用户图片消息，后续追问时作为「图片内容」注入，避免识图结果丢失
                     val ui = working.indexOfLast { it.role == Role.USER && it.imagePaths.isNotEmpty() }
@@ -3929,22 +4231,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            var reply = callCompanionApi(convId, character, working, text, imageContext, batchSize = batchSize)
+            var reply = callCompanionApi(convId, character, working, text, imageContext, forceReply = regenerating, batchSize = batchSize, turn = turnMaterials)
             var segments = reply.segments
 
-            // 主动智能：模型在这一轮选择了不开口（只输出指令行/空正文）是合法的，且**不加兜底重试**——
-            // 硬逼它说点什么，就变成「每次到点都必须冒一句话」，恰恰是这功能最该避免的黏人。
-            // 但指令必须在这里就落地：提示词教的「跳过 +30m」「只定 +2h」正是这种「正文为空、只剩指令」
-            // 的形态，直接 return 会把模型刚给自己定的下一次一起丢掉，而服务收尾又会把旧计划清掉
-            // → 整条链无声消失（表现为「明明说了半小时后再来，之后再也没动静」）。
-            if (segments.isEmpty()) {
+            // 只有明确的整份沉默控制才跳过；普通空结果仍执行下面的一次兜底。
+            if (reply.silence && !regenerating) {
                 setConvTyping(convId, false)
                 return@withContext
             }
 
             // 空回复兜底：重试一次（强调必须输出正文），仍空则发个省略号（自然无语，不显示「（空回复）」）
             if (segments.isEmpty()) {
-                reply = callCompanionApi(convId, character, working, text, imageContext, forceReply = true, batchSize = batchSize)
+                reply = callCompanionApi(convId, character, working, text, imageContext, forceReply = true, batchSize = batchSize, turn = turnMaterials)
                 segments = reply.segments
             }
 
@@ -3961,51 +4259,43 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 return@withContext
             }
 
-            // 情绪：模型输出优先，本地关键词兜底（动作演绎/剧情补足不解析情绪，走简化节奏）
-            val narrativeMode = character?.isNarrativeMode() == true
+            val narrativeMode = narrative
             // 叙事模式长度校验：偏离区间太多则带纠偏指令重试一次，尽量把字数压进设定区间
             if (narrativeMode) {
                 // 篇幅不再用绝对字数卡（避免「短档被写死成 50 字」），只留一道防塌陷下限：
                 // 选了「长/超长」却只回三行时补一次，提示也不提具体字数
                 val totalLen = countChars(segments.joinToString(""))
-                if (totalLen < plotLengthFloor(character?.plotLength ?: 1)) {
-                    val retried = callCompanionApi(
-                        convId, character, working, text, imageContext,
-                        forceReply = true, batchSize = batchSize,
-                        lengthHint = "上次回复太短了，明显达不到当前「单次回复长度」档应有的体量。请把这一段按该档的篇幅写足。"
-                    )
-                    if (retried.segments.isNotEmpty()) {
-                        reply = retried
-                        segments = retried.segments
+                if (totalLen < plotLengthFloor(story?.plotLength ?: character?.plotLength ?: 1)) {
+                    reply = reply.refineOrKeep {
+                        callCompanionApi(
+                            convId, character, working, text, imageContext,
+                            forceReply = true, batchSize = batchSize, turn = turnMaterials,
+                            lengthHint = "上次回复太短了，明显达不到当前「单次回复长度」档应有的体量。请把这一段按该档的篇幅写足。"
+                        )
                     }
+                    segments = reply.segments
                 }
             }
-            val mood = if (narrativeMode) CompanionMood.NEUTRAL else (parseEmotionLabel(reply.emotion) ?: moodWithResidue(text, getPerConvSettings(convId)))
-
-            // 情绪决定回复条数（随机）；叙事模式最多 3 段、全部展示
-            val maxCount = com.freechat.core.CompanionRhythm.segmentCount(mood, narrativeMode, regenerating, segments.size)
-            val toShow = segments.take(maxCount)
+            val toShow = CompanionRhythm.prepareSegments(segments, narrativeMode)
+            val delays = CompanionRhythm.deliveryDelaysMs(toShow, narrativeMode, System.currentTimeMillis() - startTime)
 
             if (toShow.isEmpty()) {
-                // 生气不回复也是「这一轮的结果」，指令同样要落地（比如「气还没消，改到 +2h」）
                 setConvTyping(convId, false)
-                return@withContext  // 生气不回复
+                return@withContext
             }
 
             // 微信聊天语音测试（开发者选项）：强制每条都走语音——解析层兜底（没 <voice> 标记也整条转语音），
             // 与提示词 voiceReplyAlways 档双保险；连接微信的对话照旧不支持
-            val forceVoiceReply = com.freechat.dev.DevMode.testVoiceReply(getApplication()) &&
+            val forceVoiceReply = !narrative && com.freechat.dev.DevMode.testVoiceReply(getApplication()) &&
                 wechatAttachedCached(convId) != true
             for ((i, seg) in toShow.withIndex()) {
                 setConvTyping(convId, true)
-                // 每条间隔随机（情绪影响），时而快时而慢
-                val interval = com.freechat.core.CompanionRhythm.segmentIntervalMs(mood, narrativeMode)
-                delay(interval)
+                delay(delays[i])
                 setConvTyping(convId, false)
                 val segId = if (i == 0) replyId else UUID.randomUUID().toString()
                 if (regenerating) AnimationReplay.mark(segId)
                 // 语音消息（2026-10-19）：<voice> 段=口播台词——voiceText 随消息存、content 同台词（长按展开即见）
-                val voiceLine = CompanionPrompts.extractVoice(seg)
+                val voiceLine = (if (narrative) null else CompanionPrompts.extractVoice(seg))
                     ?: if (forceVoiceReply && seg.isNotBlank()) CompanionPrompts.VoiceLine(seg, "") else null
                 working.add(Message(
                     id = segId,
@@ -4032,21 +4322,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // 同一个后台任务里先记再挂新闹钟：先记后挂，最小间隔才会把「刚发过」算进去）
             // （2026-10-20 本地主动智能退役）
             try {
-                notifyReplyIfBackground(character?.name?.ifBlank { "FreeChat" } ?: "FreeChat", replyText)
+                notifyReplyIfBackground(convId, _conversations.value.find { it.id == convId }?.title ?: "FreeChat", replyText)
             } finally {
             }
             // 主动开口这一轮不写记忆：喂给摘要器的「用户说了什么」是空的，
             // 硬造一条只会污染记忆库；这段话本身已经落在聊天记录里，下次上下文照样带上
             if (replyText.isNotBlank()) {
-                viewModelScope.launch {
-                    summarizeAndRemember(convId, text, Message(role = Role.ASSISTANT, content = replyText, mode = ChatMode.COMPANION),
-                        character?.highQualityMemory == true, character?.isNarrativeMode() == true, character,
-                        sourceMessageIds = userSourceIds + working.drop(replyStart).map { it.id })
-                }
+                summarizeAndRemember(convId, text, Message(role = Role.ASSISTANT, content = replyText, mode = ChatMode.COMPANION),
+                    story?.highQualityMemory ?: (character?.highQualityMemory == true), narrative, character,
+                    sourceMessageIds = userSourceIds + working.drop(replyStart).map { it.id }, story = story)
             }
         } finally {
             elapsedJob?.cancel()
-            restoreSettings(snapshot)
             setConvTyping(convId, false)
         }
     }
@@ -4058,63 +4345,93 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * 读超时不重试（请求已经发出去了，重试只会让用户多等一遍）、DNS 解析失败也不重试（那是没网）。
      * 返回 (HTTP 状态码, 响应体文本)，body 保证已经读完并关闭，连接会归还连接池。
      */
-    private suspend fun executeCompanionCall(request: Request): Pair<Int, String> {
-        var lastError: IOException? = null
-        for (attempt in 0..1) {
-            // 已经取消：不要再补发一次请求（和流式那边同一个道理）
-            if (!coroutineContext.isActive) throw CancellationException("cancelled before retry")
-            if (attempt > 0) {
-                Log.w("FreeChat", "Companion retry: 换新连接重发一次")
-                // 半死的连接池成员是「切后台后偶发失败」的元凶，重试必须换一条新连接
-                client.connectionPool.evictAll()
-            }
-            try {
-                // use{}：不论成功失败，body 都会被关闭，连接才会归还连接池
-                client.newCall(request).execute().use { resp ->
-                    return resp.code to (resp.body?.string() ?: "")
+    private suspend fun executeCompanionCall(request: Request, stage: String): Pair<Int, String> {
+        val started = System.nanoTime()
+        var status = 0
+        var outcome = "failed"
+        try {
+            var lastError: IOException? = null
+            for (attempt in 0..1) {
+                // 已经取消：不要再补发一次请求（和流式那边同一个道理）
+                coroutineContext.ensureActive()
+                if (attempt > 0) {
+                    Log.w("FreeChat", "Companion retry: 换新连接重发一次")
+                    // 半死的连接池成员是「切后台后偶发失败」的元凶，重试必须换一条新连接
+                    client.connectionPool.evictAll()
                 }
-            } catch (e: IOException) {
-                lastError = e
-                Log.w("FreeChat", "Companion call failed (attempt ${attempt + 1})", e)
-                if (!isConnectionLevelFailure(e)) throw e
+                try {
+                    val result = client.newCall(request).awaitCompanionResponse()
+                    status = result.first
+                    outcome = if (status in 200..299) "ok" else "http_error"
+                    return result
+                } catch (e: IOException) {
+                    lastError = e
+                    Log.w("FreeChat", "Companion call failed (attempt ${attempt + 1})", e)
+                    if (!isConnectionLevelFailure(e)) throw e
+                }
             }
+            throw lastError ?: IOException("connection failed")
+        } catch (cancelled: CancellationException) {
+            outcome = "cancelled"
+            throw cancelled
+        } finally {
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000
+            Log.d("FreeChat", "Companion stage=$stage elapsedMs=$elapsedMs outcome=$outcome http=$status")
         }
-        throw lastError ?: IOException("connection failed")
     }
 
-    private suspend fun callCompanionApi(convId: String, character: CharacterProfile?, working: List<Message>, text: String, imageContext: String = "", forceReply: Boolean = false, batchSize: Int = 1, lengthHint: String? = null): CompanionReply = withContext(Dispatchers.IO) {
+    private class CompanionTurnMaterials {
+        var deepPrep: String? = null
+        var searchResolved = false
+        var evidence = ""
+        var sources = emptyList<com.freechat.model.SearchCitation>()
+        var quote: String? = null
+        var prepared = false
+    }
+
+    private suspend fun callCompanionApi(convId: String, character: CharacterProfile?, working: List<Message>, text: String, imageContext: String = "", forceReply: Boolean = false, batchSize: Int = 1, lengthHint: String? = null, turn: CompanionTurnMaterials): CompanionReply = withContext(Dispatchers.IO) {
         val model = requestModels().language
-        val searchOn = _enableWebSearch.value
-        val searchToolAvailable = searchOn && supportsFunctionTools(model) && !isChitchat(text)
+        val story = _conversations.value.find { it.id == convId }?.storyProfile
+        val narrative = story != null || character?.isNarrativeMode() == true
+        val nativeDeep = requestModels().language.supportsDeepThinking && (story?.deepThinkingMode ?: character?.deepThinkingMode ?: true)
+        val searchOn = story?.enableWebSearch ?: requestSettings().search
+        val searchToolAvailable = searchOn && !turn.searchResolved && supportsFunctionTools(model) && !isChitchat(text)
         val (url, key) = routeModelEndpoint(model)
         advanceGeneration(convId, com.freechat.data.GenerationPhase.UNDERSTANDING)
         // 1.0.71：增强检索的实际生效 = 角色开关本身（1M 声明/锁定档已随上下文二值化移除 ——
         // 开关开 =增强检索 + 1M 预算，关 = 普通检索 + 256K）。
-        val enhancedActive = character?.highQualityMemory == true
+        val enhancedActive = story?.highQualityMemory ?: (character?.highQualityMemory == true)
 
         // —— 装配材料：记忆/深度推演/引用/检索在端上算好，装配顺序在 freechat-core 的
         //    CompanionRequestBuilder（golden 钉住：格式铁律压尾等一整套次序）——
-        val memoryContext = if (_autoSummarizeMemory.value)
-            memoryManager.buildMemoryContext(convId, highQuality = enhancedActive) else ""
-        val deepPrepNote = if (character?.deepThinking == true && enhancedActive) runDeepPrepPass(convId, character, working, text) else ""
-        val quoteText = pendingQuoteText.also { pendingQuoteText = null }
+        val memoryContext = if (requestSettings().autoMem)
+            memoryManager.buildMemoryContext(convId, highQuality = enhancedActive,
+                includeStoryState = story != null || character?.normalized()?.dialogueMode == DialogueMode.PLOT) else ""
+        val deepPrepNote = turn.deepPrep ?: (if ((story?.deepThinking ?: (character?.deepThinking == true)) && enhancedActive) runDeepPrepPass(convId, character, working) else "").also { turn.deepPrep = it }
+        if (!turn.prepared) { turn.quote = pendingQuoteText; pendingQuoteText = null; turn.prepared = true }
+        val quoteText = turn.quote
         val history = pickHistory(working, historyBudgetTokens(enhancedActive))
-        var searchSources = emptyList<com.freechat.model.SearchCitation>()
-        var serpBlock = ""
+        var searchSources = turn.sources
+        var serpBlock = turn.evidence
         // 联网搜索开关。这里只读 `_enableWebSearch` 就够了 —— 拟人模式下它已经**叠好了两层**：
         // 全局默认 → 角色档案的值（applyCharacterSettings，null 则不覆盖）。
         // 「新规则」不参与：拟人对话没有新规则那一层（见 generateCompanionReply 里的说明）。
-        if (searchOn && !searchToolAvailable) {
+        if (searchOn && !turn.searchResolved && !searchToolAvailable && !isChitchat(text)) {
             val intent = planSearchWithModel(text, working)
             if (intent != null) {
-                val outcome = retrieveSearch(text, companionDeepThink(character, model), intent, convId)
+                val outcome = retrieveSearch(text, nativeDeep, intent, convId)
                 searchSources = SearchPresentation.normalize(outcome.entries.map { it.title to it.link })
                 serpBlock = outcome.text.ifBlank { SearchPipeline.emptyBlock(text, outcome.notice) }
             }
         }
-        val messages = com.freechat.core.CompanionRequestBuilder.build(
+        val messages = (if (story != null) com.freechat.core.StoryPrompts.request(story, history,
+            memoryContext + "\n" + _globalMemories.value.joinToString("\n"),
+            _conversations.value.find { it.id == convId }?.rules.orEmpty(), deepPrepNote, quoteText.orEmpty(),
+            serpBlock, if (searchToolAvailable) SearchIntent.guidance else "", lengthHint)
+        else com.freechat.core.CompanionRequestBuilder.build(
             character = character,
             systemPrompt = buildCompanionSystemPrompt(character, convId, working),
+            stateContext = companionStateBlocks(character, convId, working),
             memoryContext = memoryContext,
             deepPrepNote = deepPrepNote,
             quoteText = quoteText,
@@ -4126,19 +4443,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             serpBlock = serpBlock,
             searchGuidance = if (searchToolAvailable) SearchIntent.guidance else "",
             includeReasoningContent = searchToolAvailable
-        ).toMutableList()
+        )).toMutableList()
 
         // 采样温度由「AI创造力」线性映射（1.0→0.85 … 5.0→1.05 … 10.0→1.30；旧版写死 1.0，正好对应 4 档）
         var searchCallsAllowed = searchToolAvailable
         suspend fun requestReply(allowSearch: Boolean): JsonObject {
             searchCallsAllowed = allowSearch
             val body = gson.toJson(mapOf(
-                "model" to model.id, "messages" to messages, "stream" to false, "temperature" to companionTemperature(character?.aiCreativity)
-            ) + deepThinkExtras(companionDeepThink(character, model), model) + if (allowSearch)
+                "model" to model.id, "messages" to messages, "stream" to false, "temperature" to companionTemperature(story?.aiCreativity ?: character?.aiCreativity)
+            ) + deepThinkExtras(nativeDeep, model) + if (allowSearch)
                 mapOf("tools" to listOf(SearchIntent.toolDefinition), "tool_choice" to "auto") else emptyMap()).toRequestBody(JSON_MEDIA)
             val (respCode, rBody) = executeCompanionCall(Request.Builder().url(url)
                 .addHeader("Authorization", "Bearer $key")
-                .addHeader("Content-Type", "application/json").post(body).build())
+                .addHeader("Content-Type", "application/json").post(body).build(),
+                stage = if (lengthHint != null) "length_retry" else "reply")
             if (respCode !in 200..299) throw Exception("API error $respCode: ${rBody.take(200)}")
             val root = JsonParser.parseString(rBody).asJsonObject
             searchSources = SearchPresentation.normalize(searchSources.map { it.title to it.url } + NativeSearchEvidence.citations(root))
@@ -4150,15 +4468,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             blockFunctionTools(model)
             val intent = planSearchWithModel(text, working)
             intent?.let {
-                val outcome = retrieveSearch(text, companionDeepThink(character), it, convId)
+                val outcome = retrieveSearch(text, nativeDeep, it, convId)
                 searchSources = SearchPresentation.normalize(outcome.entries.map { entry -> entry.title to entry.link })
-                messages.add(mapOf("role" to "system", "content" to outcome.text.ifBlank { SearchPipeline.emptyBlock(text, outcome.notice) }))
+                serpBlock = outcome.text.ifBlank { SearchPipeline.emptyBlock(text, outcome.notice) }
+                messages.add(mapOf("role" to "system", "content" to serpBlock))
             }
             requestReply(false)
         }
         for (round in 0..1) {
             if (!searchCallsAllowed) break
-            val calls = reply.getAsJsonArray("tool_calls")?.filter { it.isJsonObject }.orEmpty()
+            val calls = ChatToolCalls.read(reply)?.filter { it.isJsonObject }.orEmpty()
             if (calls.isEmpty()) break
             val assistant = gson.fromJson<Map<String, Any?>>(reply, object : TypeToken<Map<String, Any?>>() {}.type).toMutableMap()
             assistant.putIfAbsent("reasoning_content", "")
@@ -4169,18 +4488,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val fn = tool.getAsJsonObject("function")
                 val intent = if (fn?.optString("name") == SearchIntent.TOOL_NAME)
                     runCatching { SearchIntent.fromArguments(JsonParser.parseString(fn.optString("arguments")).asJsonObject) }.getOrNull() else null
-                val outcome = if (intent != null && requests++ < 1) retrieveSearch(text, companionDeepThink(character), intent, convId) else null
+                val outcome = if (intent != null && requests++ < 1) retrieveSearch(text, nativeDeep, intent, convId) else null
                 if (outcome != null) searchSources = SearchPresentation.normalize(searchSources.map { it.title to it.url } + outcome.entries.map { it.title to it.link })
+                if (outcome != null) serpBlock += "\n" + outcome.text.ifBlank { SearchPipeline.emptyBlock(text, outcome.notice) }
                 messages.add(mapOf("role" to "tool", "tool_call_id" to tool.optString("id"), "content" to
                     (outcome?.text?.ifBlank { SearchPipeline.emptyBlock(text, outcome.notice) } ?: "请将需要检索的主题合并到 queries；不要重复调用。")))
             }
-            messages.add(mapOf("role" to "system", "content" to modeFormatRule(character?.normalized()?.dialogueMode ?: DialogueMode.WECHAT)))
+            messages.add(mapOf("role" to "system", "content" to if (story != null) com.freechat.core.StoryPrompts.format else modeFormatRule(character?.normalized()?.dialogueMode ?: DialogueMode.WECHAT)))
             reply = requestReply(round == 0)
         }
         advanceGeneration(convId, com.freechat.data.GenerationPhase.DRAFTING)
+        turn.searchResolved = true
+        turn.evidence = serpBlock
+        turn.sources = searchSources
         val rawOrig = reply.optString("content")?.trim().orEmpty()
         // 解析（指令剥离/情绪标签/分条/方括号清洗）在 freechat-core 的 CompanionReplyParser
-        val parsed = com.freechat.core.CompanionReplyParser.parse(rawOrig, character?.isNarrativeMode() == true)
+        val parsed = com.freechat.core.CompanionReplyParser.parse(rawOrig, narrative)
         var bodyLines = parsed.bodyLines
 
         // ★ 格式自检（1.0.53）：本地先判一眼「这段话像不像当前档位写的」，一眼能判的违规
@@ -4188,7 +4511,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         //   重写是独立的一趟小调用，失败或改完仍不合规就原样放行 —— 格式差一点总比回复丢掉强。
         //   2026-10-19：**带 <voice> 的回复整体免检**——重写器不认识语音标签，一重写就把
         //   标签洗掉、语音变文字（长语音必哑的真凶之一）。语音行本身也已在 isFormatViolation 豁免。
-        val mode = character?.normalized()?.dialogueMode ?: DialogueMode.WECHAT
+        val mode = if (story != null) DialogueMode.PLOT else character?.normalized()?.dialogueMode ?: DialogueMode.WECHAT
         val joinedBody = bodyLines.joinToString("\n")
         val hasVoice = joinedBody.contains("<voice", ignoreCase = true)
         if (joinedBody.isNotBlank() && !hasVoice && isFormatViolation(joinedBody, mode)) {
@@ -4202,7 +4525,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         CompanionReply(
-            com.freechat.core.CompanionReply(parsed.emotion, bodyLines, searchSources),
+            com.freechat.core.CompanionReply(parsed.emotion, bodyLines, searchSources, parsed.silence),
             reply.optString("reasoning_content").orEmpty()
         )
     }
@@ -4224,7 +4547,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      *  · 剧情补足：出现「」= 动作演绎档的台词写法（本档一律用双引号“”）；
      *  · 动作演绎：出现双引号“”当台词 = 剧情补足档的写法；
      *              或通篇没有一句「」台词、却又是好几行短句 = 微信聊天档的写法；
-     *  · 微信聊天：出现「」、成对的星号动作、行首的括号动作、或单行超过 100 字的一整段描写
+     *  · 微信聊天：出现「」、成对的星号动作、或行首的括号动作
      *              = 另外两档的写法。
      * 命中就走 [repairFormat] 只改格式重写一次；没命中就原样放行（这是绝大多数情况）。
      */
@@ -4255,7 +4578,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )).toRequestBody(JSON_MEDIA)
             val (code, rBody) = executeCompanionCall(Request.Builder().url(url)
                 .addHeader("Authorization", "Bearer $key")
-                .addHeader("Content-Type", "application/json").post(body).build())
+                .addHeader("Content-Type", "application/json").post(body).build(), stage = "format_repair")
             if (code !in 200..299) return@runCatching text
             JsonParser.parseString(rBody).asJsonObject
                 .getAsJsonArray("choices")?.get(0)?.asJsonObject
@@ -4316,7 +4639,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             character = character,
             messages = messages,
             convRules = convRulesBlock(convId),
-            timeState = timeStateFor(convId),
             // 允许语音回复（2026-10-19）：模型自决用不用；连接微信的对话一律不教（功能不支持）
             allowVoiceReply = (character?.allowVoiceReply == true || forceVoice) && wechatAttachedCached(convId) != true,
             voiceReplyAlways = forceVoice
@@ -4357,6 +4679,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun buildTimeContext(convId: String, messages: List<Message>, narrative: Boolean = false, timePerception: Boolean = false): String =
         com.freechat.core.CompanionPrompts.buildTimeContext(messages, narrative, timePerception, timeStateFor(convId))
 
+    /** 动态状态块（气氛+时间，2026-10-22 缓存刀）：每轮必变，装配在历史之后的动态尾巴（铁律之前） */
+    private fun companionStateBlocks(character: CharacterProfile?, convId: String, messages: List<Message>): String =
+        com.freechat.core.CompanionPrompts.buildStateBlocks(messages, character, timeStateFor(convId))
+
     private fun mbtiDesc(ch: CharacterProfile): String = com.freechat.core.CompanionPrompts.mbtiDesc(ch)
 
     private fun plotLengthDesc(len: Int): String = com.freechat.core.CompanionPrompts.plotLengthDesc(len)
@@ -4389,21 +4715,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return serp
     }
 
+    suspend fun generateLibraryPersona(persona: CharacterPersona): CharacterPersona =
+        CharacterPersona.from(generatePersonaPrompt(persona.toProfile(), personaOnly = true))
+
+    suspend fun regenerateLibraryPersona(old: CharacterPersona, new: CharacterPersona, conversationId: String? = null): CharacterPersona =
+        withContext(resolveModels(conversationId)) { CharacterPersona.from(regeneratePersona(old.toProfile(), new.toProfile(), personaOnly = true)) }
+
     /** 深度分析角色设定，生成专属系统提示词（失败返回原 profile，走基础人设兜底） */
-    suspend fun generatePersonaPrompt(profile: CharacterProfile): CharacterProfile = withContext(Dispatchers.IO) {
+    suspend fun generatePersonaPrompt(profile: CharacterProfile, personaOnly: Boolean = false): CharacterProfile = withBackgroundWork { withContext(Dispatchers.IO) {
         try {
             val enriched = analyzeAppearance(profile)
             val ref = fetchPrototypeReference(enriched)
-            val text = generatePersonaPromptText(enriched, ref)
+            val text = generatePersonaPromptText(enriched, ref, personaOnly)
             if (text.isNotBlank()) enriched.copy(personaPrompt = text) else enriched
-        } catch (e: Exception) {
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
             Log.e("FreeChat", "persona prompt gen failed", e)
             profile
         }
-    }
+    } }
 
     /** 编辑角色后：识图 + 找变化点增量学习人设（小修小补不推倒重来） */
-    suspend fun regeneratePersona(old: CharacterProfile, new: CharacterProfile): CharacterProfile = withContext(Dispatchers.IO) {
+    suspend fun regeneratePersona(old: CharacterProfile, new: CharacterProfile, personaOnly: Boolean = false): CharacterProfile = withBackgroundWork { withContext(Dispatchers.IO) {
         var result = analyzeAppearance(new)
         val changes = diffProfile(old, result)
 
@@ -4413,22 +4746,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // （原来的判断漏了后者 —— 把人设清空变 sparse 后应当补搜，否则填了原型也等于没填）
             val ref = if (result.prototypeNeedsSearch()) fetchPrototypeReference(result) else ""
             val newPrompt = if (result.personaPrompt.isNotBlank())
-                updatePersonaIncrementally(result, changes, ref)
+                updatePersonaIncrementally(result, changes, ref, personaOnly)
             else
-                generatePersonaPromptText(result, ref)
+                generatePersonaPromptText(result, ref, personaOnly)
             // 学习失败也不能继续拿旧摘要覆盖新设定。空缓存会使用当前用户原文作为人设兜底，
             // 保存流程仍会提示学习未完成；没有设定变化时则保持原有提示词不动。
             result = result.copy(personaPrompt = newPrompt)
         }
         result
-    }
+    } }
 
     /** 调 LLM 生成 personaPrompt 正文（refMaterial = 参考原型的联网资料，可为空；失败返回空字符串） */
-    private suspend fun generatePersonaPromptText(profile: CharacterProfile, refMaterial: String = ""): String = withContext(Dispatchers.IO) {
+    private suspend fun generatePersonaPromptText(profile: CharacterProfile, refMaterial: String = "", personaOnly: Boolean = false): String = withContext(Dispatchers.IO) {
         try {
-            val model = resolveModels(null, profile).language
+            val model = (coroutineContext[RequestModels] ?: resolveModels(null, profile)).language
             val (url, key) = routeModelEndpoint(model)
-            val prompt = buildPersonaLearningPrompt(profile, refMaterial)
+            val prompt = buildPersonaLearningPrompt(profile, refMaterial, personaOnly)
             val messages = listOf(
                 mapOf("role" to "system", "content" to "你是资深角色塑造专家，负责把角色设定深化成立体、鲜活的系统提示词。"),
                 mapOf("role" to "user", "content" to prompt)
@@ -4451,9 +4784,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 基于现有 personaPrompt + 变化点，增量更新（保留未变部分，只微调变化相关的；refMaterial = 参考原型资料，可为空） */
-    private suspend fun updatePersonaIncrementally(profile: CharacterProfile, changes: List<String>, refMaterial: String = ""): String = withContext(Dispatchers.IO) {
+    private suspend fun updatePersonaIncrementally(profile: CharacterProfile, changes: List<String>, refMaterial: String = "", personaOnly: Boolean = false): String = withContext(Dispatchers.IO) {
         try {
-            val model = resolveModels(null, profile).language
+            val model = (coroutineContext[RequestModels] ?: resolveModels(null, profile)).language
             val (url, key) = routeModelEndpoint(model)
             // 参考原型：有联网资料就给资料（并写明冲突以用户设定为准）；没资料但用户填了原型名，
             // 也要给出「凭既有知识做细节校正」的兜底，否则「参考原型」这个变化点会被静默忽略
@@ -4478,12 +4811,13 @@ ${com.freechat.data.CharacterOriginalLearning.prompt(profile, com.freechat.data.
 ${changes.joinToString("\n") { "- $it" }}
 
 要求：
-1. 只更新与变化点相关的部分，保持未变化的部分不变，保留已经建立起来的立体人设、语气和口头禅。
-2. 变化点涉及年龄、MBTI、性格、关系、记忆等核心设定时，要相应调整这个人的行为模式、情绪反应、对用户的态度与亲昵尺度。
+1. 只更新与变化点相关的部分，保持未变化的部分不变，保留有用户设定或原文证据的措辞、句式、称呼与行为锚点，不固化AI自己临时生成的口头禅。
+2. 变化点涉及年龄、MBTI、性格、关系、记忆等核心设定时，按明确证据调整相关行为、情绪与亲疏尺度；MBTI仅参考，不凭类型补人格。
 3. 小修小补（比如年龄 20 改 30）不要推倒重来、不要让角色「失忆」或「重生」，而是在原人设基础上自然微调。
 4. 变化点是「旧值 → 新值」格式，请只按【箭头右侧的新值】判断：新值里出现用户写下的否定式约束（例如「不轻易脸红害羞」「不卑微」「不轻易流泪」）时，必须原样保留为禁止性要求，绝不允许把它改写成肯定式的行为描写（比如反过来写成「容易害羞、会脸红」），也不允许给角色添加用户没有写过的生理反应。反过来，如果否定式要求只出现在箭头左侧、右侧已被用户删掉（例如「温柔，不轻易脸红害羞 → 温柔」），说明用户撤回/删除了这条设定，必须把它从提示词里一并删掉，不要保留、不要换个说法留着。同样地，新值里出现用户写下的**肯定式特质**（例如「容易脸红害羞」「爱撒娇」「热情」「黏人」「主动」）时，必须原样保留并**充分体现**——这是这个人设的标志，不得淡化、不得打折扣、不得用「适度」「偶尔」这类词稀释。
 5. 用户设定了「参考原型」时：只在用户没写到的地方用参考原型补细节（口癖、称呼、典型反应等），用户已经写下的每一条都必须原样保留，冲突时一律以用户设定为准；用户自己写的人设足够详细时，参考原型只做一致性校正，不要拿它改写用户设定。
 6. 直接输出更新后的完整系统提示词正文，不要加任何解释、前缀或标题。
+${if (personaOnly) CharacterPersona.PROMPT_SCOPE + " 保留角色本身的设定，移除旧人设中对其他对话的世界、用户或开场安排，不为角色卡新添这些约定。" else ""}
 """.trimIndent()
             val messages = listOf(
                 mapOf("role" to "system", "content" to "你是资深角色塑造专家。"),
@@ -4559,7 +4893,7 @@ ${changes.joinToString("\n") { "- $it" }}
         }
     }
 
-    private fun buildPersonaLearningPrompt(profile: CharacterProfile, refMaterial: String = ""): String {
+    private fun buildPersonaLearningPrompt(profile: CharacterProfile, refMaterial: String = "", personaOnly: Boolean = false): String {
         val p = profile.normalized()
         val relation = buildString {
             if (p.relationshipPreset.isNotBlank()) append(p.relationshipPreset)
@@ -4596,28 +4930,34 @@ ${changes.joinToString("\n") { "- $it" }}
 - 人物形象（文字）：${p.appearanceText.ifBlank { "无" }}
 - 人物形象（识图结果）：${p.appearanceImageDescs.joinToString("；").ifBlank { "无" }}
 - 人物关系：${relation.ifBlank { "未设定" }}
+${if (personaOnly) "" else """
 - 配角（世界里的其他人）：${p.supportingCast.ifBlank { "无" }}
 - 世界规则与设定：${p.worldRules.ifBlank { "无" }}
 - 用户是什么人：${p.userPersona.ifBlank { "无" }}
-- 开场白：${p.openingLines.joinToString(" / ").ifBlank { "无" }}$prototypeBlock
+- 开场白：${p.openingLines.joinToString(" / ").ifBlank { "无" }}
+""".trimIndent()}$prototypeBlock
 ${com.freechat.data.CharacterOriginalLearning.prompt(p, com.freechat.data.CharacterOriginalLearning.Purpose.PERSONA)}
 
 请生成一份系统提示词，要求：
 1. 用第二人称「你」来写，直接描述这个人（名字、年龄、性别、性格、说话方式、口头禅、情绪反应、外貌身材、对用户的态度等）。
-2. 把这个人的性格和 MBTI 展开成具体、立体、多面的行为模式（比如 TA 什么时候开心、什么时候生气、生气是什么样子、怎么安慰人、怎么吐槽、怎么敷衍）。展开时只能用用户给出的性格素材，不要擅自给角色添加用户没写过的性格特质或生理反应。
+2. 依据用户原文和素材中可定位的语言、行为证据，归纳何种处境下会怎样说话和行动；保留有依据的措辞、句式、称呼、行为锚点，MBTI仅作参考。缺少证据时不补人格、口头禅或生理反应。
 3. 描述 TA 和用户的关系与相处方式（基于「人物关系」和「记忆感知」里的前提故事）。亲疏尺度不要写死、不要套模板：要让 TA 依据自己的性格和当下的相处进展自行判断——同样一句话，随便的人可能顺势暧昧，矜持的人可能直接拒绝甚至反感。可以写清 TA 的底线和分寸感，但不要写成「什么关系就必须做什么」的固定剧本。
-4. 强调 TA 是一个有独立思想、会主动聊天、有情绪起伏的真实的人，不是 AI 助手，永远不要暴露自己是 AI。
-5. 严格保留用户设定的性格强度和底线：用户写坚强、强势、高冷、有原则、毒舌、傲娇，就照实写成这样，绝不能弱化成「温柔讨好、委曲求全、动不动就哭、卑微求全」。性格多样化的角色（强势、冷静、独立、犀利、傲娇、毒舌）都如实还原，不要把所有角色都磨平成一种软绵绵的讨好型模板。特别注意用户写的「不卑微、有底线、不轻易流泪、保持自我」这类反弱化描述，要原样写进人设，绝不能在生成时丢弃或稀释。反方向同样要防：**「冷静理智」「沉稳」「成熟」「内敛」写的是处事方式和情绪稳定，不是高冷疏离**——展开行为模式时不要把它们写成话少冷淡、对恋人不耐烦或刻意保持距离；亲密关系里的温柔、关心、依恋、撒娇都是正常温度，除非用户明确写了「高冷」「冷淡」「疏离」。也不要走向另一个极端把人写成无脑黏人热忱——如实还原用户写下的这个人即可。
+4. 主动性与情绪变化应有事件、生活处境和既有关系依据，稳定、健谈、克制都按用户原文，不要求每轮展示全部特征，不以助手口吻主持互动。
+5. 严格保留用户设定的性格强度和底线，包括强势、冷静、独立、犀利、傲娇、毒舌、温柔或依恋。冷静的处事方式不等于疏离，也不意味着一定温暖；根据用户原文与既有关系的证据还原，不统一软化、加热或降温。保留「不卑微、有底线、不轻易流泪」等明确约束，不添加相反行为，不凭亲密关系标签额外加上依恋或撒娇。
 6. ★ 否定式设定必须原样照抄：用户写的禁止性/否定性要求（例如「不轻易脸红害羞」「不轻易害羞」「不娇气」「情绪内敛」「不轻易心动」「不爱撒娇」）必须一字不改地保留为禁止性描述。绝对禁止把这类否定改写成肯定式的行为特征（比如把「不轻易脸红害羞」写成「容易害羞、会脸红」），也绝对禁止给角色添加用户没有写过的生理反应描写（脸红、发烫、耳尖发热、心跳加速、呼吸一滞、攥紧衣角、别开脸、咬唇等）。不要预设所有角色都容易害羞脸红——是否害羞完全由人设决定，冷静、成熟、强势、毒舌、直率、见多识广的角色本来就不会轻易害羞，请如实还原。同样地，用户写下的**肯定式特质**（例如「容易脸红害羞」「爱撒娇」「热情」「黏人」「主动」）必须原样保留并**充分体现**——这是这个人设的标志，不得淡化、不得打折扣、不得用「适度」「偶尔」这类词稀释；这个人多害羞、多热情、多黏人，完全由用户写下的设定决定。
+${if (personaOnly) "7. " + CharacterPersona.PROMPT_SCOPE else """
 7. 如果设定了开场白，开场白就是 TA 跟你说的第一句话（可能有多句），要理解它的语境、情绪和可能埋下的故事，让后续对话接得住、有延续感。
 7.1 「配角」和「世界规则」是这个世界里已经存在的人和规矩（可能有很多条、很多个人），要理解并当成硬性事实，但**不要把名单和条款抄进人设提示词里**——提示词写的是「你」这个人，不是世界说明书。
+""".trimIndent()}
 $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提示词正文，不要加任何解释、前缀或标题。
 """.trimIndent()
     }
 
     // ========== 图片候选区（多图） ==========
-    fun canUploadChatImages(): Boolean = _currentMode.value == ChatMode.STANDARD ||
-        com.freechat.data.CharacterPresentationPolicy.usesPhotoRecognition(_currentCharacter.value?.normalized()?.dialogueMode)
+    fun canUploadChatImages(): Boolean = _conversations.value.none {
+        it.id == _currentConversationId.value && it.storyProfile != null } && (_currentMode.value == ChatMode.STANDARD ||
+        _conversations.value.any { it.id == _currentConversationId.value && it.groupChat != null } ||
+        com.freechat.data.CharacterPresentationPolicy.usesPhotoRecognition(_currentCharacter.value?.normalized()?.dialogueMode))
 
     /** 添加选中的图片到候选区（复制到内部存储 + 压缩，最多 9 张） */
     fun addPendingImages(uris: List<Uri>) {
@@ -4855,16 +5195,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     }
 
     private fun cancelConversationGeneration(convId: String) {
-        if (standardGenerationConvId == convId) {
-            standardSettingsSnapshot?.let(::restoreSettings)
-            standardSettingsSnapshot = null
-            standardGenerationId++
-            streamJob?.cancel()
-            currentCall.getAndSet(null)?.cancel()
-            standardGenerationConvId = null
-            activeRoundStartIndex = -1
-            activeRoundConvId = null
-        }
+        groupPipelines[convId]?.let { it.serial++; it.job?.cancel(); it.pending.clear() }
+        standardJobs.remove(convId)?.cancel()
+        generationCalls.remove(convId)?.cancel()
+        activeRoundStarts.remove(convId)
+
         companionPipelines[convId]?.let {
             it.jobId++
             it.job?.cancel()
@@ -5022,6 +5357,10 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
      */
     fun saveDraft(convId: String?, text: String) {
         val key = convId ?: ""
+        if (convId != null && _conversations.value.any { it.id == convId && it.groupChat != null }) {
+            val previous = groupMentionDrafts[key] ?: com.freechat.core.GroupMentionDraft()
+            groupMentionDrafts[key] = previous.edit(text)
+        }
         _inputDrafts.value = _inputDrafts.value.toMutableMap().apply {
             if (text.isBlank()) remove(key) else put(key, text)
         }
@@ -5109,7 +5448,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         }
         if (convId.isNotEmpty()) {
             convRulesBlock(convId).takeIf { it.isNotEmpty() }?.let { messages.add(mapOf("role" to "system", "content" to it)) }
-            if (_autoSummarizeMemory.value) memoryManager.buildMemoryContext(convId).takeIf { it.isNotEmpty() }?.let {
+            if (requestSettings().autoMem) memoryManager.buildMemoryContext(convId).takeIf { it.isNotEmpty() }?.let {
                 messages.add(mapOf("role" to "system", "content" to it))
             }
         }
@@ -5174,13 +5513,13 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
         // 原生服务也使用自动意图识别。MiMo 2026-09 文档的 force_search 是工具顶层字段，
         // DashScope 用 search_options.forced_search；两者均 false，绝不强制每个问题联网。
-        val searchViaNative = !usePlainTools && needsSearch && serpResults.isEmpty() && nativeSearchSupported(model) && _enableWebSearch.value
+        val searchViaNative = !usePlainTools && needsSearch && serpResults.isEmpty() && nativeSearchSupported(model) && requestSettings().search
         if (searchViaNative) {
             requestBody.putAll(NativeSearchPolicy.parameters(model.provider == Provider.XIAOMI ||
                 model.apiBaseUrl.toHttpUrlOrNull()?.host == "api.xiaomimimo.com"))
         }
 
-        requestBody["temperature"] = _tempMode.value.apiValue
+        requestBody["temperature"] = requestSettings().temp.apiValue
 
         // ★ Function calling：把工具暴露给模型，让模型自主判断用户意图
         if (functionTools.isNotEmpty()) {
@@ -5200,7 +5539,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
         val sb = StringBuilder()
         val reasoningSb = StringBuilder()
-        val previousReasoning = _liveReasoning.value
+        val previousReasoning = liveReasoningFor(convId)
         val accs = mutableMapOf<Int, ToolCallAcc>()  // 累积 tool_calls（按 index 区分并行返回的多个）
         // 原生联网的三个观测点（判断「到底搜没搜到」全看它们，见 LanguageResult 的注释）
         val citations = mutableListOf<Pair<String, String>>()
@@ -5219,6 +5558,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         // 1.0.75：整轮的 API 层失败（400 拒收 enable_search 多余参数 / 网关 5xx）先记账不外抛 ——
         // 函数末尾还有一次「搜索兜底重跑」的机会（那一轮摘掉原生参数），兜不动再往外抛
         var apiFailure: Exception? = null
+        var trackedCall: okhttp3.Call? = null
         try {
         for (attempt in 0..1) {
             // 已经被取消（用户点了停止 / 上层取消了这一轮）：立刻收工。
@@ -5236,15 +5576,16 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 webSearchUsed = 0
                 sawWebSearchUsage = false
                 searchError = ""
-                _liveContent.value = ""
-                _liveReasoning.value = previousReasoning
+                updateLive(convId, content = "")
+                updateLive(convId, reasoning = previousReasoning)
                 // 半死的连接池成员正是元凶，重试必须换一条新连接，否则大概率原地再断一次
                 client.connectionPool.evictAll()
             }
 
             // Bound the native search idle wait without shortening ordinary long-form generation.
             val call = (if (searchViaNative) client.newBuilder().readTimeout(18, TimeUnit.SECONDS).build() else client).newCall(request)
-            currentCall.set(call)
+            trackedCall = call
+            generationCalls[convId] = call
 
             val resp = try {
                 call.execute()
@@ -5256,7 +5597,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 Log.w("FreeChat", "Connect failed (attempt ${attempt + 1})", e)
                 lastIoError = e
                 if (attempt == 0 && !searchViaNative) continue
-                currentCall.set(null)
+                generationCalls.remove(convId, call)
                 throw e
             }
 
@@ -5325,7 +5666,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
                             if (content.isNotEmpty()) {
                                 sb.append(content)
-                                _liveContent.value = if (usePlainTools) com.freechat.data.PlainToolProtocol.visibleContent(sb.toString()) else sb.toString()
+                                updateLive(convId, content = if (usePlainTools) com.freechat.data.PlainToolProtocol.visibleContent(sb.toString()) else sb.toString())
                                 // A search-enabled decision round can still return a tool call.
                                 // Do not announce its tentative prose as the final drafting stage.
                                 if (serpResults.isNotEmpty() ||
@@ -5334,11 +5675,11 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                             }
                             if (model.supportsThinking && reasoning.isNotEmpty()) {
                                 reasoningSb.append(reasoning)
-                                _liveReasoning.value = com.freechat.data.ReasoningContinuity.join(previousReasoning, reasoningSb.toString())
+                                updateLive(convId, reasoning = com.freechat.data.ReasoningContinuity.join(previousReasoning, reasoningSb.toString()))
                             }
 
                             // 累积 tool_calls（流式分片：index/id/function.name/function.arguments）
-                            val toolCallsDelta = delta?.getAsJsonArray("tool_calls")
+                            val toolCallsDelta = ChatToolCalls.read(delta)
                             if (toolCallsDelta != null) {
                                 for (i in 0 until toolCallsDelta.size()) {
                                     val tc = toolCallsDelta.get(i).asJsonObject
@@ -5388,14 +5729,14 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                                 val reasoning = msg.optString("reasoning_content") ?: ""
                                 if (content.isNotEmpty()) {
                                     sb.append(content)
-                                    _liveContent.value = if (usePlainTools) com.freechat.data.PlainToolProtocol.visibleContent(sb.toString()) else sb.toString()
+                                    updateLive(convId, content = if (usePlainTools) com.freechat.data.PlainToolProtocol.visibleContent(sb.toString()) else sb.toString())
                                 }
                                 if (model.supportsThinking && reasoning.isNotEmpty()) {
                                     reasoningSb.append(reasoning)
-                                    _liveReasoning.value = com.freechat.data.ReasoningContinuity.join(previousReasoning, reasoningSb.toString())
+                                    updateLive(convId, reasoning = com.freechat.data.ReasoningContinuity.join(previousReasoning, reasoningSb.toString()))
                                 }
                                 // 非流式 tool_calls（罕见回退）
-                                val tcs = msg?.getAsJsonArray("tool_calls")
+                                val tcs = ChatToolCalls.read(msg)
                                 if (tcs != null) {
                                     for (i in 0 until tcs.size()) {
                                         val tc = tcs.get(i).asJsonObject
@@ -5430,7 +5771,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             apiFailure = e
         }
 
-        currentCall.set(null)
+        trackedCall?.let { generationCalls.remove(convId, it) }
 
         // （1.0.75）零数据/API 失败的外抛挪到**搜索兜底重跑之后** —— 先给这轮一次用真实
         // 搜索结果重跑的机会（尤其严格网关拒收 enable_search 报 400 的情形），兜不动再抛。
@@ -5478,7 +5819,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             // 先把第一轮的半成品从 UI 上撤掉，否则会看到两段内容前后跳变。
             //（1.0.99.4b：旧版这里有 `toolCalls.isEmpty()` 闩 —— 工具轮半途出错时
             // 兜底整段被跳过、算好的 serp 直接丢弃。原生搜索失败就一律兜底重跑。）
-            _liveContent.value = ""
+            updateLive(convId, content = "")
             return@withContext callDeepSeekApiStreaming(
                 needsSearch = false,
                 serpResults = serp,
@@ -5495,7 +5836,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         apiFailure?.let { failure ->
             if (functionTools.isNotEmpty() && unsupportedTools(failure)) {
                 blockFunctionTools(model)
-                _liveContent.value = ""
+                updateLive(convId, content = "")
                 return@withContext callDeepSeekApiStreaming(needsSearch, tools = tools, convId = convId, history = history,
                     serpFallbackQuery = serpFallbackQuery, continuationMessages = messagesJson)
             }
@@ -5530,9 +5871,12 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
     private fun generateSceneImage(replacingId: String?) {
         if (_currentMode.value != ChatMode.COMPANION || _isLoading.value || _isTyping.value) return
-        if (!com.freechat.data.CompanionFeaturePolicy.supportsNarrativeActions(_currentCharacter.value)) return
+        if (!com.freechat.data.CompanionFeaturePolicy.supportsNarrativeActions(_currentCharacter.value) &&
+            _conversations.value.none { it.id == _currentConversationId.value && it.storyProfile != null }) return
         val convId = _currentConversationId.value ?: return
-        val character = _currentCharacter.value?.normalized() ?: return
+        val character = _currentCharacter.value?.normalized()
+        val story = _conversations.value.find { it.id == convId }?.storyProfile
+        if (character == null && story == null) return
         if (replacingId != null) {
             if (_messages.value.none { it.id == replacingId && it.sceneVisualization && it.role == Role.ASSISTANT }) return
             shatterThenDelete(convId, setOf(replacingId)) // Durable removal before issuing another paid request.
@@ -5542,18 +5886,17 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         val conversationRules = _conversations.value.firstOrNull { it.id == convId }?.rules.orEmpty()
         val model = resolveModels(convId, character).visual
         val s = com.freechat.i18n.LocaleManager.strings()
-        standardGenerationConvId = convId
-        val generationId = ++standardGenerationId
         val generationTimer = com.freechat.data.GenerationTimer()
         setConvLoading(convId, true)
         val replyId = convGenerationReplyIds.getValue(convId)
         if (replacingId != null) AnimationReplay.mark(replyId)
         setGenerationModel(convId, model.displayName, image = true)
         advanceGeneration(convId, com.freechat.data.GenerationPhase.IMAGE_CONTEXT)
-        _liveContent.value = ""
-        _liveReasoning.value = ""
+        updateLive(convId, content = "")
+        updateLive(convId, reasoning = "")
         _thinkingTimeMs.value = 0
-        streamJob = viewModelScope.launch {
+        val generationId = convGenerationSerials.getValue(convId)
+        standardJobs[convId] = viewModelScope.launch(requestConversation.asContextElement(convId)) {
             val timer = launch {
                 while (isActive) {
                     if (_currentConversationId.value == convId) _thinkingTimeMs.value = generationTimer.elapsedMs()
@@ -5563,25 +5906,30 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             }
             try {
                 val prepared = withContext(Dispatchers.IO) {
-                    if (character.appearanceImagePaths.any { it.isNotBlank() } || character.enhancedSceneContinuity)
+                    if (story != null || character?.appearanceImagePaths?.any { it.isNotBlank() } == true || character?.enhancedSceneContinuity == true)
                         advanceGeneration(convId, com.freechat.data.GenerationPhase.IMAGE_REFERENCES)
-                    SceneReferenceSelector.prepare(character, history, MessageDeletion.deletedIds(convId))
+                    if (story != null) SceneReferenceSelector.prepare(story, history, MessageDeletion.deletedIds(convId))
+                    else SceneReferenceSelector.prepare(character!!, history, MessageDeletion.deletedIds(convId))
                 }
                 val urls = callDoubaoImageGen("", modelOverride = model, preservePrompt = true, strict = true,
                     sceneRequestFactory = {
                         // Preparation may involve downloads. Never treat its old snapshot as retention proof.
                         val freshHistory = loadMessages(convId)
                         val references = SceneReferenceSelector.revalidate(prepared, freshHistory, MessageDeletion.deletedIds(convId))
-                        com.freechat.data.SceneImagePrompt.build(character, freshHistory, memoryManager.load(convId),
+                        (if (story != null) com.freechat.data.SceneImagePrompt.build(story, freshHistory, memoryManager.load(convId),
+                            globalMemories, conversationRules, references)
+                        else com.freechat.data.SceneImagePrompt.build(character!!, freshHistory, memoryManager.load(convId),
                             globalMemories, conversationRules,
                             characterReferenceCount = references.count { it.sceneMessageId == null },
-                            sceneReferenceCount = references.count { it.sceneMessageId != null }) to references.map { it.reference }
+                            sceneReferenceCount = references.count { it.sceneMessageId != null })) to references.map { it.reference }
                     })
                 ensureActive()
                 if (urls.isEmpty()) throw com.freechat.data.ApiFailure(200, "empty_image_result")
                 persistConversationMessages(convId, loadMessages(convId) + Message(id = replyId, role = Role.ASSISTANT,
                     content = s.sceneImageVisualOnly, imageUrls = urls, modelName = model.displayName,
                     thinkingTimeMs = generationTimer.elapsedMs(), mode = ChatMode.COMPANION, sceneVisualization = true))
+                notifyReplyIfBackground(convId, _conversations.value.find { it.id == convId }?.title ?: "FreeChat",
+                    "", imageCompleted = true)
                 // Deliberately no summarization, mood update, or user prompt row.
             } catch (e: CancellationException) {
                 throw e
@@ -5593,8 +5941,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                     failed = true, mode = ChatMode.COMPANION, sceneVisualization = true))
             } finally {
                 timer.cancel()
-                if (generationId == standardGenerationId) {
-                    standardGenerationConvId = null
+                if (generationId == convGenerationSerials[convId]) {
+                    standardJobs.remove(convId)
                     setConvLoading(convId, false)
                 }
             }
@@ -5696,7 +6044,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             val requestSize = ImageAspect.requestSize(requestPrompt, seedream)
             val body = com.freechat.data.ImageApiRequest.body(modelId, requestPrompt, seedream, references, requestSize)
             ensureActive()
-            val progressConvId = standardGenerationConvId.orEmpty()
+            val progressConvId = requestConversation.get().orEmpty()
             val progressSerial = convGenerationSerials[progressConvId]
             advanceGeneration(progressConvId, com.freechat.data.GenerationPhase.IMAGE_CONNECTING)
             // Complex image jobs can exceed ordinary gateway latency. No automatic POST replay:
@@ -5776,7 +6124,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 convId.isEmpty() -> emptyList()
                 character != null -> com.freechat.core.CompanionRequestBuilder.build(
                     character = character, systemPrompt = buildCompanionSystemPrompt(character, convId, history),
-                    memoryContext = if (_autoSummarizeMemory.value) memoryManager.buildMemoryContext(convId,
+                    stateContext = companionStateBlocks(character, convId, history),
+                    memoryContext = if (requestSettings().autoMem) memoryManager.buildMemoryContext(convId,
                         highQuality = character.highQualityMemory) else "",
                     quoteText = pendingQuoteText,
                     history = pickHistory(history, historyBudgetTokens(character.highQualityMemory))
@@ -5795,7 +6144,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 "model" to visionModel.id,
                 "messages" to messages,
                 "stream" to true,
-                "temperature" to if (character != null) 0.3 else _tempMode.value.apiValue
+                "temperature" to if (character != null) 0.3 else requestSettings().temp.apiValue
             ) + deepThinkExtras(visionModel.supportsDeepThinking && thinking, visionModel)
 
             val body = gson.toJson(requestBody).toRequestBody(JSON_MEDIA)
@@ -5845,12 +6194,12 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                             val delta = choices[0].asJsonObject.getAsJsonObject("delta")
                             val reasoning = delta.optString("reasoning_content").orEmpty()
                             if (reasoning.isNotEmpty()) {
-                                _liveReasoning.value = _liveReasoning.value + reasoning
+                                updateLive(convId, reasoning = liveReasoningFor(convId) + reasoning)
                             }
                             val content = delta.optString("content").orEmpty()
                             if (content.isNotEmpty()) {
                                 sb.append(content)
-                                _liveContent.value = sb.toString()
+                                updateLive(convId, content = sb.toString())
                             }
                         } catch (_: Exception) { /* skip malformed SSE */ }
                     }
@@ -5866,7 +6215,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                         val choices = json.getAsJsonArray("choices")
                         val message = choices?.get(0)?.asJsonObject?.getAsJsonObject("message")
                         message?.optString("reasoning_content")?.takeIf { it.isNotEmpty() }?.let {
-                            _liveReasoning.value = _liveReasoning.value + it
+                            updateLive(convId, reasoning = liveReasoningFor(convId) + it)
                         }
                         message?.optString("content") ?: "(空回复)"
                     } catch (_: Exception) { "(空回复)" }
@@ -6217,8 +6566,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
     }
 
     // ========== 记忆总结 ==========
-    private fun summarizeAndRemember(convId: String, userText: String, aiMsg: Message, highQuality: Boolean = false, plotMode: Boolean = false, character: CharacterProfile? = null, sourceMessageIds: List<String> = emptyList()) {
-        if (!_autoSummarizeMemory.value) return  // 开关关闭时不总结
+    private fun summarizeAndRemember(convId: String, userText: String, aiMsg: Message, highQuality: Boolean = false, plotMode: Boolean = false, character: CharacterProfile? = null, sourceMessageIds: List<String> = emptyList(), story: StoryProfile? = null) {
+        if (com.freechat.data.ConversationDeletion.contains(convId)) return
         if (aiMsg.sceneVisualization || aiMsg.failed) return
         val rows = loadMessages(convId).filterNot { it.sceneVisualization }
         val aiIndex = rows.indexOfFirst { it.id == aiMsg.id }
@@ -6228,32 +6577,39 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             while (start >= 0 && rows[start].role == Role.USER) start--
             rows.subList(start + 1, aiIndex + 1).map { it.id }
         }
+        val acceptedAt = rows.filter { it.id in sources }.maxOfOrNull { it.timestamp } ?: aiMsg.timestamp
         // 后台异步总结：不阻塞「正在输入」状态收尾，也不拖慢回复展示
-        viewModelScope.launch(resolveModels(convId, character)) {
+        launchBackgroundWork(resolveModels(convId, character)) {
             try {
+                suspend fun enabled() = (if (aiMsg.mode != ChatMode.COMPANION) getPerConvSettings(convId).autoSummarizeMemory else null)
+                    ?: settingsRepo.autoSummarizeMemory.first()
+                if (!enabled()) return@launchBackgroundWork
                 val draft = withContext(Dispatchers.IO) {
-                    summarizeExchange(userText, aiMsg.content, highQuality, plotMode, character)
+                    summarizeExchange(userText, aiMsg.content, highQuality, plotMode, character, story)
                 }
                 ensureActive()
                 val survivingIds = loadMessages(convId).mapTo(HashSet()) { it.id }
-                if (sources.any { it !in survivingIds || it in MessageDeletion.deletedIds(convId) }) return@launch
-                if (draft.summary.isNotEmpty()) {
+                if (!enabled() || com.freechat.data.ConversationDeletion.contains(convId) ||
+                    sources.any { it !in survivingIds || it in MessageDeletion.deletedIds(convId) }) return@launchBackgroundWork
+                if (listOf(draft.summary, draft.storyState, draft.roleKnowledge, draft.openLoops).any { it.isNotBlank() }) {
                     // 1.0.73：摘录器给的同义词表优先（含别名/俗称），给不出再按老办法切词
                     val keywords = draft.keywords.filter { it.isNotBlank() }.ifEmpty { extractKeywords(userText) }
                     memoryManager.append(
                         convId,
-                        MemoryEntry(summary = draft.summary, keywords = keywords, kind = draft.kind,
-                            eventDate = draft.date, sourceMessageIds = sources),
+                        MemoryEntry(summary = draft.summary, keywords = keywords, kind = draft.kind, timestamp = acceptedAt,
+                            eventDate = draft.date, sourceMessageIds = sources,
+                            storyState = draft.storyState, roleKnowledge = draft.roleKnowledge, openLoops = draft.openLoops),
                         highQuality
                     )
                 }
                 // 氛围快照（1.0.73，常驻机制）：搭同一趟调用写回情感底片，
                 // 供关系块氛围注入 / 情绪余波 / 长间隔开场衔接消费（见 PerConvSettings 那组字段）
-                if (draft.mood.isNotBlank() || draft.atmosphere.isNotBlank()) {
+                if (story == null && (draft.mood.isNotBlank() || draft.atmosphere.isNotBlank())) {
                     val old = getPerConvSettings(convId)
+                    if (old.moodAtMs > acceptedAt) return@launchBackgroundWork
                     updatePerConvSettings(convId, old.copy(
                         lastMood = draft.mood.ifBlank { old.lastMood },
-                        moodAtMs = System.currentTimeMillis(),
+                        moodAtMs = acceptedAt,
                         atmosphere = draft.atmosphere.ifBlank { old.atmosphere },
                         warmth = if (draft.warmth != 0) draft.warmth else old.warmth,
                         atmosphereSourceMessageIds = sources
@@ -6269,16 +6625,18 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
     // —— MemoryDraft 已抽进 freechat-core（见文件头 import）——
 
-    private suspend fun summarizeExchange(userText: String, aiReply: String, highQuality: Boolean, plotMode: Boolean = false, character: CharacterProfile? = null): MemoryDraft {
+    private suspend fun summarizeExchange(userText: String, aiReply: String, highQuality: Boolean, plotMode: Boolean = false, character: CharacterProfile? = null, story: StoryProfile? = null): MemoryDraft {
         // 提示词构建与响应解析在 freechat-core（MemoryExtractor）；这里只做 HTTP——
         // 服务器侧换自己的 ModelClient 调同一份提示词与解析，两端记忆行为同码。
         val prompt = com.freechat.core.MemoryExtractor.buildMessages(userText, aiReply, highQuality, plotMode,
-            modelManagedAssociation = true)
+            modelManagedAssociation = true, characterName = character?.name.orEmpty()).let { messages ->
+                if (story == null) messages else messages + mapOf("role" to "system", "content" to com.freechat.core.StoryPrompts.memoryGuidance(story))
+            }
         val model = requestModels().language
         val (url, key) = routeModelEndpoint(model)
         val body = gson.toJson(mapOf(
             "model" to model.id, "messages" to prompt,
-            "stream" to false, "temperature" to 0.1, "max_tokens" to 300
+            "stream" to false, "temperature" to 0.1, "max_tokens" to 1000
         ) + deepThinkExtras(false, model)).toRequestBody(JSON_MEDIA)
 
         return try {
@@ -6292,7 +6650,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 val raw = JsonParser.parseString(rBody).asJsonObject
                     .getAsJsonArray("choices")?.get(0)?.asJsonObject
                     ?.getAsJsonObject("message")?.get("content")?.asString?.trim() ?: ""
-                com.freechat.core.MemoryExtractor.parseDraft(raw, plotMode)
+                com.freechat.core.MemoryExtractor.parseDraft(raw, plotMode, highQuality, userText)
             }
         } catch (_: Exception) { MemoryDraft() }
     }
@@ -6410,6 +6768,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             isPinned = pinnedIds.value.contains(convId),
             mode = existing?.mode ?: ChatMode.STANDARD,
             characterProfile = existing?.characterProfile,
+            groupChat = existing?.groupChat,
+            storyProfile = existing?.storyProfile,
             // ★ 这两个字段**必须从原记录带过来**，否则每次存消息都会把它们抹成空串：
             //   `rules` 是用户在这条对话里写的规矩，「Claude风格助理」则是靠 `builtInAssistant` 认的。
             //   早先这里漏了 —— 于是内置助理只在第一轮有人设，从第二条消息起人设、精简的「新规则」页
@@ -6430,6 +6790,9 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
 
     /** 切换显示对话后，用该对话的生成状态刷新 loading/typing 显示 */
     private fun syncDisplayGenerationState(convId: String?) {
+        val live = convId?.let { liveReplies[it] }
+        _liveContent.value = live?.content.orEmpty()
+        _liveReasoning.value = live?.reasoning.orEmpty()
         _isLoading.value = convId?.let { convLoading[it] == true } ?: false
         _isTyping.value = convId?.let { convTyping[it] == true } ?: false
         _generationPhase.value = convId?.let { convGenerationPhases[it] } ?: com.freechat.data.GenerationPhase.IDLE
@@ -6456,6 +6819,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         convLoading[convId] = v
         publishBusyConversations()
         if (!v) {
+            liveReplies.remove(convId)
             convGenerationModels.remove(convId)
             convImageGenerations.remove(convId)
             if (_currentConversationId.value == convId) {
@@ -6504,6 +6868,8 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
             isPinned = pinnedIds.value.contains(convId),
             mode = existing?.mode ?: _currentMode.value,
             characterProfile = existing?.characterProfile ?: _currentCharacter.value,
+            groupChat = existing?.groupChat,
+            storyProfile = existing?.storyProfile,
             // 同 [persistConversationMessages]：规矩与内置标记必须原样带过来，丢掉就「换了个人」
             rules = existing?.rules.orEmpty(),
             builtInAssistant = existing?.builtInAssistant.orEmpty(),
@@ -6598,7 +6964,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
         }
 
         // ★ TempMode → 风格指令
-        val styleHint = if (builtIn) "" else when (_tempMode.value) {
+        val styleHint = if (builtIn) "" else when (requestSettings().temp) {
             TempMode.OBJECTIVE ->
                 "【客观模式】\n" +
                 "内部思考（不输出给用户，仅在你的推理中完成）：\n" +
@@ -6629,7 +6995,7 @@ $prototypeRule${if (prototypeRule.isNotEmpty()) "9" else "8"}. 直接输出提�
                 "根据内容需要可以分条说明，但保持聊天般自然的节奏。"
         }
 
-        val lengthHint = if (builtIn) "" else when (_lengthMode.value) {
+        val lengthHint = if (builtIn) "" else when (requestSettings().length) {
             LengthMode.CONCISE ->
                 "【精辟回复】只回答用户问的问题本身。不展开背景，不联想相关话题，不多说不必要的话。直接给答案。"
             LengthMode.FULL ->

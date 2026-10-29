@@ -279,9 +279,8 @@ fun MiMoVoiceSettingsPage(onBack: () -> Unit, onSaved: (VoicePreset) -> Unit) {
                     .then(if (advancedMaterial) Modifier.hazeSource(state = hazeState).hazeBackground(colors.Background) else Modifier)
                     .jellyOverscroll()
                     .verticalScroll(rememberScrollState())
-                    // 1.1.29.8 工单③：原顶距（标题栏+8dp）落在模糊渐隐带里，首行字顶被糊——
-                    // 整体下移 24dp 出带（渐隐带高=HazeSpec.TopFadeZoneDp 32dp），首屏与二级页同吃
-                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeight) + 24.dp, bottom = 36.dp)
+                    // 将原有 32dp 留白交给统一顶距约束，首屏与二级页都避开模糊带。
+                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeight, 32.dp), bottom = 36.dp)
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {

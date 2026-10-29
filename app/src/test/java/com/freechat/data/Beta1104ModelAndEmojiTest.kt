@@ -59,7 +59,7 @@ class Beta1104ModelAndEmojiTest {
         assertTrue("Full and compact input must both use the same mode guard",
             Regex("if \\(emojiAvailable\\)").findAll(source).count() >= 2)
         assertTrue(source.contains("visible = emojiAvailable && showEmojiPicker"))
-        assertTrue(source.contains("if (emojiAvailable) { draftEditedByUser = true; text += em }"))
+        assertTrue(source.contains("if (emojiAvailable) { draftEditedByUser = true; editText(text + em) }"))
         assertTrue(source.contains("LaunchedEffect(emojiAvailable)"))
     }
 

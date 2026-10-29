@@ -55,7 +55,8 @@ class TabletFloating1205ContractTest {
 
     @Test fun retainedCharacterFormAndModeLockStayBoundToTheOpenedConversation() {
         val main = source("MainActivity.kt")
-        assertTrue(main.contains("key(characterSetupConversationId)"))
+        assertTrue(main.contains("key(characterEditorKey)"))
+        assertTrue(main.contains("characterSetupConversationId = conversationId"))
         assertTrue(main.contains("conversationHasMessages = conversations.any"))
         assertTrue(main.contains("it.id == characterSetupConversationId && it.messageCount > 0"))
         val character = source("ui/screens/CharacterSetupScreen.kt")
@@ -68,8 +69,7 @@ class TabletFloating1205ContractTest {
             .contains("requestBaseNavigation {"))
         val opening = main.substringAfter("onOpenCharacterSetup = {").substringBefore("hazeState = chatHazeState")
         assertTrue(opening.indexOf("val requestedProfile") < opening.indexOf("requestBaseNavigation {"))
-        assertTrue(opening.contains("characterSetupConversationId = requestedConversationId"))
-        assertTrue(opening.contains("characterSetupInitial = requestedProfile"))
+        assertTrue(opening.contains("openCharacterEditor(requestedProfile, conversationId = requestedConversationId)"))
         assertTrue(main.substringAfter("onOpenNewRules = {").substringBefore("onOpenModelEditor =")
             .contains("rulesConversationId = requestedConversationId"))
     }

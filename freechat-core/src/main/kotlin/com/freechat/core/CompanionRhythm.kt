@@ -1,43 +1,30 @@
 package com.freechat.core
 
-import kotlin.random.Random
-
-/**
- * 拟人回复节奏表（1.0.91 M1 第三刀从 ChatViewModel.generateCompanionReply 平移，行为一字不变）：
- * 情绪决定「回几条」与「每条隔多久」——像真人的说话节奏，时快时慢、话多话少随心情。
- * 叙事档另走一套（整段一条，只留段间小歇）。随机源可注入（服务器回归要确定性）。
- */
+/** Lossless delivery policy shared by App and the server brain. */
 object CompanionRhythm {
 
-    /** 先随机等待再显示「正在输入」——刚发完消息就秒回太假 */
-    fun initialTypingDelayMs(random: Random = Random.Default): Long = random.nextLong(1500L, 4500L)
-
-    /**
-     * 这一轮展示几条（从分好条的回复里取前 N 条）。
-     * ANGRY 有 35% 概率整轮不回（真生气了就不理人）；[regenerating] 重生成时不许「生气不回」
-     * （用户主动点的重生成必须给出内容）。
-     */
-    fun segmentCount(mood: CompanionMood, narrative: Boolean, regenerating: Boolean, segmentTotal: Int, random: Random = Random.Default): Int {
-        return if (narrative) segmentTotal.coerceAtMost(3) else when (mood) {
-            CompanionMood.ANGRY -> if (!regenerating && random.nextFloat() < 0.35f) 0 else 1
-            CompanionMood.SAD, CompanionMood.WRONGED -> 1
-            CompanionMood.DISMISSIVE, CompanionMood.SHY, CompanionMood.BORED -> 1
-            CompanionMood.EXCITED -> random.nextInt(2, 4)
-            CompanionMood.HAPPY -> random.nextInt(2, 4)
-            CompanionMood.NEUTRAL -> random.nextInt(1, 4)
-        }
+    /** Preserve natural message boundaries; only narrative mode joins paragraphs. */
+    fun prepareSegments(segments: List<String>, narrative: Boolean): List<String> {
+        val rows = segments.map { it.trim() }.filter { it.isNotEmpty() }
+        if (narrative) return listOf(rows.joinToString("\n\n")).filter { it.isNotEmpty() }
+        return rows
     }
 
-    /** 每条之间的「正在输入」间隔（毫秒区间），情绪不同快慢不同 */
-    fun segmentIntervalMs(mood: CompanionMood, narrative: Boolean, random: Random = Random.Default): Long {
-        return if (narrative) random.nextLong(1500L, 3000L) else when (mood) {
-            CompanionMood.ANGRY -> random.nextLong(4000L, 7000L)
-            CompanionMood.SAD, CompanionMood.WRONGED -> random.nextLong(2000L, 4500L)
-            CompanionMood.DISMISSIVE, CompanionMood.BORED -> random.nextLong(2000L, 4200L)
-            CompanionMood.SHY -> random.nextLong(2000L, 3500L)
-            CompanionMood.EXCITED -> random.nextLong(800L, 2000L)
-            CompanionMood.HAPPY -> random.nextLong(900L, 2600L)
-            CompanionMood.NEUTRAL -> random.nextLong(1500L, 3800L)
+    /** Minimum reading/composition rhythm, not a second random model wait. */
+    fun deliveryDelaysMs(segments: List<String>, narrative: Boolean, elapsedMs: Long): List<Long> =
+        segments.mapIndexed { index, text ->
+            val chars = CompanionPrompts.extractVoice(text)?.text?.length ?: text.length
+            if (index == 0) {
+                val minimum = if (narrative) 0L else (450L + chars * 24L).coerceAtMost(1800L)
+                (minimum - elapsedMs.coerceAtLeast(0L)).coerceAtLeast(0L)
+            } else (400L + chars * 32L).coerceAtMost(2600L)
         }
-    }
+
+    /** Validate optional plans from newer servers; old servers use the same deterministic fallback. */
+    fun validatedDelaysMs(plan: List<Long>?, segments: List<String>, narrative: Boolean, elapsedMs: Long): List<Long> =
+        plan?.takeIf { it.size == segments.size && it.all { ms -> ms in 0L..3000L } }?.mapIndexed { index, ms ->
+            if (index == 0) minOf(ms, deliveryDelaysMs(segments, narrative, elapsedMs).first()) else ms
+        }
+            ?: deliveryDelaysMs(segments, narrative, elapsedMs)
+
 }

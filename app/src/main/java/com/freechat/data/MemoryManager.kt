@@ -61,6 +61,20 @@ class MemoryManager {
         }
     }
 
+    fun loadMember(convId: String, memberId: String): List<MemoryEntry> =
+        com.freechat.core.GroupMemoryLogic.loadMember(load(convId), memberId)
+
+    fun buildMemberMemoryContext(convId: String, memberId: String, highQuality: Boolean = false): String =
+        com.freechat.core.GroupMemoryLogic.buildMemberMemoryContext(load(convId), memberId, highQuality)
+
+    fun appendMember(convId: String, memberId: String, entry: MemoryEntry, highQuality: Boolean = false) {
+        LocalStore.locked {
+            if (ConversationDeletion.contains(convId) || MessageDeletion.memories(convId, listOf(entry)).isEmpty()) return@locked
+            val rows = com.freechat.core.GroupMemoryLogic.appendMember(load(convId), memberId, entry, highQuality)
+            LocalStore.writeText(memoryFile(convId), gson.toJson(rows))
+        }
+    }
+
     /** 删除对话记忆 */
     fun delete(convId: String) {
         LocalStore.deleteFile(memoryFile(convId))
@@ -100,8 +114,8 @@ class MemoryManager {
     }
 
     /** 构建用于 API 的记忆系统提示词片段（记忆是「增强」不是「必需」：这里出任何岔子都只等于本轮没有记忆） */
-    fun buildMemoryContext(convId: String, highQuality: Boolean = false): String = try {
-        ModelManagedMemory.buildContext(load(convId), highQuality)
+    fun buildMemoryContext(convId: String, highQuality: Boolean = false, includeStoryState: Boolean = false): String = try {
+        ModelManagedMemory.buildContext(load(convId), highQuality, includeStoryState)
     } catch (e: Exception) {
         // 兜底：这段代码曾经把整个拟人模式拖垮过 —— 老档案里 eventDate 为 null 时 NPE，
         // 异常在拼请求之前抛出，用户看到的是「请求失败」，其实请求根本没发出去。

@@ -23,6 +23,7 @@ import com.freechat.ui.components.SheetOption
 import com.freechat.ui.components.SheetPanel
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.theme.FreeChatColors
+import com.freechat.ui.theme.FreeChatInputShape
 import dev.chrisbanes.haze.HazeState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -85,10 +86,12 @@ internal fun BoxScope.SearchSettingsPanel(
                 Spacer(Modifier.height(8.dp))
             }
             OutlinedTextField(draft.endpoint, { draft = draft.copy(endpoint = it); status = "" },
+                shape = FreeChatInputShape,
                 label = { Text(s.searchEndpoint) }, singleLine = true, enabled = !busy,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(draft.apiKey, { draft = draft.copy(apiKey = it); status = "" },
+                shape = FreeChatInputShape,
                 label = { Text(if (draft.provider in listOf(SearchProvider.ANYSEARCH, SearchProvider.SEARXNG, SearchProvider.FIRECRAWL)) s.searchOptionalKey else "API Key") },
                 singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),

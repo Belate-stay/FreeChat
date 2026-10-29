@@ -62,7 +62,10 @@ import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.TextToolbar
 import androidx.compose.ui.platform.TextToolbarStatus
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -179,6 +182,9 @@ fun ChatInput(
     onInputFocused: () -> Unit = {},
     draftText: String = "",
     onDraftChanged: (String) -> Unit = {},
+    groupMentionDraft: com.freechat.core.GroupMentionDraft? = null,
+    mentionInsertion: MentionComposerInsertion? = null,
+    onMentionQuery: ((String, Int) -> Unit)? = null,
     onVoiceInput: (text: String, wav: ByteArray?) -> Unit = { _, _ -> },
     onRecognizeVoice: suspend (ByteArray) -> String? = { null },
     onRecordingChanged: (Boolean) -> Unit = {},
@@ -305,7 +311,7 @@ fun ChatInput(
     var textComposition by remember { mutableStateOf<TextRange?>(null) }
     // 仅在草稿非空且与当前文字不同时才恢复草稿（避免发送后 draftText 清空延迟导致文字残留）
     LaunchedEffect(voiceSessionKey) { textComposition = null }
-    LaunchedEffect(draftText) {
+    LaunchedEffect(voiceSessionKey, draftText) {
         if (draftText != text) {
             text = draftText
             textSelection = TextRange(draftText.length)
@@ -326,8 +332,12 @@ fun ChatInput(
     // 避免换行后左右变两个大「半圆」跑道
     val inputShape = if (isComplete || text.contains('\n') || text.length > 25) RoundedCornerShape(24.dp) else RoundedCornerShape(50.dp)
 
-    // 同步草稿
-    LaunchedEffect(text) { onDraftChanged(text) }
+    // Emit edits synchronously: delayed draft echoes must not overwrite a newer keystroke.
+    fun editText(value: String) {
+        if (text == value) return
+        text = value
+        onDraftChanged(value)
+    }
 
     // 发送按钮弹性缩放
     var justSent by remember { mutableStateOf(false) }
@@ -365,7 +375,7 @@ fun ChatInput(
             if (!pasted.isNullOrEmpty()) {
                 val at = if (hasFocus) textSelection.min.coerceIn(0, text.length) else text.length
                 val end = if (hasFocus) textSelection.max.coerceIn(at, text.length) else text.length
-                text = text.substring(0, at) + pasted + text.substring(end)
+                editText(text.substring(0, at) + pasted + text.substring(end))
                 draftEditedByUser = true
                 textSelection = TextRange(at + pasted.length)
                 textComposition = null
@@ -411,6 +421,28 @@ fun ChatInput(
         if (focusTick <= 0) return@LaunchedEffect
         if (!isComplete && wrappedLineCount > 3) expanded = true
         else mainFocusRequester.requestFocus()
+    }
+
+    LaunchedEffect(mentionInsertion, draftText) {
+        val insertion = mentionInsertion ?: return@LaunchedEffect
+        if (insertion.text != draftText) return@LaunchedEffect
+        text = insertion.text
+        textSelection = TextRange(insertion.caret.coerceIn(0, text.length))
+        textComposition = null
+        if (expanded) fullscreenFocusRequester.requestFocus() else mainFocusRequester.requestFocus()
+        keyboardController?.show()
+    }
+    fun requestTypedMention(previous: String, value: TextFieldValue) {
+        val at = value.selection.end - 1
+        if (onMentionQuery != null && value.selection.collapsed && value.text.length == previous.length + 1 &&
+            value.text.getOrNull(at) == '@' && value.text.removeRange(at, at + 1) == previous) {
+            onMentionQuery(value.text, value.selection.end)
+        }
+    }
+    val mentionTransform = androidx.compose.ui.text.input.VisualTransformation { value ->
+        val bindings = groupMentionDraft?.edit(value.text)?.validBindings().orEmpty()
+        androidx.compose.ui.text.input.TransformedText(groupMentionText(value.text, bindings,
+            glassCursor, colors.Primary.copy(alpha = 0.12f)), androidx.compose.ui.text.input.OffsetMapping.Identity)
     }
 
     // ──── 语音录音状态 ────
@@ -573,8 +605,8 @@ fun ChatInput(
             if (narrativeSingleSend) onRetract() else onStop()
         } else if (!isEmpty) {
             justSent = true
-            onDraftChanged("")  // 先清草稿再发送
             onSend(text.trim())
+            onDraftChanged("")  // 发送先消费文字中的 @ 身份，再清空草稿。
             text = ""
             textComposition = null
             expanded = false  // 发送后自动退出全屏输入框
@@ -839,9 +871,12 @@ fun ChatInput(
                         BasicTextField(
                             value = TextFieldValue(text, textSelection, if (expanded) textComposition else null),
                             onValueChange = { v ->
+                                val previous = text
                                 if (v.text != text) draftEditedByUser = true
-                                text = v.text; textSelection = v.selection; textComposition = v.composition
+                                editText(v.text); textSelection = v.selection; textComposition = v.composition
+                                requestTypedMention(previous, v)
                             },
+                            visualTransformation = mentionTransform,
                             textStyle = MaterialTheme.typography.bodyMedium.copy(color = glassText, fontSize = 15.sp, lineHeight = 20.sp, fontFamily = LocalChatFontFamily.current),
                             cursorBrush = SolidColor(glassCursor),
                             // Let the text field own scrolling so its caret and IME see the same viewport.
@@ -875,12 +910,15 @@ fun ChatInput(
                             BasicTextField(
                                 value = TextFieldValue(text, textSelection, textComposition),
                                 onValueChange = { v ->
+                                    val previous = text
                                     if (v.text != text) draftEditedByUser = true
-                                    text = v.text
+                                    editText(v.text)
                                     // 长按后的选区一律不收（见 blockSelection 的说明）
                                     textSelection = if (blockSelection) textSelection else v.selection
                                     textComposition = v.composition
+                                    requestTypedMention(previous, v)
                                 },
+                                visualTransformation = mentionTransform,
                                 textStyle = inputTextStyle,
                                 cursorBrush = SolidColor(glassCursor),
                                 modifier = Modifier
@@ -1138,13 +1176,16 @@ fun ChatInput(
                                 BasicTextField(
                                     value = TextFieldValue(if (expanded) "" else text, textSelection, if (expanded) null else textComposition),
                                     onValueChange = { v ->
+                                        val previous = text
                                         if (v.text != text) draftEditedByUser = true
-                                        text = v.text
+                                        editText(v.text)
                                         // 长按之后由「选词」带回来的选区一律不收（见 blockSelection 的说明）：
                                         // 把旧的光标位置原样传回去，选区一直是收拢的，系统选字工具条就没理由出现
                                         textSelection = if (blockSelection) textSelection else v.selection
                                         textComposition = v.composition
+                                        requestTypedMention(previous, v)
                                     },
+                                    visualTransformation = mentionTransform,
                                     readOnly = expanded,
                                     textStyle = inputTextStyle,
                                 cursorBrush = SolidColor(glassCursor),
@@ -1293,7 +1334,7 @@ fun ChatInput(
                                 rowEmojis.forEach { em ->
                                     Box(
                                         modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).clickable {
-                                            if (emojiAvailable) { draftEditedByUser = true; text += em }
+                                            if (emojiAvailable) { draftEditedByUser = true; editText(text + em) }
                                         },
                                         contentAlignment = Alignment.Center
                                     ) {
@@ -1353,8 +1394,12 @@ private fun InputStateChip(
                 else Modifier.border(1.dp, colors.Divider.copy(alpha = 0.6f), RoundedCornerShape(50))
             )
             .alpha(if (enabled) 1f else 0.38f)
-            .then(if (compact) Modifier.semantics { contentDescription = label } else Modifier)
-            .combinedClickable(enabled = enabled, onClick = onToggle, onLongClick = if (enabled) onLongPress else null)
+            .semantics {
+                toggleableState = if (checked) ToggleableState.On else ToggleableState.Off
+                if (compact) contentDescription = label
+            }
+            .combinedClickable(enabled = enabled, role = Role.Checkbox, onClick = onToggle,
+                onLongClick = if (enabled) onLongPress else null)
             .padding(horizontal = 8.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1371,6 +1416,53 @@ private fun InputStateChip(
                 maxLines = 1
             )
         }
+    }
+}
+
+/** Compact + menu counterpart of the complete composer's state chips. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun InputStateMenuItem(
+    label: String,
+    checked: Boolean,
+    onToggle: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
+    enabled: Boolean = true,
+    onDismiss: () -> Unit
+) {
+    val colors = LocalFreeChatColors.current
+    val fill by animateColorAsState(
+        if (checked) colors.selectedFill else Color.Transparent, FreeChatAnimation.colorTween, label = "inputMenuFill")
+    val ink by animateColorAsState(
+        if (checked) colors.OnPrimary else colors.TextPrimary, FreeChatAnimation.colorTween, label = "inputMenuInk")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .background(fill)
+            .alpha(if (enabled) 1f else 0.38f)
+            .semantics(mergeDescendants = true) {
+                toggleableState = if (checked) ToggleableState.On else ToggleableState.Off
+            }
+            .combinedClickable(
+                enabled = enabled,
+                role = Role.Checkbox,
+                onClick = { onToggle(); onDismiss() },
+                onLongClick = if (enabled) onLongPress?.let { action ->
+                    { onDismiss(); action() }
+                } else null
+            )
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            if (checked) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
+            null,
+            tint = if (checked) colors.OnPrimary else colors.Primary,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = ink)
     }
 }
 

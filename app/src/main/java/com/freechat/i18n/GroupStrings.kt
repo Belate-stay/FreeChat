@@ -1,0 +1,48 @@
+package com.freechat.i18n
+
+private fun AppStrings.groupText(zh: String, tw: String, en: String): String = when (localeCode) {
+    "en" -> en
+    "zh-TW" -> tw
+    else -> zh
+}
+
+val AppStrings.groupSettings get() = groupText("群聊设置", "群聊設定", "Group settings")
+val AppStrings.groupAvatar get() = groupText("群聊头像", "群聊頭像", "Group avatar")
+val AppStrings.groupUseCompositeAvatar get() = groupText("恢复组合头像", "恢復組合頭像", "Use member avatars")
+val AppStrings.groupMembers get() = groupText("群成员", "群成員", "Members")
+val AppStrings.groupSelectMention get() = groupText("选择要 @ 的成员", "選擇要 @ 的成員", "Mention a member")
+val AppStrings.groupMemberPersonaNote get() = groupText("修改仅影响该角色在本群的人设，不改变角色池或其他对话。", "修改僅影響該角色在本群的人設，不改變角色池或其他對話。", "Changes apply only to this member in this group, not the library or other conversations.")
+val AppStrings.groupAddMembers get() = groupText("加入", "加入", "Add")
+val AppStrings.groupRemoveMembers get() = groupText("移除", "移除", "Remove")
+val AppStrings.groupRemoveMemberConfirm get() = groupText("移除该成员？历史消息仍会保留。", "移除此成員？歷史訊息仍會保留。", "Remove this member? Their messages will remain.")
+val AppStrings.groupMemberEditHint get() = groupText("长按头像管理群成员", "長按頭像管理群成員", "Hold an avatar to manage members")
+val AppStrings.groupMemberEditingHint get() = groupText("点击 × 移除成员，完成后退出编辑", "點擊 × 移除成員，完成後退出編輯", "Tap × to remove a member, then finish editing")
+val AppStrings.groupFinishManaging get() = groupText("完成", "完成", "Done")
+fun AppStrings.groupRemoveMemberNamed(name: String) = groupText("移除$name", "移除$name", "Remove $name")
+val AppStrings.groupMembersLimit get() = groupText("最多四名角色，至少保留一名", "最多四名角色，至少保留一名", "Keep one to four characters")
+val AppStrings.groupRemark get() = groupText("群聊备注", "群聊備註", "Group remark")
+val AppStrings.groupRemarkHint get() = groupText("仅作为你的对话标题", "僅作為你的對話標題", "Your title for this conversation")
+val AppStrings.groupRemarkRequiredHint get() = groupText("为这个群聊取个名字（必填）", "為這個群聊取個名字（必填）", "Name this group (required)")
+val AppStrings.groupAnnouncement get() = groupText("群公告", "群公告", "Announcement")
+val AppStrings.groupNoAnnouncement get() = groupText("未发布公告", "未發布公告", "No announcement")
+val AppStrings.groupAnnouncementHint get() = groupText("发布后，所有成员都能读取这条公告。", "發布後，所有成員都能讀取這則公告。", "Every member can read the published announcement.")
+val AppStrings.groupPublish get() = groupText("发布", "發布", "Publish")
+val AppStrings.groupUserNickname get() = groupText("我在群里的昵称", "我在群裡的暱稱", "My nickname in this group")
+val AppStrings.groupNicknameHint get() = groupText("只用于这个群聊", "只用於這個群聊", "Used in this group only")
+val AppStrings.groupShowMemberNames get() = groupText("显示群成员昵称", "顯示群成員暱稱", "Show member names")
+val AppStrings.groupShowMemberNamesHint get() = groupText("关闭后仍显示头像", "關閉後仍顯示頭像", "Avatars remain visible when names are hidden")
+val AppStrings.groupReplySettings get() = groupText("群聊回复设置", "群聊回覆設定", "Group replies")
+val AppStrings.groupModelsHint get() = groupText("编排与所有成员统一使用以下模型", "編排與所有成員統一使用以下模型", "The planner and every member use these models")
+val AppStrings.groupWaitToSave get() = groupText("群聊正在回复，请等待结束后保存。", "群聊正在回覆，請等待結束後儲存。", "Wait for the current replies to finish before saving.")
+val AppStrings.groupSettingLockedDuringReply get() = groupText("AI回复中该项不可调节，请等待回复结束。", "AI回覆中該項不可調節，請等待回覆結束。", "This setting cannot be changed while AI replies are in progress. Please wait.")
+val AppStrings.groupProactivePreview get() = groupText("主动智能", "主動智慧", "Autonomous chat")
+val AppStrings.groupProactivePreviewDesc get() = groupText("允许群成员之间自主对话聊天。", "允許群成員之間自主對話聊天。", "Allow group members to chat with each other on their own.")
+val AppStrings.groupInternalTest get() = groupText("内测", "內測", "Internal test")
+val AppStrings.groupSearch get() = groupText("查找本群聊天记录", "尋找本群聊天記錄", "Search this group")
+val AppStrings.groupGestureHint get() = groupText("长按头像 @，双击头像拍一拍；成员可能忙碌或暂不回应。", "長按頭像 @，按兩下頭像拍一拍；成員可能忙碌或暫不回應。", "Hold an avatar to mention, double tap to nudge. Members may be busy or stay silent.")
+val AppStrings.groupUnknownMember get() = groupText("群成员", "群成員", "Member")
+val AppStrings.groupMentionMember get() = groupText("提及成员", "提及成員", "Mention member")
+val AppStrings.groupNudgeMember get() = groupText("拍一拍", "拍一拍", "Nudge member")
+val AppStrings.groupRetry get() = groupText("重试", "重試", "Retry")
+fun AppStrings.groupMemberCount(count: Int) = groupText("${count} 人", "${count} 人", "$count members")
+fun AppStrings.groupUpdatedAt(time: String) = groupText("更新于 $time", "更新於 $time", "Updated $time")

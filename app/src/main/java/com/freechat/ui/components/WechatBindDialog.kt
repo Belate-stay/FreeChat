@@ -46,6 +46,7 @@ import com.freechat.i18n.LocalStrings
 import com.freechat.sync.ApiClient
 import com.freechat.sync.Session
 import com.freechat.ui.theme.FreeChatColors
+import com.freechat.ui.theme.FreeChatInputShape
 import com.freechat.util.QrEncode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -286,7 +287,7 @@ internal fun WechatBindDialog(
                                 cursorBrush = SolidColor(colors.Primary),
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                                 modifier = Modifier.weight(1f)
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(FreeChatInputShape)
                                     .background(colors.SurfaceVariant.copy(alpha = 0.5f))
                                     .padding(horizontal = 12.dp, vertical = 10.dp)
                             )

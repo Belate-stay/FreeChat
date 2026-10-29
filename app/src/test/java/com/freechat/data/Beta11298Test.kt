@@ -51,7 +51,7 @@ class Beta11298Test {
         val voice = source("ui/screens/MiMoVoiceSettingsPage.kt")
         val drawer = source("ui/components/DrawerContent.kt")
         assertTrue("③语音页整体下移出模糊渐隐带（首屏与二级页同吃）",
-            voice.contains("HazeSpec.topContentPaddingDp(statusBarHeight) + 24.dp"))
+            voice.contains("HazeSpec.topContentPaddingDp(statusBarHeight, 32.dp)"))
         assertTrue("④未装帧按出现第 0 帧画（左缘圆点），不再闪终点位",
             drawer.contains("isAppearFlight() -> target") &&
                 drawer.contains("isAppearFlight() -> -dotPx * 0.5f") &&

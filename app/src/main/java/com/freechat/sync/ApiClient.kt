@@ -50,7 +50,7 @@ object ApiClient {
         return json.toRequestBody(JSON)
     }
 
-    private suspend fun call(
+    internal suspend fun call(
         method: String,
         path: String,
         token: String? = null,
@@ -154,6 +154,10 @@ object ApiClient {
         val json = call("GET", "/me", token = token)
         return json.getAsJsonObject("user").into<SyncUser>() to json.getAsJsonObject("usage").into<UsageInfo>()
     }
+
+    suspend fun capabilities(token: String): SyncCapabilities =
+        call("GET", "/me", token = token).get("capabilities")?.takeIf { it.isJsonObject }
+            ?.asJsonObject?.into<SyncCapabilities>() ?: SyncCapabilities()
 
     suspend fun deleteAccount(token: String, password: String) {
         call("DELETE", "/account", token = token, body = mapOf("password" to password))
@@ -333,7 +337,7 @@ object ApiClient {
 
     /**
      * 提交反馈。**不带令牌**——未登录也能发（拍板）；登录态多带一份 Authorization，
-     * 服务器把反馈挂到账号上。[device] = 平台级摘要（系统版本 · 应用版本，无品牌/型号）。
+     * 服务器把反馈挂到账号上。
      */
     suspend fun submitFeedback(content: String, clientId: String, device: String, token: String? = null): JsonObject {
         val body = JsonObject()
@@ -342,6 +346,10 @@ object ApiClient {
         body.addProperty("device", device)
         return call("POST", "/feedback", token = token, body = body)
     }
+
+    /** 角色投稿提交：实现体在非开源区。 */
+    suspend fun submitCharacterContribution(payload: JsonObject, token: String? = null): Long =
+        com.freechat.data.CharacterContributionApi.submit(this, payload, token)
 
     /** 我的反馈（清单）：user_id 或 clientId 命中都算；未登录只带 clientId（走 X-Client-Id 头） */
     suspend fun myFeedback(clientId: String, token: String? = null): JsonArray {
@@ -360,8 +368,7 @@ object ApiClient {
 
     /**
      * 「FreeChat从夯到拉」评分（1.1.28）：一设备只评一次由客户端保证（评完卡片消失）。
-     * 落库=评分/设备型号/提交时间/版本号/账号（登录则由令牌挂上）；匿名可评。
-     * 2026-10-15 合规砍设备型号 → 2026-10-17 用户翻案：砍收集只限 Web 版，安卓照常上报。
+     * 匿名可评，登录则挂账号。
      */
     suspend fun submitRating(score: Int, device: String = "", version: String, versionCode: Int, token: String? = null): JsonObject {
         val body = JsonObject()

@@ -13,6 +13,8 @@ import com.google.gson.JsonElement
 /** 同步对象一共五种，按「一条对话一个箱子」切 */
 object SyncKind {
     const val CONV = "conv"
+    const val CARD = "card"
+    const val CARDFOLDER = "cardfolder"
     const val MSGS = "msgs"
     const val MEMS = "mems"
     const val SETTINGS = "settings"
@@ -33,6 +35,16 @@ object SyncKind {
 
     /** 设置只有一条，id 写死 —— 两端约定 */
     const val SETTINGS_ID = "global"
+}
+
+/** Missing capability means local persistence only; never acknowledge the deferred dirty record. */
+data class SyncCapabilities(val characterLibrary: Int = 0, val groupChat: Int = 0, val story: Int = 0) {
+    fun allows(kind: String, groupConversation: Boolean = false, protectedImage: Boolean = false, storyConversation: Boolean = false): Boolean = when {
+        storyConversation -> story >= 1
+        kind == SyncKind.CARD || kind == SyncKind.CARDFOLDER || protectedImage -> characterLibrary >= 1
+        groupConversation -> groupChat >= 1
+        else -> true
+    }
 }
 
 data class SyncUser(

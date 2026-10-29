@@ -365,6 +365,11 @@ fun MarkdownText(
                     Spacer(modifier = Modifier.height(6.dp))
                 }
 
+                is MdBlock.Math -> {
+                    // 数学公式块（2026-10-28 工单）：$$…$$ 真排版（叠式分数/根号横线/上下限）
+                    MathFormulaBlock(block.source, textColor)
+                }
+
                 is MdBlock.Divider -> {
                     Spacer(Modifier.height(12.dp))
                     Box(Modifier.fillMaxWidth().height(1.dp).background(dividerColor))
@@ -549,6 +554,28 @@ internal fun buildStyledLine(
                 rem = rem.substring(end + 4); continue
             }
         }
+        // 数学公式（2026-10-28 工单）：$$…$$、$…$、\(…\) 行内 span 渲染（上下标/根号上划线/分数升降）
+        if (rem.startsWith("$$")) {
+            val end = rem.indexOf("$$", 2)
+            if (end > 2) {
+                appendMathInline(parseMath(rem.substring(2, end)), fs)
+                rem = rem.substring(end + 2); continue
+            }
+        }
+        if (rem.startsWith("\\(")) {
+            val end = rem.indexOf("\\)", 2)
+            if (end > 2) {
+                appendMathInline(parseMath(rem.substring(2, end)), fs)
+                rem = rem.substring(end + 2); continue
+            }
+        }
+        if (rem.startsWith("$")) {
+            val end = findInlineMathEnd(rem)
+            if (end > 1) {
+                appendMathInline(parseMath(rem.substring(1, end)), fs)
+                rem = rem.substring(end + 1); continue
+            }
+        }
 
         // 找下一个特殊 token
         val next = listOfNotNull(
@@ -560,6 +587,7 @@ internal fun buildStyledLine(
             rem.indexOf("++").takeIf { it >= 0 },
             rem.indexOf("<u>").takeIf { it >= 0 },
             rem.indexOf('`').takeIf { it >= 0 },
+            rem.indexOf('$').takeIf { it >= 0 },
             rem.indexOf('*').takeIf { it >= 0 && !rem.startsWith("**") },
             rem.indexOf('_').takeIf { it >= 0 && !rem.startsWith("__") }
         ).minOrNull()
@@ -591,6 +619,26 @@ internal fun markdownLinkEnd(text: String, from: Int): Int {
         }
     }
     return -1
+}
+
+/**
+ * 行内公式 `$…$` 的收尾（2026-10-28）：开闭 `$` 两侧都贴住内容才算公式——
+ * 「$5 和 $10」「$100万到$200万」这种金额照样按普通文字走（贴字含 CJK/全角空白也算断点）。
+ */
+internal fun findInlineMathEnd(rem: String): Int {
+    if (rem.length < 3 || rem[1] == ' ' || rem[1] == '$') return -1
+    for (k in 2 until rem.length) {
+        val prev = rem[k - 1]
+        if (rem[k] == '$' && prev != ' ' && prev != '$' && prev != '\n' && prev != '\t' &&
+            prev != '　' && !isCjkBoundary(prev) &&
+            (k + 1 >= rem.length || rem[k + 1] != '$')) return k
+    }
+    return -1
+}
+
+private fun isCjkBoundary(ch: Char): Boolean {
+    val c = ch.code
+    return c in 0x2E80..0x9FFF || c in 0x3000..0x303F || c in 0xFF00..0xFFEF || c in 0xAC00..0xD7AF
 }
 
 @Composable
@@ -747,6 +795,7 @@ fun markdownToPlainText(content: String): String {
                 block.rows.forEach { append("\n").append(it.joinToString(" | ")) }
             }
             is MdBlock.Divider -> "---"
+            is MdBlock.Math -> mathToPlainText(block.source)
         }
     }
 }

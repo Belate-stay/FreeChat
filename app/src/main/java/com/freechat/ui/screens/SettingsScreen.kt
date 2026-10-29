@@ -92,6 +92,11 @@ import com.freechat.R
 import com.freechat.i18n.AppLanguage
 import com.freechat.i18n.AppStrings
 import com.freechat.i18n.LocalStrings
+import com.freechat.i18n.myCharacters
+import com.freechat.i18n.characterLibrarySummary
+import com.freechat.i18n.characterLibrary
+import com.freechat.i18n.builtInCharacterPool
+import com.freechat.i18n.builtInCharacterPoolComingSoon
 import com.freechat.model.ColorTheme
 import com.freechat.model.FontSize
 import com.freechat.model.HeaderBarStyle
@@ -129,8 +134,10 @@ import com.freechat.ui.components.ShareMenuRow
 import com.freechat.ui.components.SheetActionRow
 import com.freechat.ui.components.SheetOption
 import com.freechat.ui.components.SheetPanel
+import com.freechat.ui.components.rememberSheetContent
 import com.freechat.ui.components.CustomColorPicker
 import com.freechat.ui.theme.LocalMonoFontFamily
+import com.freechat.ui.theme.FreeChatInputShape
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.selectedFill
@@ -160,7 +167,7 @@ import com.freechat.util.saveBitmapToGallery
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
 
-private enum class SubScreen { LANGUAGE_MODEL, IMAGE_MODEL, VISION_MODEL, TTS_MODEL, ASR_MODEL, API_TUTORIAL, AI_MEMORY, FONT, INPUT_BOX, ABOUT_FREECHAT, AUTHOR, ICON, FEEDBACK, MY_FEEDBACK, MY_SHARES, DEV_PASSWORD, DEV_OPTIONS, TABLET_DISPLAY }
+private enum class SubScreen { LANGUAGE_MODEL, IMAGE_MODEL, VISION_MODEL, TTS_MODEL, ASR_MODEL, API_TUTORIAL, AI_MEMORY, FONT, INPUT_BOX, ABOUT_FREECHAT, AUTHOR, ICON, FEEDBACK, MY_FEEDBACK, MY_SHARES, DEV_PASSWORD, DEV_OPTIONS, TABLET_DISPLAY, BUILTIN_CHARACTER_POOL }
 
 private enum class SettingsCategory(val icon: ImageVector) {
     TABLET_DISPLAY(Icons.Filled.TabletAndroid),
@@ -168,7 +175,8 @@ private enum class SettingsCategory(val icon: ImageVector) {
     AI_OPTIMIZATION(Icons.Filled.AutoAwesome),
     PERSONALIZATION(Icons.Filled.DarkMode),
     GENERAL(Icons.Filled.Tune),
-    ABOUT(Icons.Filled.Info);
+    ABOUT(Icons.Filled.Info),
+    CHARACTER_LIBRARY(Icons.Filled.People);
 
     fun title(s: AppStrings): String = when (this) {
         TABLET_DISPLAY -> s.tabletDisplayOptimization
@@ -177,8 +185,15 @@ private enum class SettingsCategory(val icon: ImageVector) {
         PERSONALIZATION -> s.sectionSystemTheme
         GENERAL -> s.sectionGeneral
         ABOUT -> s.sectionAbout
+        CHARACTER_LIBRARY -> s.characterLibrary
     }
 }
+
+// Keep stored ordinals stable; visual order is independent of the enum declaration.
+private val settingsCategoryDisplayOrder = listOf(
+    SettingsCategory.TABLET_DISPLAY, SettingsCategory.MODELS, SettingsCategory.CHARACTER_LIBRARY,
+    SettingsCategory.AI_OPTIMIZATION, SettingsCategory.PERSONALIZATION, SettingsCategory.GENERAL, SettingsCategory.ABOUT,
+)
 
 private data class SettingsDetailPage(
     val screen: SubScreen?,
@@ -212,8 +227,15 @@ private val SubScreen.isModelPool: Boolean get() = when (this) {
 /** 导航深度：主页=0，二级=1，三级=2 —— 页面过渡方向按深度增减，与 MainActivity 的 motionDepth 同一判据 */
 private fun subScreenDepth(s: SubScreen?): Int = when (s) {
     null -> 0
-    SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS, SubScreen.MY_FEEDBACK -> 2
+    SubScreen.API_TUTORIAL, SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS, SubScreen.MY_FEEDBACK -> 2
     else -> 1
+}
+
+private fun settingsBackScreen(screen: SubScreen?, tutorialOrigin: SubScreen?, showTabletCategories: Boolean): SubScreen? = when (screen) {
+    SubScreen.API_TUTORIAL -> tutorialOrigin
+    SubScreen.MY_FEEDBACK -> SubScreen.FEEDBACK
+    SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS -> if (showTabletCategories) null else SubScreen.ABOUT_FREECHAT
+    else -> null
 }
 
 /** 设置页磨砂玻璃的 HazeState，通过 CompositionLocal 提供给所有 SettingsRow（含二级页） */
@@ -244,6 +266,8 @@ fun SettingsScreen(
     tabletDetailBack: Boolean = false,
     tabletDetailContent: (@Composable () -> Unit)? = null,
     onTabletCategorySelected: () -> Unit = {},
+    onOpenCharacterLibrary: () -> Unit = {},
+    onRequestTabletNavigation: ((() -> Unit) -> Unit) = { action -> action() },
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
@@ -255,6 +279,9 @@ fun SettingsScreen(
             openModelListOnLaunch != null -> SettingsCategory.MODELS
             else -> SettingsCategory.entries.getOrNull(levelScrolls["settings_selected_category"] ?: SettingsCategory.MODELS.ordinal) ?: SettingsCategory.MODELS
         })
+    }
+    LaunchedEffect(tabletDetailKey) {
+        if (tabletDetailKey == "CHARACTER_LIBRARY") selectedCategory = SettingsCategory.CHARACTER_LIBRARY
     }
     // The root clears this retained state on drawer entry, including the selected tablet category.
     LaunchedEffect(selectedCategory, showTabletCategories) {
@@ -355,6 +382,7 @@ fun SettingsScreen(
     }
     val feedbackStore = remember(context) { com.freechat.data.FeedbackDraftStore(context) }
     var feedbackDraft by remember { mutableStateOf(feedbackStore.load()) }
+    val characterContribution = remember { CharacterContributionUiState() }
 
     val dismissPageOverlays: () -> Unit = {
         showThemePicker = false
@@ -378,6 +406,7 @@ fun SettingsScreen(
         showIconRestartConfirm = false
         newMemoryText = ""
         myShares.resetOverlays()
+        characterContribution.dismiss()
         focusManager.clearFocus()
     }
 
@@ -421,8 +450,15 @@ fun SettingsScreen(
             else modelPoolScreen(openModelListOnLaunch)
         )
     }
+    LaunchedEffect(subScreen) {
+        if (subScreen != SubScreen.BUILTIN_CHARACTER_POOL) characterContribution.dismiss()
+    }
+    var apiTutorialOrigin by remember { mutableStateOf<SubScreen?>(null) }
     var tabletSubpageBack by remember { mutableStateOf(false) }
     fun openSubScreen(screen: SubScreen) {
+        if (screen == SubScreen.API_TUTORIAL) {
+            if (subScreen?.isModelPool == true) apiTutorialOrigin = subScreen
+        } else apiTutorialOrigin = null
         tabletSubpageBack = false
         subScreen = screen
     }
@@ -459,7 +495,7 @@ fun SettingsScreen(
     // map 由 MainActivity 持有所以全屏旁路（更新日志/作者的话/模型编辑/AI语音）回来也不丢——
     // 唯一清空点是侧滑进设置（统一回顶部，用户拍板口径）。
 
-    // 子页返回键：优先返回设置主列表
+    // 子页返回键：先回来源页，再退回设置主列表。
     // Read the actual route inside the callback: a fast Back can arrive before recomposition
     // updates an enabled=subScreen!=null handler, otherwise it skips this level entirely.
     val navigateBack: () -> Unit = {
@@ -469,14 +505,13 @@ fun SettingsScreen(
         } else {
             tabletSubpageBack = true
             if (showTabletCategories) dismissPageOverlays()
-            if (tabletModelPool) onBack()
-            // 「我的反馈」从反馈页进来：返回先回反馈页，再回设置（页级返回键同款）
-            else when (subScreen) {
-                null -> onBack()
-                SubScreen.MY_FEEDBACK -> subScreen = SubScreen.FEEDBACK
-                // 作者页/非开源二级页都只从「关于FreeChat」进，返回回聚合页
-                SubScreen.AUTHOR, SubScreen.DEV_PASSWORD, SubScreen.DEV_OPTIONS -> returnToAbout()
-                else -> subScreen = null
+            if (subScreen == SubScreen.API_TUTORIAL) {
+                subScreen = settingsBackScreen(subScreen, apiTutorialOrigin, showTabletCategories)
+                apiTutorialOrigin = null
+            } else if (tabletModelPool || subScreen == null) {
+                onBack()
+            } else {
+                subScreen = settingsBackScreen(subScreen, apiTutorialOrigin, showTabletCategories)
             }
         }
     }
@@ -513,7 +548,7 @@ fun SettingsScreen(
                     .jellyOverscroll()
                     .verticalScroll(com.freechat.ui.animation.rememberPersistentScrollState(
                         if (showTabletCategories) "settings_main_" + selectedCategory.name else "main", levelScrolls))
-                    .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
+                    .padding(top = HazeSpec.newPageContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
                     .padding(horizontal = 16.dp + readingGutter),
                 // 卡片间距。**别再用 Spacer 微调卡片之间的间隙** ——
                 // spacedBy 是「相邻两个孩子之间」都插一份，写 Spacer(2.dp) 得到的是
@@ -576,6 +611,20 @@ fun SettingsScreen(
 
                 // 段间距：与 12dp 的卡片间距叠出 12+8+12 = 32dp —— 比卡片间距明显大，SectionLabel 才立得住
                 Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                // ──── 角色库 ────
+                if (!showTabletCategories || selectedCategory == SettingsCategory.CHARACTER_LIBRARY) {
+                    if (!showTabletCategories) SectionLabel(Icons.Filled.People, s.characterLibrary)
+                    SettingsRow {
+                        SettingsItem(Icons.Filled.People, s.myCharacters, s.characterLibrarySummary, colors,
+                            onClick = onOpenCharacterLibrary)
+                    }
+                    SettingsRow {
+                        SettingsItem(Icons.Filled.CollectionsBookmark, s.builtInCharacterPool, null, colors,
+                            onClick = { openSubScreen(SubScreen.BUILTIN_CHARACTER_POOL) })
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
 
                 // ──── AI 系统优化 ────
@@ -692,28 +741,9 @@ fun SettingsScreen(
                 if (!showTabletCategories || selectedCategory == SettingsCategory.PERSONALIZATION) {
                 if (!showTabletCategories) SectionLabel(Icons.Filled.DarkMode, s.sectionSystemTheme)
 
-                // 色彩
                 SettingsRow {
-                    Row(
-                        Modifier.fillMaxWidth().clickable {
-                            previewCustomArgb = customColorArgb
-                            editCustomColor = colorTheme == ColorTheme.CUSTOM
-                            showColorThemePicker = true
-                        }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Palette, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.colorTheme, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
-                                Text(colorThemeLabel(colorTheme, s), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
-                            }
-                        }
-                        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
-                    }
+                    SettingsItem(Icons.Filled.Keyboard, s.inputBox, null,
+                        colors, onClick = { openSubScreen(SubScreen.INPUT_BOX) })
                 }
 
                 SettingsRow {
@@ -750,10 +780,28 @@ fun SettingsScreen(
                     }
                 }
 
+                // 色彩
                 SettingsRow {
-                    SettingsItem(Icons.Filled.Keyboard, s.inputBox,
-                        "${inputStyleLabel(inputStyle, s)} · ${inputBarStateLabel(inputBarState, s)}",
-                        colors, onClick = { openSubScreen(SubScreen.INPUT_BOX) })
+                    Row(
+                        Modifier.fillMaxWidth().clickable {
+                            previewCustomArgb = customColorArgb
+                            editCustomColor = colorTheme == ColorTheme.CUSTOM
+                            showColorThemePicker = true
+                        }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Palette, null, tint = colors.Primary, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(s.colorTheme, style = MaterialTheme.typography.bodyLarge, color = colors.TextPrimary)
+                                Text(colorThemeLabel(colorTheme, s), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextSecondary)
+                            }
+                        }
+                        Icon(Icons.Filled.ChevronRight, null, tint = colors.TextTertiary, modifier = Modifier.size(18.dp))
+                    }
                 }
 
                 SettingsGroup(expanded = advancedMaterialSetting, parent = {
@@ -908,6 +956,8 @@ fun SettingsScreen(
                 if (screen.isModelPool) viewModel.refreshBuiltInCatalog()
             }
                 // ============ 二级页面 ============
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+            val viewportHeight = maxHeight
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -926,8 +976,12 @@ fun SettingsScreen(
                     // 1.1.29.5 工单A/C：关于页的上下留白收进页内滚动内容（见 AboutFreeChatPage）——
                     // 外层一留白，滚动视口就缩在标题栏下：日志上滚被视口顶缘硬裁进不了模糊带（A）、
                     // 底部留白条吃内容（C）。其余二级页不动（模型池固定头定位靠这份外层留白）
-                    .padding(top = if (screen == SubScreen.ABOUT_FREECHAT) 0.dp
-                        else HazeSpec.topContentPaddingDp(statusBarHeightDp),
+                    .heightIn(min = if (screen == SubScreen.BUILTIN_CHARACTER_POOL) viewportHeight else 0.dp)
+                    .padding(top = when (screen) {
+                            SubScreen.ABOUT_FREECHAT -> 0.dp
+                            else -> if (screen.isModelPool) HazeSpec.topContentPaddingDp(statusBarHeightDp)
+                                else HazeSpec.newPageContentPaddingDp(statusBarHeightDp)
+                        },
                         bottom = when (screen) {
                             SubScreen.ABOUT_FREECHAT -> 0.dp
                             SubScreen.ICON -> 112.dp
@@ -937,6 +991,13 @@ fun SettingsScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 when (screen) {
+                    SubScreen.BUILTIN_CHARACTER_POOL -> {
+                        Box(Modifier.fillMaxWidth().weight(1f).heightIn(min = 180.dp), contentAlignment = Alignment.Center) {
+                            Text(s.builtInCharacterPoolComingSoon, color = colors.TextSecondary,
+                                style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
+                        }
+                        CharacterContributionCard(characterContribution)
+                    }
                     SubScreen.TABLET_DISPLAY -> if (isTabletDevice) {
                         TabletDisplayPreferences(
                             displayMode = tabletDisplayMode,
@@ -1073,6 +1134,7 @@ fun SettingsScreen(
             }
         }
         }
+        }
         if (showTabletCategories) settingsBody(pageScreen to pageCategory)
         else PageMotion(
             targetState = subScreen to selectedCategory,
@@ -1181,6 +1243,7 @@ fun SettingsScreen(
             ) { (target, category) ->
                 Text(
                     when (target) {
+                        SubScreen.BUILTIN_CHARACTER_POOL -> s.builtInCharacterPool
                         SubScreen.TABLET_DISPLAY -> s.tabletDisplayOptimization
                         SubScreen.LANGUAGE_MODEL -> s.languageModel
                         SubScreen.IMAGE_MODEL -> s.imageGenModel
@@ -1444,13 +1507,14 @@ fun SettingsScreen(
         val revokeScope = androidx.compose.runtime.rememberCoroutineScope()
         run {
             val pending = myShares.pendingRevoke
+            val displayedPending = rememberSheetContent(pending.takeIf { it.isNotEmpty() }).orEmpty()
             SheetPanel(pending.isNotEmpty(), { myShares.pendingRevoke = emptyList() },
                 s.shareRevokeFull, colors, isDark, advancedMaterial, hazeState,
                 confirmLabel = s.shareRevokeFull, confirmDanger = true, onConfirm = {
                     revokeScope.launch { myShares.executeRevoke(context, s) }
                 }) {
                 Text(
-                    if (pending.size > 1) "${s.shareRevokeConfirm}（${s.selectedCount(pending.size)}）"
+                    if (displayedPending.size > 1) "${s.shareRevokeConfirm}（${s.selectedCount(displayedPending.size)}）"
                     else s.shareRevokeConfirm,
                     style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary
                 )
@@ -1715,6 +1779,7 @@ fun SettingsScreen(
                 OutlinedTextField(
                     value = newMemoryText,
                     onValueChange = { newMemoryText = it },
+                    shape = FreeChatInputShape,
                     placeholder = { Text(s.globalMemoryHint, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Serif, fontSize = 12.sp), color = colors.TextTertiary) },
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.TextPrimary),
                     modifier = Modifier.weight(1f),
@@ -1730,6 +1795,10 @@ fun SettingsScreen(
                 ) { Text(s.globalMemoryAdd, color = colors.Primary, fontWeight = FontWeight.Bold) }
             }
         }
+
+        CharacterContributionSheets(characterContribution,
+            active = settingsActive && pageScreen == SubScreen.BUILTIN_CHARACTER_POOL && subScreen == SubScreen.BUILTIN_CHARACTER_POOL,
+            clientId = feedbackStore.clientId(), isDark = isDark, hazeState = hazeState, uploadScope = scope)
 
         // 长按作者页二维码 → 保存。和上面那几个弹层同一套材质（窗口内底部磨砂玻璃），
         // 内容区留空：标题说了要干什么，主按钮就是「保存到相册」，中间不需要再塞一句话。
@@ -1783,6 +1852,7 @@ fun SettingsScreen(
                     dismissPageOverlays()
                     onBack()
                 }) { category ->
+                    onRequestTabletNavigation {
                     tabletSubpageBack = false
                     if (selectedCategory != category || subScreen != null) {
                         dismissPageOverlays()
@@ -1791,6 +1861,7 @@ fun SettingsScreen(
                     }
                     onTabletCategorySelected()
                     paneControls?.showDetail?.invoke()
+                    }
                 }
             },
             detailPane = detailPane,
@@ -1849,11 +1920,11 @@ private fun SettingsCategoryPane(
                 .then(if (advancedMaterial) Modifier.hazeSource(hazeState).hazeBackground(colors.Background) else Modifier)
                 .jellyOverscroll()
                 .verticalScroll(com.freechat.ui.animation.rememberPersistentScrollState("settings_categories", levelScrolls))
-                .padding(top = HazeSpec.topContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
+                .padding(top = HazeSpec.newPageContentPaddingDp(statusBarHeightDp), bottom = 32.dp)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            SettingsCategory.entries.forEach { category ->
+            SettingsCategory.entries.sortedBy { settingsCategoryDisplayOrder.indexOf(it) }.forEach { category ->
                 val selected = category == selectedCategory
                 val textColor by animateColorAsState(
                     if (selected) colors.selectedText else colors.TextPrimary,
@@ -2251,9 +2322,9 @@ private fun AboutFreeChatPage(
             modifier = Modifier.fillMaxSize()
                 .jellyOverscroll()
                 .verticalScroll(com.freechat.ui.animation.rememberPersistentScrollState("sub_ABOUT_FREECHAT", levelScrolls))
-                // 1.1.26.1：logo 上方留出更大空白（原 56dp）+ 标题栏高度；只挪位置，尺寸一概不动
+                // 保留 logo 上方原有的大留白；统一顶距只为不足的间距兜底。
                 .padding(top = HazeSpec.topContentPaddingDp(
-                    androidx.compose.foundation.layout.WindowInsets.statusBars.asPaddingValues().calculateTopPadding()) + 56.dp,
+                    androidx.compose.foundation.layout.WindowInsets.statusBars.asPaddingValues().calculateTopPadding(), 64.dp),
                     bottom = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {

@@ -29,10 +29,13 @@ class ProactiveDecideContractTest {
         val p = prompt()
         // 人物关系是主动分寸的重点参考（工单核心）
         assertTrue("关系段进决策", p.contains("你和 TA 的关系") && p.contains("女朋友"))
-        assertTrue("亲密度推导主动度", p.contains("关系定分寸") && p.contains("越亲") &&
-            p.contains("分享日常和私密"))
-        assertTrue("暧昧/同学档收敛口径", p.contains("暧昧") && p.contains("收敛"))
-        assertTrue("人设全文进决策", p.contains("【你的人设】"))
+        assertTrue("关系与用户原文共同决定主动度，不替人物套统一亲密腔",
+            p.contains("关系定分寸") && p.contains("关系与原文共同决定") && p.contains("不自动等于对方欠你回复"))
+        val explicitPersona = prompt(CharacterProfile(name = "测试", relationshipPreset = "同学",
+            personalityText = "礼貌克制，按用户设定保持分寸", personaPrompt = "已有学习稿"))
+        assertTrue("原始人设与学习稿都进决策，明确文风优先",
+            explicitPersona.contains("同学") && explicitPersona.contains("礼貌克制，按用户设定保持分寸") &&
+                explicitPersona.contains("已有学习稿") && explicitPersona.contains("用户原文优先"))
     }
 
     @Test fun topicQuotaAndKindSemantics() {
@@ -46,12 +49,13 @@ class ProactiveDecideContractTest {
 
     @Test fun timeAwarenessAndGuardrails() {
         val p = prompt()
-        assertTrue("时间约定到点兑现（弹性拖几分钟）", p.contains("等我10分钟") && p.contains("晚几分钟完全没问题"))
+        assertTrue("核对约定兑现与更正，不把到点写成催促任务",
+            p.contains("等我10分钟") && p.contains("先核对谁答应了什么") && p.contains("不是到点就催"))
         // 2026-10-20 用户口径：**深夜不是禁区**（「睡了吗」很常见）——作息只是参考，概率因人设/关系而异
-        assertTrue("深夜可主动（降概率不禁止）", p.contains("深夜不是禁区") && p.contains("睡了吗") &&
+        assertTrue("深夜可主动但不凭钟点捏造失眠场景", p.contains("深夜可以开口") && p.contains("不仅凭钟点补写") &&
             p.contains("不是禁发时段"))
         assertTrue("道别后只兑约定不开新话题", p.contains("明确道别") && p.contains("anchor"))
-        assertTrue("语义刹车（在忙/刚主动过）", p.contains("在忙") && p.contains("宁可少一条"))
+        assertTrue("语义刹车（在忙/刚主动过）", p.contains("刚主动过") && p.contains("明确在忙时少发"))
         assertTrue("输出严格 JSON（action/kind/枚举）",
             p.contains("\"action\":\"none|message|wait\"") && p.contains("\"kind\":\"new_topic|continuation|anchor\""))
     }
@@ -82,5 +86,9 @@ class ProactiveDecideContractTest {
         // 2026-10-20 病根钉：连接态不许拿 30s 缓存 null 当未连接（假阴会藏子项）——进页查真值
         assertTrue("连接态进页查真值（缓存 null 会假阴）",
             setup.contains("wechatBoundHere") && setup.contains("LaunchedEffect(conversationId, wechatBindTick)"))
+        // 2026-10-20 双保险钉：大脑 decide 也查 proactiveEnabled 开关（开关是承诺，没开一条不发）
+        val main = java.io.File("../freechat-companion/src/main/kotlin/com/freechat/companion/Main.kt").readText()
+        assertTrue("decide 端点查开关（与管道硬闸双保险）",
+            main.contains("if (!ch.proactiveEnabled)") && main.contains("未开启主动智能"))
     }
 }

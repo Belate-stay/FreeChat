@@ -56,6 +56,27 @@ object AppJson {
         .registerTypeAdapter(CharacterProfile::class.java, InstanceCreator<CharacterProfile> { _ ->
             CharacterProfile()
         })
+        .registerTypeAdapter(com.freechat.model.CharacterPersona::class.java, InstanceCreator<com.freechat.model.CharacterPersona> { _ ->
+            com.freechat.model.CharacterPersona()
+        })
+        .registerTypeAdapter(com.freechat.model.CharacterCard::class.java, InstanceCreator<com.freechat.model.CharacterCard> { _ ->
+            com.freechat.model.CharacterCard("", com.freechat.model.CharacterPersona())
+        })
+        .registerTypeAdapter(com.freechat.model.CharacterFolder::class.java, InstanceCreator<com.freechat.model.CharacterFolder> { _ ->
+            com.freechat.model.CharacterFolder("", "")
+        })
+        .registerTypeAdapter(com.freechat.model.GroupMember::class.java, InstanceCreator<com.freechat.model.GroupMember> { _ ->
+            com.freechat.model.GroupMember("", com.freechat.model.CharacterPersona())
+        })
+        .registerTypeAdapter(com.freechat.model.GroupChatProfile::class.java, InstanceCreator<com.freechat.model.GroupChatProfile> { _ ->
+            com.freechat.model.GroupChatProfile()
+        })
+        .registerTypeAdapter(com.freechat.model.StoryMember::class.java, InstanceCreator<com.freechat.model.StoryMember> { _ ->
+            com.freechat.model.StoryMember("", com.freechat.model.CharacterPersona())
+        })
+        .registerTypeAdapter(com.freechat.model.StoryProfile::class.java, InstanceCreator<com.freechat.model.StoryProfile> { _ ->
+            com.freechat.model.StoryProfile()
+        })
         .registerTypeAdapter(com.freechat.model.CharacterExport::class.java, InstanceCreator<com.freechat.model.CharacterExport> { _ ->
             com.freechat.model.CharacterExport()
         })
@@ -95,14 +116,23 @@ fun Conversation.healed(): Conversation {
     @Suppress("USELESS_ELVIS")
     return safe.copy(characterProfile = safe.characterProfile?.normalized(),
         deletedMessageIds = safe.deletedMessageIds ?: emptyList(),
-        deletedVisualMessageIds = safe.deletedVisualMessageIds ?: emptyList())
+        deletedVisualMessageIds = safe.deletedVisualMessageIds ?: emptyList(), storyProfile = safe.storyProfile?.healed())
 }
+
+@Suppress("USELESS_ELVIS")
+fun com.freechat.model.StoryProfile.healed(): com.freechat.model.StoryProfile = copy(
+    members = (members ?: emptyList()).filter { it.id != null && it.persona != null && it.persona.name != null },
+    background = background ?: "", worldRules = worldRules ?: "", openingSituation = openingSituation ?: "",
+    userPersona = userPersona ?: "",
+    languageModelId = languageModelId ?: "", visualModelId = visualModelId ?: ""
+)
 
 fun Message.healed(): Message {
     @Suppress("SENSELESS_COMPARISON", "USELESS_ELVIS")
     return if (
         id != null && role != null && content != null && mode != null &&
-        reasoningContent != null && imagePaths != null && imageUrls != null
+        reasoningContent != null && imagePaths != null && imageUrls != null &&
+        groupTriggerMessageIds != null && mentionedMemberIds != null && groupMentions != null
     ) this
     else copy(
         id = id ?: "",
@@ -111,7 +141,10 @@ fun Message.healed(): Message {
         mode = mode ?: ChatMode.STANDARD,
         reasoningContent = reasoningContent ?: "",
         imagePaths = imagePaths ?: emptyList(),
-        imageUrls = imageUrls ?: emptyList()
+        imageUrls = imageUrls ?: emptyList(),
+        groupTriggerMessageIds = groupTriggerMessageIds ?: emptyList(),
+        mentionedMemberIds = mentionedMemberIds ?: emptyList(),
+        groupMentions = groupMentions ?: emptyList()
     )
 }
 
@@ -132,14 +165,15 @@ fun Message.healed(): Message {
  */
 @Suppress("SENSELESS_COMPARISON", "USELESS_ELVIS")
 fun MemoryEntry.healed(): MemoryEntry =
-    if (id != null && summary != null && keywords != null && kind != null && eventDate != null && sourceMessageIds != null) this
+    if (id != null && summary != null && keywords != null && kind != null && eventDate != null && sourceMessageIds != null && storyState != null && roleKnowledge != null && openLoops != null) this
     else copy(
         id = id ?: UUID.randomUUID().toString(),
         summary = summary ?: "",
         keywords = keywords ?: emptyList(),
         kind = kind ?: "detail",
         eventDate = eventDate ?: "",
-        sourceMessageIds = sourceMessageIds ?: emptyList()
+        sourceMessageIds = sourceMessageIds ?: emptyList(),
+        storyState = storyState ?: "", roleKnowledge = roleKnowledge ?: "", openLoops = openLoops ?: ""
     )
 
 /** Remote/legacy files can explicitly null newly introduced provenance fields. */

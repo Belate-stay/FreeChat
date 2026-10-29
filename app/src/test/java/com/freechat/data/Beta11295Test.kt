@@ -16,10 +16,10 @@ class Beta11295Test {
     @Test fun aboutPageScrollsFullScreenSoLogEntersTopBlur() {
         val settings = source("ui/screens/SettingsScreen.kt")
         assertTrue("外层对关于页跳过上下留白（A/C：滚动视口必须全高）",
-            settings.contains("top = if (screen == SubScreen.ABOUT_FREECHAT) 0.dp") &&
+            settings.contains(".padding(top = when (screen)") &&
                 settings.contains("SubScreen.ABOUT_FREECHAT -> 0.dp"))
         assertTrue("上下留白收进页内滚动内容（padding 在 verticalScroll 之后=可滚走）",
-            settings.contains("calculateTopPadding()) + 56.dp") && settings.contains("bottom = 32.dp"))
+            settings.contains("calculateTopPadding(), 64.dp)") && settings.contains("bottom = 32.dp"))
     }
 
     @Test fun updateAreaFlowsAndFadesInsteadOfFloatingClamp() {

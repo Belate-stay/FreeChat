@@ -12,7 +12,7 @@ object ConversationDeletion {
     private var deleted = emptySet<String>()
     private var pendingMedia = emptyMap<String, Set<String>>()
     private val fileFields = setOf("imagePaths", "imageUrls", "quotedImagePath", "attachmentPath",
-        "avatarPath", "appearanceImagePath", "appearanceImagePaths")
+        "avatarPath", "appearanceImagePath", "appearanceImagePaths", "groupSenderAvatar")
 
     private fun ids(): Set<String> {
         val root = LocalStore.filesDir()
@@ -96,6 +96,7 @@ object ConversationDeletion {
         PerConvStore.remove(id)
 
         val survivorPaths = linkedSetOf<String>()
+        CharacterLibraryStore.mediaFiles().forEach { collectFiles(json(LocalStore.readText(it) ?: "{}"), survivorPaths) }
         collectFiles(json(LocalStore.readText(LocalStore.conversationsFile()) ?: "[]"), survivorPaths)
         LocalStore.messageConvIds().forEach { other ->
             collectFiles(json(LocalStore.readText(LocalStore.messagesFile(other)) ?: "[]"), survivorPaths)

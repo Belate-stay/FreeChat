@@ -35,13 +35,13 @@ class CompanionWechatEmojiTest {
     private class ReplyCompleter(private val raw: String, private val beforeReply: () -> Unit = {}) : ChatCompleter {
         @Volatile var generationCalls = 0
         @Volatile var systemPrompt = ""
-        override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): String {
+        override suspend fun complete(messages: List<Map<String, Any?>>, temperature: Double, extras: Map<String, Any?>): ChatResult {
             val content = messages.joinToString("\n") { it["content"].toString() }
-            if (content.contains("记忆摘录器") || content.contains("记忆归纳器")) return "{}"
+            if (content.contains("记忆摘录器") || content.contains("记忆归纳器")) return ChatResult("{}")
             generationCalls++
             systemPrompt = messages.firstOrNull { it["role"] == "system" }?.get("content").toString()
             beforeReply()
-            return raw
+            return ChatResult(raw)
         }
     }
 
@@ -68,7 +68,7 @@ class CompanionWechatEmojiTest {
                 }
             }
             val conv = Conversation(id = "conv-1", title = "emoji", mode = ChatMode.COMPANION,
-                characterProfile = CharacterProfile(dialogueMode = mode, plotLength = 0, deepThinkingMode = false))
+                characterProfile = CharacterProfile(dialogueMode = mode, plotLength = 0, deepThinkingMode = false, enableWebSearch = false))
             c.prepareStatement("INSERT INTO objects (user_id,kind,id,data) VALUES ('u1','conv','conv-1',?)").use { ps ->
                 ps.setBytes(1, gzip(AppJson.gson.toJson(conv)))
                 ps.executeUpdate()

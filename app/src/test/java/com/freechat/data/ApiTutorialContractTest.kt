@@ -56,8 +56,8 @@ class ApiTutorialContractTest {
         assertTrue("截图居中限宽（不喧宾夺主）", page.contains("Arrangement.Center") && page.contains("widthIn(max = 288.dp)"))
         assertTrue("链接可点+蓝+斜体+下划线", page.contains("LinkAnnotation.Url") &&
             page.contains("colors.linkInk") && page.contains("FontStyle.Italic") && page.contains("TextDecoration.Underline"))
-        // 2026-10-19 返修：首段下沉出模糊层、标题加大加粗拉开间距、用量节尾挂费用透明句
-        assertTrue("首段下沉留呼吸", page.contains("Spacer(Modifier.height(28.dp))"))
+        // 2026-10-28 统一顶距：首段起点由容器统一落在模糊带下缘，10-19 的 28dp 二次下移补丁已退役
+        assertFalse("旧首段下沉补丁不得复活（统一顶距后归零）", page.contains("Spacer(Modifier.height(28.dp))"))
         assertTrue("标题加大加粗", page.contains("FontWeight.Bold") && page.contains("titleMedium"))
         assertTrue("费用透明句在用量节尾", page.contains("所有用费均为您提供AI服务") &&
             page.indexOf("所有用费均为您提供AI服务") > page.indexOf("api_tut_usage"))

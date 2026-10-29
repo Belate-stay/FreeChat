@@ -21,14 +21,25 @@ class HazeSpecTest {
     }
 
     @Test
-    fun pageLayoutPaddingIsIndependentOfBlurExtent() {
+    fun existingPagesKeepTheirOwnInitialGapInsteadOfBeingMovedDownGlobally() {
         listOf(0.dp, 24.dp, 48.dp).forEach { inset ->
-            listOf(8.dp, 16.dp, 20.dp, 24.dp, 32.dp, 36.dp, 72.dp).forEach { originalGap ->
-                val bodyStart = HazeSpec.topContentPaddingDp(inset, originalGap)
-                assertEquals(HazeSpec.titleBarHeightDp(inset) + originalGap, bodyStart)
+            listOf(0.dp, 8.dp, 16.dp, 20.dp, 24.dp, 32.dp, 36.dp, 64.dp, 72.dp).forEach { originalGap ->
+                assertEquals(HazeSpec.titleBarHeightDp(inset) + originalGap,
+                    HazeSpec.topContentPaddingDp(inset, originalGap))
             }
-            // 原本已有充足留白的页面不额外加高。
-            assertEquals(inset + 48.dp + 72.dp, HazeSpec.topContentPaddingDp(inset, 72.dp))
+            assertEquals(inset + 56.dp, HazeSpec.topContentPaddingDp(inset))
+        }
+    }
+
+    @Test
+    fun onlyOptedInNewPagesClearTheBlurBandAndPreserveLargerOriginalGaps() {
+        listOf(0.dp, 24.dp, 48.dp).forEach { inset ->
+            listOf(8.dp, 24.dp, 32.dp, 64.dp, 72.dp).forEach { gap ->
+                assertEquals(maxOf(inset + 48.dp + gap, inset + 80.dp),
+                    HazeSpec.newPageContentPaddingDp(inset, gap))
+            }
+            // 首行起点 = 模糊带下缘（模糊强度归零处），不探进模糊也不多留空白。
+            assertEquals(HazeSpec.topBandHeightDp(inset), HazeSpec.newPageContentPaddingDp(inset))
         }
     }
 

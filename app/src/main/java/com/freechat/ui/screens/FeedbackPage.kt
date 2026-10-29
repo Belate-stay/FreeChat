@@ -20,6 +20,7 @@ import com.freechat.sync.Session
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.adaptive.pageActionWidth
 import com.freechat.ui.theme.LocalAdvancedMaterial
+import com.freechat.ui.theme.FreeChatInputShape
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.frostedCard
 import com.freechat.ui.theme.selectedText
@@ -49,12 +50,12 @@ internal fun FeedbackPage(
     var result by remember { mutableStateOf<String?>(null) }
 
     Text(s.feedbackDescription, style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary,
-        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp))
+        modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp))
     SettingsRow {
         OutlinedTextField(value = text, onValueChange = { result = null; onTextChange(it) },
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             label = { Text(s.feedbackLabel) }, placeholder = { Text(s.feedbackHint) },
-            minLines = 6, maxLines = 12, shape = RoundedCornerShape(16.dp),
+            minLines = 6, maxLines = 12, shape = FreeChatInputShape,
             colors = OutlinedTextFieldDefaults.colors(focusedTextColor = colors.TextPrimary,
                 unfocusedTextColor = colors.TextPrimary, focusedLabelColor = colors.Primary,
                 unfocusedLabelColor = colors.TextSecondary, focusedBorderColor = colors.Primary,
@@ -95,4 +96,4 @@ internal fun FeedbackPage(
     }
 }
 
-// 设备摘要实现见 com.freechat.dev.DevHooks.deviceSummary()。
+// 设备摘要由非开源区提供。

@@ -85,7 +85,6 @@ internal fun MyFeedbackScreen(s: AppStrings, clientId: String) {
             Text(s.networkUnreachable, style = MaterialTheme.typography.bodyMedium, color = colors.TextSecondary,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp).clickable { scope.launch { reload() } })
         }
-        Spacer(Modifier.height(8.dp))
         val list = items
         when {
             list == null -> Row(

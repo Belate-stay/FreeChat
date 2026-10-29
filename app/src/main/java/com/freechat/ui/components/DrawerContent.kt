@@ -76,8 +76,12 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import com.freechat.i18n.LocalStrings
+import com.freechat.i18n.createConversation
+import com.freechat.i18n.createCharacter
 import com.freechat.model.Conversation
 import com.freechat.model.ChatMode
+import com.freechat.model.GroupChatProfile
+import com.freechat.model.GroupMember
 import com.freechat.model.SearchResultItem
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
@@ -87,6 +91,7 @@ import java.io.File
 import com.freechat.ui.animation.FreeChatAnimation
 import com.freechat.ui.animation.jellyOverscroll
 import com.freechat.ui.theme.HazeSpec
+import com.freechat.ui.theme.FreeChatInputShape
 import com.freechat.ui.theme.LocalAdvancedMaterial
 import com.freechat.ui.theme.LocalFreeChatColors
 import com.freechat.ui.theme.frostedCard
@@ -125,6 +130,7 @@ fun DrawerContent(
     favoriteConvIds: Set<String> = emptySet(),
     onSearchQueryChange: (String) -> Unit,
     onNewChat: () -> Unit,
+    onNewCharacter: () -> Unit,
     onSelectConversation: (Conversation) -> Unit,
     onSelectSearchResult: (Conversation, String) -> Unit,
     onPinConversation: (Conversation) -> Unit,
@@ -355,7 +361,7 @@ fun DrawerContent(
     val headerTotalDp = if (selectMode)
         headerGapTopDp + headerCardHeightDp + headerGapBottomDp
     else
-        headerGapTopDp + headerCardHeightDp + headerCardGapDp + headerCardHeightDp + headerGapBottomDp
+        headerGapTopDp + headerCardHeightDp * 3 + headerCardGapDp * 2 + headerGapBottomDp
     // 模糊覆盖全部固定内容，终点与列表初始起点严格相同；「置顶」只有上滑才进入模糊区。
     val topBandHeight = HazeSpec.drawerTopBandHeightDp(statusBarHeightDp, headerTotalDp)
     // 接缝羽化宽度（px）：与 Chat 页同值同曲线，缝两侧的模糊衰减完全对称
@@ -503,7 +509,9 @@ fun DrawerContent(
                     Column {
                     SearchBox(searchQuery, onSearchQueryChange, drawerHazeState, isDark, Modifier.padding(horizontal = HeaderCardInset))
                     Spacer(Modifier.height(headerCardGapDp))
-                    NewChatButton(onNewChat, onNewChatRect, drawerHazeState, isDark, Modifier.padding(horizontal = HeaderCardInset))
+                    NewChatButton(onNewChat, onNewChatRect, drawerHazeState, isDark, Modifier.padding(horizontal = HeaderCardInset), label = s.createConversation)
+                    Spacer(Modifier.height(headerCardGapDp))
+                    NewChatButton(onNewCharacter, null, drawerHazeState, isDark, Modifier.padding(horizontal = HeaderCardInset), label = s.createCharacter, icon = Icons.Filled.Person)
                     }
                 }
                 }
@@ -615,7 +623,9 @@ fun DrawerContent(
                 // 这一支的 Column 自己已经 pad 了 start = 8dp，这里补到 HeaderCardInset，落点与高级材质一致
                 SearchBox(searchQuery, onSearchQueryChange, drawerHazeState, isDark, Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset))
                 Spacer(Modifier.height(10.dp))
-                NewChatButton(onNewChat, onNewChatRect, drawerHazeState, isDark, Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset))
+                NewChatButton(onNewChat, onNewChatRect, drawerHazeState, isDark, Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset), label = s.createConversation)
+                Spacer(Modifier.height(headerCardGapDp))
+                NewChatButton(onNewCharacter, null, drawerHazeState, isDark, Modifier.padding(start = HeaderCardInset - 8.dp, end = HeaderCardInset), label = s.createCharacter, icon = Icons.Filled.Person)
                 Spacer(Modifier.height(headerGapBottomDp))
                 }
             }
@@ -1007,7 +1017,7 @@ private fun SearchBox(
         modifier = modifier
             .fillMaxWidth()
             .height(HeaderCardHeight)
-            .floatingSurface(hazeState, isDark, RoundedCornerShape(14.dp), fallback = colors.SurfaceVariant)
+            .floatingSurface(hazeState, isDark, FreeChatInputShape, fallback = colors.SurfaceVariant)
             .padding(horizontal = 14.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -1043,7 +1053,9 @@ private fun NewChatButton(
     onNewChatRect: ((Rect) -> Unit)?,
     hazeState: HazeState,
     isDark: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector = Icons.Filled.Add
 ) {
     val colors = LocalFreeChatColors.current
     val s = LocalStrings.current
@@ -1063,10 +1075,10 @@ private fun NewChatButton(
         contentAlignment = Alignment.CenterStart
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Add, s.newChat, tint = colors.Primary, modifier = Modifier.size(20.dp))
+            Icon(icon, label, tint = colors.Primary, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(10.dp))
             Text(
-                s.newChat,
+                label,
                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                 color = colors.Primary
             )
@@ -1386,7 +1398,7 @@ private fun ConversationItem(
             Box(
                 modifier = Modifier
                     .size(34.dp)
-                    .clip(CircleShape)
+                    .clip(if (conversation.groupChat != null || conversation.storyProfile != null) RoundedCornerShape(10.dp) else CircleShape)
                     .background(
                         if (isActive) colors.Primary.copy(alpha = 0.18f)
                         else colors.SurfaceVariant
@@ -1394,7 +1406,14 @@ private fun ConversationItem(
                 contentAlignment = Alignment.Center
             ) {
                 val avatar = conversation.characterProfile?.avatarPath
-                if (!avatar.isNullOrBlank()) {
+                val group = conversation.groupChat
+                val story = conversation.storyProfile
+                if (group != null) {
+                    GroupAvatar(group = group, modifier = Modifier.fillMaxSize())
+                } else if (story != null) {
+                    GroupAvatar(group = GroupChatProfile(members = story.members.map { GroupMember(it.id, it.persona) }),
+                        modifier = Modifier.fillMaxSize())
+                } else if (!avatar.isNullOrBlank()) {
                     AsyncImage(
                         model = File(avatar),
                         contentDescription = null,

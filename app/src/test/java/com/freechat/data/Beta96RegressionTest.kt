@@ -130,7 +130,7 @@ class Beta96RegressionTest {
             plotMode = true, modelManagedAssociation = true).first().getValue("content")
         assertTrue(prompt.contains("信息边界"))
         assertTrue(prompt.contains("不在场、听不到"))
-        assertTrue(prompt.contains("绝不改写"))
+        assertTrue(prompt.contains("绝不改写、概括、补充或脑补"))
     }
 
     @Test fun capabilityCopyDistinguishesDeclarationFromGlobalUsageInAllLocales() {
